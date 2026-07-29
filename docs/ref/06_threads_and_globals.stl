@@ -1,0 +1,39 @@
+// Provisional Stainless syntax example.
+// Namespace-scope declarations have static storage duration without a
+// separate "global" keyword.
+
+namespace samples {
+
+struct Config {
+    i32 version;
+};
+
+const shared_ptr<Config> startup_config =
+    make_shared<Config>(Config{1});
+
+atomic_shared_ptr<Config> current_config =
+    atomic_shared_ptr<Config>(clone(startup_config));
+
+thread_local i32 reads_on_this_thread = 0;
+
+i32 read_current_version() {
+    shared_ptr<Config> snapshot = current_config.load();
+    reads_on_this_thread += 1;
+    return snapshot->version;
+}
+
+void install(shared_ptr<Config> replacement) {
+    current_config.store(move(replacement));
+}
+
+void worker(shared_ptr<Config> local) {
+    // Each thread owns its own handle. The pointee remains immutable.
+    i32 version = local->version;
+}
+
+void start_worker() {
+    thread background = spawn(worker, clone(startup_config));
+    background.join();
+}
+
+} // namespace samples

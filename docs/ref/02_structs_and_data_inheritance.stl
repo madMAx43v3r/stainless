@@ -1,0 +1,44 @@
+// Provisional Stainless syntax example.
+// Structs have a data-only representation. Their member functions are
+// declared inside the struct and defined outside it.
+
+namespace samples {
+
+struct Point2 {
+    f32 x;
+    f32 y;
+
+    f32 length_squared() const;
+};
+
+f32 Point2::length_squared() const {
+    return x * x + y * y;
+}
+
+struct Point3 : Point2 {
+    f32 z;
+
+    f32 length_squared_3d() const;
+};
+
+f32 Point3::length_squared_3d() const {
+    // Data-base fields participate in convenient field lookup.
+    return x * x + y * y + z * z;
+}
+
+f32 planar_length_squared(const Point2& point) {
+    return point.x * point.x + point.y * point.y;
+}
+
+f32 example() {
+    Point3 point = Point3{Point2{3.0f32, 4.0f32}, 12.0f32};
+
+    // A derived-struct reference safely coerces to its data-base reference.
+    const Point2& planar = point;
+
+    // Point2::length_squared is not inherited as behavior by Point3.
+    // Behavior reuse is explicit through the projected base reference.
+    return planar.length_squared() + planar_length_squared(point);
+}
+
+} // namespace samples

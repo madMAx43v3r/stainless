@@ -1,0 +1,44 @@
+// Provisional Stainless syntax example.
+// Numeric primitives, inference defaults, and literal suffixes follow Rust.
+
+namespace samples {
+
+i64 add_i64(i64 left, i64 right) {
+    return left + right;
+}
+
+u64 next_id(u64 current) {
+    return current + 1u64;
+}
+
+f32 rectangle_area_f32(f32 width, f32 height) {
+    return width * height;
+}
+
+f64 average_f64(f64 left, f64 right) {
+    return (left + right) / 2.0f64;
+}
+
+i32 default_integer_literal() {
+    auto value = 42;
+    return value;
+}
+
+f64 default_floating_literal() {
+    auto value = 0.5;
+    return value;
+}
+
+f32 suffixed_floating_literal() {
+    auto value = 0.5f32;
+    return value;
+}
+
+usize element_count(const vector<i32>& values) {
+    return values.size();
+}
+
+// Mixed-width arithmetic is invalid without an explicit conversion:
+// f64 invalid = 1.0f32 + 2.0f64;
+
+} // namespace samples

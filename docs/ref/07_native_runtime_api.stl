@@ -1,0 +1,26 @@
+// Provisional internal standard-library declarations.
+// Normal project source cannot use the native modifier.
+
+namespace std {
+
+interface native sealed vector_api<T> {
+    usize size() const;
+    bool empty() const;
+    void push_back(T value);
+};
+
+struct native vector<T> : vector_api<T> {
+    usize size() const;
+    bool empty() const;
+    void push_back(T value);
+};
+
+interface native sealed optional_api<T> {
+    bool has_value() const;
+};
+
+struct native optional<T> : optional_api<T> {
+    bool has_value() const;
+};
+
+} // namespace std

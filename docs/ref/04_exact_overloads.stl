@@ -1,0 +1,39 @@
+// Provisional Stainless syntax example.
+// Overloads match exact canonical parameter types and receive deterministic
+// target-Rust names.
+
+namespace samples {
+
+i32 select(i32 left, i32 right) {
+    return left;
+}
+
+string select(string left, string right) {
+    return move(left);
+}
+
+struct Selector {
+    i32 choose(i32 left, i32 right) const;
+    string choose(string left, string right) const;
+};
+
+i32 Selector::choose(i32 left, i32 right) const {
+    return right;
+}
+
+string Selector::choose(string left, string right) const {
+    return move(right);
+}
+
+i32 example() {
+    Selector selector;
+
+    auto first = select(10, 20);
+    auto second = selector.choose(30, 40);
+
+    // No numeric widening or user-defined conversion is considered when
+    // selecting either overload.
+    return first + second;
+}
+
+} // namespace samples
