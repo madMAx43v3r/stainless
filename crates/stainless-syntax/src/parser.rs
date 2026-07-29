@@ -1,6 +1,7 @@
 use rowan::{GreenNode, GreenNodeBuilder, TextRange, TextSize};
 
-use crate::{LexError, SyntaxKind, SyntaxNode, Token, lex};
+use crate::ast::AstNode;
+use crate::{LexError, SyntaxKind, SyntaxNode, Token, ast, lex};
 
 /// A recoverable parser diagnostic.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -32,6 +33,17 @@ impl Parse {
     #[must_use]
     pub fn syntax(&self) -> SyntaxNode {
         SyntaxNode::new_root(self.green.clone())
+    }
+
+    /// Returns the typed root of the concrete syntax tree.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if an internal parser invariant is violated and the root
+    /// node is not a source-file node.
+    #[must_use]
+    pub fn tree(&self) -> ast::SourceFile {
+        ast::SourceFile::cast(self.syntax()).expect("the parser always creates a source-file root")
     }
 
     /// Returns lexical and syntactic diagnostics in source order.

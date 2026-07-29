@@ -3,10 +3,10 @@
 Stainless is a new C++-like language that transpiles to Rust.
 
 > **Status:** early implementation. The language design remains provisional;
-> the Rust workspace now contains validated native bindings plus an initial
-> lossless lexer and Rowan parser for functions, blocks, expressions, control
-> flow, and classic/range `for` loops. Semantic lowering and Rust emission have
-> not started yet.
+> the Rust workspace now contains validated native bindings, a lossless lexer
+> and Rowan parser, typed CST views, compiler-owned AST lowering, and the first
+> structural semantic diagnostics. Name/type/ownership resolution and Rust
+> emission have not started yet.
 
 ## Project charter
 
@@ -1935,7 +1935,7 @@ proposal should answer all of the following before implementation:
 source
   -> tokens (including comments and whitespace)
   -> lossless concrete syntax tree (CST)
-  -> typed language AST
+  -> compiler-owned AST (not yet name- or type-resolved)
   -> imported Rust API and generated-wrapper metadata
   -> name, type, and ownership analysis
   -> small Rust-shaped high-level IR (HIR)
@@ -1944,19 +1944,22 @@ source
   -> Cargo/rustc validation
 ```
 
-The CST and semantic AST should remain separate. The CST retains the spelling,
-comments, and malformed input needed for diagnostics and future editor tools.
-The AST/HIR should contain only validated Stainless concepts with defined Rust
-semantics. Transpilation must happen from the validated HIR, not directly from
+The CST and compiler AST remain separate. The CST retains spelling, comments,
+and malformed input needed for diagnostics and future editor tools. The AST
+normalizes syntax for semantic passes and may contain explicit recovery nodes.
+The later HIR must contain only validated Stainless concepts with defined Rust
+semantics. Transpilation must happen from that validated HIR, not directly from
 parser nodes.
 
-### Implemented parser slice
+### Implemented front-end slice
 
 The `stainless-syntax` crate now exposes `lex(source)` and `parse(source)`.
 Lexing retains whitespace, line comments, block comments, invalid tokens, and
 UTF-8 byte ranges. Parsing produces an immutable Rowan green tree plus ordered,
 recoverable diagnostics; converting the root back to text reproduces the input
-exactly even when errors are present.
+exactly even when errors are present. `Parse::tree()` exposes zero-copy typed
+wrappers over that CST, including precise range and classic `for` header
+accessors.
 
 The current recursive-descent grammar handles:
 
@@ -1971,11 +1974,24 @@ The current recursive-descent grammar handles:
   indexing, prefix/postfix operators, assignment, and precedence-aware binary
   expressions.
 
-This is concrete-syntax acceptance only. Struct/class/interface declarations,
-constructors, exception statements, macros, aggregate initialization, and the
-remaining reference samples still need grammar productions. No parsed program
-is yet type-checked or transpiled, and accepting a CST shape does not imply
-that its ownership or type semantics are valid.
+`stainless_compiler::lowering::lower` converts the typed CST into a
+compiler-owned AST with source spans and explicit recovery forms.
+`stainless_compiler::analyze` combines parsing, lowering, and the currently
+implemented structural checks:
+
+- duplicate parameter names;
+- missing initializers on `auto` and reference locals;
+- forbidden ordinary-local `auto&` (it remains valid as a range binding);
+- `break` and `continue` outside a loop;
+- value returns from `void` functions and empty returns from non-`void`
+  functions.
+
+These are deliberately pre-resolution checks, not full type checking.
+Struct/class/interface declarations, constructors, exception statements,
+macros, aggregate initialization, and the remaining reference samples still
+need grammar productions. Calls, names, expression types, borrowing, and moves
+are not yet resolved, and no program is transpiled. Accepting a CST or AST
+shape therefore does not imply that all ownership or type semantics are valid.
 
 ## Cargo integration and compiler packaging
 
@@ -2070,21 +2086,23 @@ Rowan 0.16.1 through the workspace lockfile; other versions remain undecided.
 
 ## Recommended first implementation slice
 
-The first milestone should prove the whole architecture with a deliberately tiny
-language rather than attempt broad C++ compatibility:
+The first milestone should prove the whole architecture with a deliberately
+tiny language rather than attempt broad C++ compatibility. Current progress is
+recorded inline so implemented syntax is not confused with planned work:
 
-1. Start with `stainless-compiler`, then add the syntax, compact runtime, Cargo
-   build integration, and CLI crates when the first end-to-end slice reaches
-   those boundaries.
-2. Tokenize identifiers, literals, comments, punctuation, and keywords with
-   byte spans and lossless trivia.
-3. Parse namespaces, imports, function definitions, typed local bindings,
-   blocks, calls, arithmetic, `return`, `if`/`else`, and classic/range `for`
-   loops into a Rowan CST, including recoverable error nodes.
-4. Lower the CST to a small typed AST/HIR, classify every call as
-   Stainless-defined, direct standard Rust, generated external wrapper, or
-   intrinsic, and reject unresolved names and type mismatches before code
-   generation.
+1. **In progress:** `stainless-compiler` and `stainless-syntax` exist; add the
+   compact runtime, Cargo build integration, and CLI when the end-to-end slice
+   reaches those boundaries.
+2. **Implemented:** tokenize identifiers, literals, comments, punctuation, and
+   keywords with byte spans and lossless trivia.
+3. **Implemented for the listed subset:** parse namespaces, imports, function
+   definitions, typed local bindings, blocks, calls, arithmetic, `return`,
+   `if`/`else`, and classic/range `for` loops into a Rowan CST with recoverable
+   error nodes.
+4. **In progress:** typed CST views, AST lowering, and initial structural
+   validation are implemented. Name/type/ownership resolution, call
+   classification, HIR construction, and unresolved-name/type diagnostics
+   remain.
 5. Connect the initial `Vec` and `String` metadata to resolution and code
    generation, then generate one explicit wrapper for a small external Cargo
    dependency and prove that Cargo rejects a stale or incorrect binding.
