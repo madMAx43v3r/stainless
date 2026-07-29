@@ -27,21 +27,22 @@ f32 Point3::length_squared() const {
 }
 
 f32 planar_length_squared(const Point2& point) {
-    return point.x * point.x + point.y * point.y;
+    // The static receiver type is Point2, so this selects Point2's function.
+    return point.length_squared();
 }
 
 f32 example() {
     Point3 point = Point3{Point2{3.0f32, 4.0f32}, 12.0f32};
 
-    // A derived-struct reference safely coerces to its data-base reference.
-    const Point2& planar = point;
-
     // Same-named functions are selected from the static receiver type.
     f32 spatial = point.length_squared();
-    f32 projected = planar.length_squared();
 
-    // No virtual override occurs through the base reference.
-    return spatial + projected + planar_length_squared(point);
+    // Binding the argument projects Point3 to its Point2 data base. References
+    // exist only as parameters, so no local reference declaration is needed.
+    f32 projected = planar_length_squared(point);
+
+    // No virtual override occurs through the base reference parameter.
+    return spatial + projected;
 }
 
 } // namespace samples

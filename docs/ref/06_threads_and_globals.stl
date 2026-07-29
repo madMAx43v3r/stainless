@@ -12,14 +12,25 @@ const shared_ptr<Config> startup_config =
     make_shared<Config>(Config{1});
 
 atomic_shared_ptr<Config> current_config =
-    atomic_shared_ptr<Config>(clone(startup_config));
+    atomic_shared_ptr<Config>(startup_config);
 
 thread_local i32 reads_on_this_thread = 0;
 
-i32 read_current_version() {
-    shared_ptr<Config> snapshot = current_config.__load();
-    reads_on_this_thread += 1;
+i32 read_slot(const atomic_shared_ptr<Config>& slot) {
+    // Synchronized pointer slots are the sole pointer-handle type that may be
+    // passed by reference.
+    shared_ptr<Config> snapshot = slot.__load();
+
+    if (!snapshot) {
+        return -1;
+    }
+
     return snapshot.version;
+}
+
+i32 read_current_version() {
+    reads_on_this_thread += 1;
+    return read_slot(current_config);
 }
 
 void install(shared_ptr<Config> replacement) {
@@ -32,11 +43,16 @@ shared_ptr<Config> exchange(shared_ptr<Config> replacement) {
 
 void worker(shared_ptr<Config> local) {
     // Each thread owns its own handle. The pointee remains immutable.
+    if (!local) {
+        return;
+    }
+
     i32 version = local.version;
 }
 
 void start_worker() {
-    thread background = spawn(worker, clone(startup_config));
+    // Passing shared_ptr by value implicitly copies its thread-safe handle.
+    thread background = spawn(worker, startup_config);
     background.join();
 }
 

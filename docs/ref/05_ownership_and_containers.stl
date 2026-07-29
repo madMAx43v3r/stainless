@@ -12,6 +12,10 @@ Config make_config(i32 version, string name) {
     return Config{version, move(name)};
 }
 
+i32 read_version(const Config& config) {
+    return config.version;
+}
+
 usize vector_example() {
     vector<i32> values;
     values.push_back(10);
@@ -29,25 +33,28 @@ i32 unique_example() {
         make_unique<Config>(make_config(1, "development"));
 
     owner.version = 2;
-    i32 borrowed_version = 0;
+    i32 borrowed_version = read_version(owner);
 
-    {
-        Config& borrowed = *owner;
-        borrowed_version = borrowed.version;
-    }
-
-    // The borrow has ended, so the unique owner can now move.
+    // A reference can exist for a call, but not as a local variable. The
+    // parameter borrow has ended, so the unique owner can now move.
     unique_ptr<Config> relocated = move(owner);
     return borrowed_version + relocated.version;
 }
 
 i32 shared_example() {
-    shared_ptr<Config> current =
-        make_shared<Config>(make_config(1, "first"));
-    shared_ptr<Config> observer = clone(current);
+    // shared_ptr default construction creates a null handle.
+    shared_ptr<Config> current;
 
-    // Reassignment replaces only this handle. It does not mutate the Config
-    // observed by any other shared pointer.
+    if (!current) {
+        current = make_shared<Config>(make_config(1, "first"));
+    }
+
+    // Both paths reaching here establish that current is non-null. Pointee
+    // access uses a compiler-generated hidden const Config&.
+    shared_ptr<Config> observer = current;
+
+    // shared_ptr copies implicitly. Reassignment replaces only this handle; it
+    // does not mutate the Config observed by any other shared pointer.
     current = make_shared<Config>(make_config(2, "second"));
 
     // observer.version = 3; // Invalid: shared pointees are immutable.

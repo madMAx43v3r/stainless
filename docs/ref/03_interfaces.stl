@@ -58,5 +58,5 @@ i32 read_answer(const NamedAnswer& answer) {
 
 i32 main() {
     unique_ptr<samples::NamedAnswer> answer = samples::make_answer();
-    return answer.value();
+    return samples::read_answer(answer);
 }

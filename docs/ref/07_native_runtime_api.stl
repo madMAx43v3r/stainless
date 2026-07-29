@@ -10,6 +10,7 @@ interface native sealed vector_api<T> {
 };
 
 struct native vector<T> : vector_api<T> {
+    vector();
     usize size() const;
     bool empty() const;
     void push_back(T value);

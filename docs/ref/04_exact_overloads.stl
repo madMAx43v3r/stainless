@@ -8,8 +8,21 @@ i32 select(i32 left, i32 right) {
     return left;
 }
 
+// i32 select(const i32& left, const i32& right); // Invalid: this differs
+// from select(i32, i32) only in value/reference passing semantics.
+
 string select(string left, string right) {
     return move(left);
+}
+
+i32 inspect(const i32& value) {
+    return value;
+}
+
+i32 reborrow(i32& value) {
+    // A mutable reference may implicitly reborrow as const after inspect has
+    // been selected. The conversion does not participate in overload ranking.
+    return inspect(value);
 }
 
 struct Selector {
