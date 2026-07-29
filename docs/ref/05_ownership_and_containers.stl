@@ -28,7 +28,7 @@ i32 unique_example() {
     unique_ptr<Config> owner =
         make_unique<Config>(make_config(1, "development"));
 
-    owner->version = 2;
+    owner.version = 2;
     i32 borrowed_version = 0;
 
     {
@@ -38,7 +38,7 @@ i32 unique_example() {
 
     // The borrow has ended, so the unique owner can now move.
     unique_ptr<Config> relocated = move(owner);
-    return borrowed_version + relocated->version;
+    return borrowed_version + relocated.version;
 }
 
 i32 shared_example() {
@@ -50,8 +50,8 @@ i32 shared_example() {
     // observed by any other shared pointer.
     current = make_shared<Config>(make_config(2, "second"));
 
-    // observer->version = 3; // Invalid: shared pointees are immutable.
-    return observer->version + current->version;
+    // observer.version = 3; // Invalid: shared pointees are immutable.
+    return observer.version + current.version;
 }
 
 } // namespace samples

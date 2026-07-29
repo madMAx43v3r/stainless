@@ -18,10 +18,10 @@ f32 Point2::length_squared() const {
 struct Point3 : Point2 {
     f32 z;
 
-    f32 length_squared_3d() const;
+    f32 length_squared() const;
 };
 
-f32 Point3::length_squared_3d() const {
+f32 Point3::length_squared() const {
     // Data-base fields participate in convenient field lookup.
     return x * x + y * y + z * z;
 }
@@ -36,9 +36,12 @@ f32 example() {
     // A derived-struct reference safely coerces to its data-base reference.
     const Point2& planar = point;
 
-    // Point2::length_squared is not inherited as behavior by Point3.
-    // Behavior reuse is explicit through the projected base reference.
-    return planar.length_squared() + planar_length_squared(point);
+    // Same-named functions are selected from the static receiver type.
+    f32 spatial = point.length_squared();
+    f32 projected = planar.length_squared();
+
+    // No virtual override occurs through the base reference.
+    return spatial + projected + planar_length_squared(point);
 }
 
 } // namespace samples

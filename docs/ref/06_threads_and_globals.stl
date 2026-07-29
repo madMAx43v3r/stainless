@@ -17,18 +17,22 @@ atomic_shared_ptr<Config> current_config =
 thread_local i32 reads_on_this_thread = 0;
 
 i32 read_current_version() {
-    shared_ptr<Config> snapshot = current_config.load();
+    shared_ptr<Config> snapshot = current_config.__load();
     reads_on_this_thread += 1;
-    return snapshot->version;
+    return snapshot.version;
 }
 
 void install(shared_ptr<Config> replacement) {
-    current_config.store(move(replacement));
+    current_config.__store(move(replacement));
+}
+
+shared_ptr<Config> exchange(shared_ptr<Config> replacement) {
+    return current_config.__swap(move(replacement));
 }
 
 void worker(shared_ptr<Config> local) {
     // Each thread owns its own handle. The pointee remains immutable.
-    i32 version = local->version;
+    i32 version = local.version;
 }
 
 void start_worker() {

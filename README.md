@@ -188,6 +188,12 @@ definitions must satisfy every required interface function. A `native`
 declaration is the exception because its definition is supplied by the trusted
 runtime.
 
+A data-derived struct may independently declare a function with the same name
+and parameter types as a function declared by its data base. This is not an
+override and does not create dynamic dispatch. A call on the derived struct uses
+the derived declaration; a call through a projected base reference uses the base
+declaration.
+
 For example, data inheritance lowers conceptually as follows:
 
 ```cpp
@@ -260,6 +266,21 @@ identifiers.
 
 The set of modifiers valid for each declaration kind will be explicit in the
 grammar. They must not be parsed as general prefix modifiers.
+
+### Reserved implementation identifiers
+
+Every identifier beginning with `__` is reserved for the Stainless compiler,
+bundled standard library, and Rust runtime. Project source cannot declare a
+function, type, namespace, field, parameter, local variable, or other symbol
+whose name begins with this prefix. A leading single underscore remains
+available to project code.
+
+User code may call documented compiler-provided operations with reserved names,
+such as `atomic_shared_ptr<T>::__load()`, but cannot define, overload, shadow,
+or replace them. Generated Rust symbols may also use a `__stainless` prefix,
+giving the backend a namespace that cannot collide with source declarations.
+The lexer still treats these spellings as identifiers; name validation enforces
+the reservation and reports their declaration as an error.
 
 ### Primitive numeric types
 
@@ -359,7 +380,43 @@ invalidates the previous binding.
   strong count; it neither changes the old pointee nor redirects other handles.
 - Duplicating shared ownership is explicit, using `clone(pointer)`, and lowers
   to `Arc::clone`.
-- `weak_ptr<T>::lock()` returns `optional<shared_ptr<T>>`.
+- `lock(pointer)` converts a live `weak_ptr<T>` to
+  `optional<shared_ptr<T>>`.
+
+#### Member access and owning-pointer operations
+
+Stainless does not have C++'s `->` member-access operator. The `.` operator
+automatically dereferences references, `unique_ptr<T>`, and `shared_ptr<T>` when
+resolving a field or member function on `T`:
+
+```cpp
+unique_ptr<Config> unique = make_unique<Config>(/* ... */);
+unique.version = 2;
+
+shared_ptr<Config> shared = make_shared<Config>(/* ... */);
+i32 version = shared.version;
+```
+
+Automatic receiver dereferencing is a member-access rule, not a general
+implicit conversion used during overload selection. A mutable unique owner may
+provide mutable member access when borrowing permits it; a shared owner always
+provides const member access. The same dot syntax calls an interface function
+through an owning interface pointer.
+
+`unique_ptr<T>` and `shared_ptr<T>` do not expose their own member functions, so
+their operations cannot collide with members of `T`. Ownership operations use
+free functions:
+
+- `move(pointer)` transfers an owning handle.
+- `clone(pointer)` duplicates a shared handle.
+- `drop(pointer)` releases a handle early.
+- `downgrade(pointer)` creates a `weak_ptr<T>` from a `shared_ptr<T>`.
+- `lock(pointer)` attempts to promote a weak handle.
+
+No `get`, `release`, `reset`, pointer arithmetic, or raw-pointer escape is
+provided. `atomic_shared_ptr<T>` is a synchronized slot rather than a
+dereferenceable owning pointer, so its own `__load`, `__store`, and `__swap`
+operations continue to use dot syntax.
 
 #### Thread safety
 
@@ -389,9 +446,9 @@ Globally replaceable shared state uses `atomic_shared_ptr<T>`, not an ordinary
 `shared_ptr<T>`. It changes which immutable allocation a synchronized slot
 points to; it never mutates a pointee:
 
-- `load()` returns a cloned `shared_ptr<T>` snapshot.
-- `store(new_value)` replaces the slot's handle.
-- `swap(new_value)` replaces the handle and returns the previous one.
+- `__load()` returns a cloned `shared_ptr<T>` snapshot.
+- `__store(new_value)` replaces the slot's handle.
+- `__swap(new_value)` replaces the handle and returns the previous one.
 - Existing snapshots continue to refer to the old allocation.
 
 The initial Rust lowering may use `RwLock<Arc<T>>`; a more specialized atomic
@@ -412,7 +469,7 @@ Namespace-scope declarations must use one of the following safe forms:
   Threads may access it directly or clone their own handles when `T` is
   `Send + Sync`.
 - A synchronization-aware type such as `atomic_shared_ptr<T>` may be changed
-  through its `load`, `store`, and `swap` operations.
+  through its `__load`, `__store`, and `__swap` operations.
 - `thread_local T value = ...;` gives each thread an independent instance.
 
 An ordinary mutable namespace-scope variable is rejected because it would
