@@ -1,0 +1,39 @@
+// Provisional Stainless syntax example.
+// C++-style range loops make borrowing, copying, and consuming explicit.
+// This file is an executable lossless-parser fixture.
+
+use rust::Vec;
+
+namespace samples {
+
+i32 sum_shared(const Vec<i32>& values) {
+    i32 result = 0;
+    for (const auto& value : values) {
+        result += value;
+    }
+    return result;
+}
+
+void increment_all(Vec<i32>& values) {
+    for (auto& value : values) {
+        value += 1;
+    }
+}
+
+i32 sum_copies(const Vec<i32>& values) {
+    i32 result = 0;
+    for (auto value : values) {
+        result += value;
+    }
+    return result;
+}
+
+i32 consume_values(Vec<i32> values) {
+    i32 result = 0;
+    for (auto value : move(values)) {
+        result += value;
+    }
+    return result;
+}
+
+} // namespace samples

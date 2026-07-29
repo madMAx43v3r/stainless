@@ -1,5 +1,6 @@
 // Provisional Stainless syntax example.
-// This is a design reference, not yet an executable compiler test.
+// This file is now an executable lossless-parser fixture. Type checking and
+// transpilation are not implemented yet.
 
 namespace samples {
 

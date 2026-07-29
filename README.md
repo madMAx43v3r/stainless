@@ -3,9 +3,10 @@
 Stainless is a new C++-like language that transpiles to Rust.
 
 > **Status:** early implementation. The language design remains provisional;
-> the Rust compiler crate now contains the first validated native bindings for
-> `rust::Vec<T>` and `rust::String`, while parsing and Rust emission have not
-> started yet.
+> the Rust workspace now contains validated native bindings plus an initial
+> lossless lexer and Rowan parser for functions, blocks, expressions, control
+> flow, and classic/range `for` loops. Semantic lowering and Rust emission have
+> not started yet.
 
 ## Project charter
 
@@ -32,9 +33,10 @@ syntax.
 
 ## Provisional syntax examples
 
-The `.stl` files in [`docs/ref`](docs/ref/) show the intended source style
-before the parser exists. They are design references rather than a stable
-language specification or executable test suite:
+The `.stl` files in [`docs/ref`](docs/ref/) show the intended source style.
+They are design references rather than a stable language specification; files
+become executable parser or transpilation fixtures as their language slice is
+implemented:
 
 - [`01_basics.stl`](docs/ref/01_basics.stl) — functions, namespaces, local
   variables, and control flow.
@@ -65,9 +67,12 @@ language specification or executable test suite:
   compiler-supported `rust::Vec<T>` and `rust::String` surface.
 - [`12_reference_returns.stl`](docs/ref/12_reference_returns.stl) — direct
   reference returns tied to a receiver or one reference parameter.
+- [`13_range_for.stl`](docs/ref/13_range_for.stl) — shared, mutable, copied,
+  and explicitly consumed C++-style range loops.
 
-As syntax and semantics become executable, these examples should be converted
-into parser, diagnostic, and transpilation fixtures rather than allowed to
+`01_basics.stl` and `13_range_for.stl` are currently parsed losslessly in the
+test suite. Other samples remain forward-looking and must become explicit
+parser, diagnostic, and transpilation fixtures rather than being allowed to
 drift from the implementation.
 
 ## Language boundaries
@@ -435,13 +440,60 @@ const auto name = "stainless";
 
 It is not initially accepted for fields, parameters, function return types, or
 declarations without an initializer. Ordinary `auto&` and `const auto&` local
-declarations are rejected; the compiler-native guarded `require` declaration
-described below is the only inferred local-reference form. A typed
+declarations are rejected. The compiler-native guarded `require` declaration
+and a range-for binding are the two inferred local-reference forms. A typed
 `catch (const Error& error)` binder is a separate compiler-managed reference.
 Copy and move rules apply after deduction: a named copyable initializer is
 copied, while a named non-copy value still requires `move(value)`.
 `auto value = nullptr;` is rejected because the pointee type cannot be inferred,
 and a fluent `void` chain receiver cannot be captured with `auto`.
+
+### Range-based `for` loops
+
+Stainless supports C++ range-for syntax. The binding determines whether
+iteration borrows or copies its elements:
+
+```cpp
+for (const auto& value : values) {
+    inspect(value);
+}
+
+for (auto& value : values) {
+    value.normalize();
+}
+
+for (auto value : values) {
+    consume_copy(value);
+}
+```
+
+- `const auto& value` creates a shared element borrow and lowers to borrowed
+  Rust iteration such as `for value in &values`. The range remains immutably
+  borrowed until the loop's last use.
+- `auto& value` creates a mutable element borrow and requires a mutable lvalue
+  range. It lowers to iteration through `&mut values` and excludes every other
+  access to the range while each borrow is active.
+- `auto value` does not implicitly consume a named range. It applies ordinary
+  Stainless copy construction to each borrowed element, so the element type
+  must be copyable.
+- `auto value : move(values)` explicitly consumes a named range and moves its
+  elements. A fresh temporary range may likewise be consumed without `move`
+  because it has no source binding that could be used afterward.
+- Explicit `T`, `const T&`, and `T&` bindings are also accepted, but their
+  canonical element type must match exactly. Range iteration never introduces
+  an implicit conversion for the binding.
+
+The range expression is evaluated exactly once. Its iterator and binding remain
+compiler-managed locals, the binding's scope is the loop body, and normal
+`break`/`continue` control flow applies. A borrowed loop binding may escape only
+through a direct reference return already proven to originate from the range's
+owner; it cannot be stored or captured independently.
+
+The initial semantic implementation will support `rust::Vec<T>`. Other native
+types require binding metadata for shared, mutable, and owned iteration modes.
+Rust `String` is not implicitly treated as a character range because it does
+not implement Rust's owned `IntoIterator` API. Structured bindings, index-aware
+range syntax, and C++ forwarding references such as `auto&&` are deferred.
 
 ### Reserved implementation identifiers
 
@@ -785,7 +837,8 @@ borrow additionally excludes every other access to the owner. Rust's
 non-lexical lifetime analysis verifies the emitted borrow boundaries, while
 the Stainless semantic pass remains responsible for source-level diagnostics.
 Ordinary `auto&` and `const auto&` inference remains unavailable; guarded
-`require` declarations retain their dedicated inferred-reference syntax.
+`require` declarations and range-for bindings retain their dedicated
+inferred-reference syntax.
 
 Reference binding follows these rules:
 
@@ -1897,6 +1950,33 @@ The AST/HIR should contain only validated Stainless concepts with defined Rust
 semantics. Transpilation must happen from the validated HIR, not directly from
 parser nodes.
 
+### Implemented parser slice
+
+The `stainless-syntax` crate now exposes `lex(source)` and `parse(source)`.
+Lexing retains whitespace, line comments, block comments, invalid tokens, and
+UTF-8 byte ranges. Parsing produces an immutable Rowan green tree plus ordered,
+recoverable diagnostics; converting the root back to text reproduces the input
+exactly even when errors are present.
+
+The current recursive-descent grammar handles:
+
+- namespace blocks and losslessly retained `use` declarations;
+- function declarations and definitions, qualified names, parameters,
+  reference types, generic type arguments, `const`, and `throws` clauses;
+- blocks, initialized or default-constructed local declarations, `return`,
+  `if`/`else`, `break`, `continue`, and empty statements;
+- classic `for (init; condition; update)` and range
+  `for (binding : expression)` statements;
+- names and paths, literals, parenthesized expressions, calls, member access,
+  indexing, prefix/postfix operators, assignment, and precedence-aware binary
+  expressions.
+
+This is concrete-syntax acceptance only. Struct/class/interface declarations,
+constructors, exception statements, macros, aggregate initialization, and the
+remaining reference samples still need grammar productions. No parsed program
+is yet type-checked or transpiled, and accepting a CST shape does not imply
+that its ownership or type semantics are valid.
+
 ## Cargo integration and compiler packaging
 
 The target packaging is a Cargo workspace with five publishable crates:
@@ -1916,9 +1996,9 @@ A procedural macro is not used because whole-file parsing, external manifests,
 generated modules, dependency shims, and source-mapped diagnostics fit a build
 step better.
 
-The repository currently starts with `stainless-compiler`; the remaining
-crates will be added when an executable compiler slice needs their public
-boundaries.
+The repository currently contains `stainless-syntax` and
+`stainless-compiler`; the runtime, Cargo integration, and CLI crates will be
+added when an executable compiler slice needs their public boundaries.
 
 An existing Rust package integrates Stainless explicitly:
 
@@ -1960,15 +2040,15 @@ versions are rejected.
 
 ## Rust library survey
 
-Research snapshot: 2026-07-29. Versions should be selected and locked when the
-first compiler spike is created rather than copied from this document.
+Research snapshot: 2026-07-29. The first parser slice pins Logos 0.16.1 and
+Rowan 0.16.1 through the workspace lockfile; other versions remain undecided.
 
 | Area | Candidate | Assessment |
 | --- | --- | --- |
-| Lexing | [`logos`](https://docs.rs/logos/latest/logos/) | **Recommended.** Rust-native, derive-based, fast, and provides byte spans. Trivia should be tokenized rather than skipped so the CST stays lossless. Context-dependent token combinations can be handled by the parser. |
+| Lexing | [`logos`](https://docs.rs/logos/latest/logos/) | **In use.** Rust-native, derive-based, fast, and provides byte spans. Trivia is tokenized rather than skipped so the CST stays lossless. Context-dependent token combinations are handled by the parser. |
 | Parsing | Hand-written recursive descent plus a Pratt expression parser | **Selected.** This gives precise control over C++-like ambiguities, recovery, contextual keywords, and CST events while keeping the grammar and compiler fully in Rust. |
 | Parsing alternative | [`chumsky`](https://docs.rs/chumsky/latest/chumsky/) | **Not selected initially.** It remains a possible later replacement if the hand-written parser's recovery or maintenance cost proves poor, but the first compiler will not carry two parser implementations. |
-| Lossless CST | [`rowan`](https://docs.rs/rowan/latest/rowan/) | **Recommended.** It provides immutable green trees, syntax nodes/tokens, text ranges, and typed-AST support while leaving the language-specific node model to us. It is a tree library, not a parser. |
+| Lossless CST | [`rowan`](https://docs.rs/rowan/latest/rowan/) | **In use.** It provides immutable green trees, syntax nodes/tokens, text ranges, and typed-AST support while leaving the language-specific node model to us. It is a tree library, not a parser. |
 | CST schema/code generation | [`ungrammar`](https://docs.rs/ungrammar/latest/ungrammar/) | **Optional later.** Useful for declaring CST shapes and generating typed wrappers. It explicitly does not generate a parser, so it is not needed for the first slice. |
 | Diagnostics | [`miette`](https://docs.rs/miette/latest/miette/) | **Recommended at the public API/CLI boundary.** It supports structured diagnostics, source spans, labels, error codes, rich terminal output, and a narratable renderer. Internal compiler diagnostics should remain our own data types. |
 | Rust emission | [`proc-macro2`](https://docs.rs/proc-macro2/latest/proc_macro2/), [`quote`](https://docs.rs/quote/latest/quote/), [`syn`](https://docs.rs/syn/latest/syn/), and [`prettyplease`](https://docs.rs/prettyplease/latest/prettyplease/) | **Recommended when code generation starts.** Generate structured Rust tokens/AST, validate them with `syn`, and format with `prettyplease` without requiring an installed `rustfmt`. Avoid using string concatenation as the semantic code generator. |
@@ -1996,10 +2076,11 @@ language rather than attempt broad C++ compatibility:
 1. Start with `stainless-compiler`, then add the syntax, compact runtime, Cargo
    build integration, and CLI crates when the first end-to-end slice reaches
    those boundaries.
-2. Tokenize identifiers, literals, comments, punctuation, and a few keywords
-   with byte spans and lossless trivia.
-3. Parse function definitions, typed local bindings, blocks, calls, arithmetic,
-   `return`, and `if`/`else` into a Rowan CST, including recoverable error nodes.
+2. Tokenize identifiers, literals, comments, punctuation, and keywords with
+   byte spans and lossless trivia.
+3. Parse namespaces, imports, function definitions, typed local bindings,
+   blocks, calls, arithmetic, `return`, `if`/`else`, and classic/range `for`
+   loops into a Rowan CST, including recoverable error nodes.
 4. Lower the CST to a small typed AST/HIR, classify every call as
    Stainless-defined, direct standard Rust, generated external wrapper, or
    intrinsic, and reject unresolved names and type mismatches before code

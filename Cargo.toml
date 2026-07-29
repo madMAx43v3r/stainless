@@ -1,11 +1,15 @@
 [workspace]
-members = ["crates/stainless-compiler"]
+members = ["crates/stainless-compiler", "crates/stainless-syntax"]
 resolver = "3"
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
 rust-version = "1.97"
+
+[workspace.dependencies]
+logos = "0.16.1"
+rowan = "0.16.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
