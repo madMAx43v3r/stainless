@@ -40,6 +40,8 @@ on constructs with direct Rust equivalents:
   classes;
 - interfaces and interface inheritance implemented as Rust traits,
   supertraits, and trait objects where dynamic dispatch is required;
+- safe dynamic allocation with ownership represented by `unique_ptr<T>`,
+  `shared_ptr<T>`, and `weak_ptr<T>`;
 - value semantics, explicit moves, borrowing, and references governed by
   Rust-like ownership rules;
 - type inference where C++ would commonly use `auto`;
@@ -204,6 +206,137 @@ may lower conceptually to Rust functions named `parse__i32` and
 `parse__string`. The final mangling scheme must also handle modules, methods,
 references, generic arguments, and collisions without relying on this
 illustrative spelling.
+
+### Dynamic allocation and owning pointers
+
+Dynamic allocation is supported only through ownership-bearing types. Stainless
+does not have an owning raw-pointer form:
+
+| Stainless | Rust lowering | Semantics |
+| --- | --- | --- |
+| `unique_ptr<T>` | `Box<T>` | One non-null owner; movable but not copyable |
+| `shared_ptr<T>` | `Arc<T>` | Non-null, atomically reference-counted, immutable shared ownership |
+| `weak_ptr<T>` | `Weak<T>` | Non-owning observation that does not keep the allocation alive |
+| `optional<unique_ptr<T>>` | `Option<Box<T>>` | Nullable unique ownership |
+| `optional<shared_ptr<T>>` | `Option<Arc<T>>` | Nullable shared ownership |
+| `atomic_shared_ptr<T>` | Initially `RwLock<Arc<T>>` | Synchronized, replaceable shared handle |
+| `vector<T>` | `Vec<T>` | Owned dynamically sized sequence |
+
+Allocation uses `make_unique<T>(...)` or `make_shared<T>(...)`. There is no
+owning `new`, `delete`, placement allocation, or dynamically allocated C-style
+array. `drop(value)` may release an owning handle before the end of its scope;
+otherwise destruction happens automatically. The initial allocation-failure
+behavior follows ordinary Rust allocation and aborts instead of throwing an
+exception.
+
+`unique_ptr<T>` permits mutation of its pointee when the pointer binding is
+mutable and no active borrow prevents it. Moving it transfers ownership and
+invalidates the previous binding.
+
+`shared_ptr<T>` deliberately provides immutable shared data:
+
+- Dereferencing it yields only a shared/const reference.
+- Fields cannot be assigned through it, a mutable reference cannot be extracted
+  from it, and mutating methods cannot be called through it.
+- Stainless does not expose `Arc::get_mut`, copy-on-write operations such as
+  `Arc::make_mut`, or an interior-mutability escape hatch.
+- Reassigning a mutable `shared_ptr<T>` binding to a new pointer is allowed.
+  Reassignment replaces only that handle and decrements the old allocation's
+  strong count; it neither changes the old pointee nor redirects other handles.
+- Duplicating shared ownership is explicit, using `clone(pointer)`, and lowers
+  to `Arc::clone`.
+- `weak_ptr<T>::lock()` returns `optional<shared_ptr<T>>`.
+
+#### Thread safety
+
+Atomic reference counting makes the ownership control block thread-safe; it
+does not make concurrent mutation of one pointer binding safe. Stainless
+therefore applies all of the following rules:
+
+- A `shared_ptr<T>` may cross a thread boundary only when `T` satisfies the
+  equivalents of Rust's `Send` and `Sync` traits. `Send` permits ownership and
+  destruction on another thread; `Sync` permits concurrent shared references.
+- These properties are structural for generated types: a struct or class is
+  sendable and shareable only when all of its fields are. Stainless code cannot
+  provide an unchecked manual implementation of either property.
+- A shared interface pointer crossing a thread boundary lowers to
+  `Arc<dyn Interface + Send + Sync>`. Every concrete class stored in it must
+  satisfy both bounds.
+- Each thread receives its own handle through `clone(pointer)` or an ownership
+  move. Atomic reference counts make concurrent cloning and dropping of
+  separate handles safe.
+- A thread may reassign its own local handle. The same mutable pointer binding
+  cannot be concurrently accessed or reassigned by multiple threads.
+- An ordinary global `shared_ptr<T>` binding is immutable after initialization,
+  so threads may only load or clone it. An ordinary mutable global shared
+  pointer is rejected.
+
+Globally replaceable shared state uses `atomic_shared_ptr<T>`, not an ordinary
+`shared_ptr<T>`. It changes which immutable allocation a synchronized slot
+points to; it never mutates a pointee:
+
+- `load()` returns a cloned `shared_ptr<T>` snapshot.
+- `store(new_value)` replaces the slot's handle.
+- `swap(new_value)` replaces the handle and returns the previous one.
+- Existing snapshots continue to refer to the old allocation.
+
+The initial Rust lowering may use `RwLock<Arc<T>>`; a more specialized atomic
+implementation can replace it later without changing these semantics.
+
+#### Namespace-scope variables
+
+Stainless follows C++ syntax: every variable declared at namespace scope has
+static storage duration. There is no separate `global` keyword. A namespace
+qualifier controls where the name is found, while `static` at namespace scope
+controls linkage/visibility rather than whether the variable is global.
+
+Namespace-scope declarations must use one of the following safe forms:
+
+- `const T value = ...;` declares an immutable global. It may be accessed from
+  multiple threads only when `T` is `Sync`.
+- `const shared_ptr<T> value = ...;` declares an immutable global handle.
+  Threads may access it directly or clone their own handles when `T` is
+  `Send + Sync`.
+- A synchronization-aware type such as `atomic_shared_ptr<T>` may be changed
+  through its `load`, `store`, and `swap` operations.
+- `thread_local T value = ...;` gives each thread an independent instance.
+
+An ordinary mutable namespace-scope variable is rejected because it would
+require Rust `static mut`-like unsynchronized access. It must instead be made
+immutable, thread-local, or represented by an explicitly synchronized type.
+Threads may refer to safe namespace-scope variables directly; the values do not
+need to be passed as thread arguments.
+
+Constant global initializers may lower directly to Rust statics. Runtime global
+initialization requires a thread-safe one-time initialization mechanism such as
+`OnceLock`; its precise source-order and failure semantics must be specified
+before runtime-initialized globals are implemented.
+
+The Stainless type checker must enforce the thread-boundary rules itself so it
+can issue source-level diagnostics. Generated Rust retains the corresponding
+`Send`/`Sync` bounds, allowing `rustc` to verify them again. Combined with the
+ban on mutable pointee access, unsafe code, owning raw pointers, and
+interior-mutability escape hatches, this provides the language's data-race
+guarantee.
+
+For classes, a `unique_ptr<Class>` or `shared_ptr<Class>` may coerce to the
+corresponding pointer to an implemented interface. These ownership-preserving
+interface coercions lower to `Box<dyn Interface>` or `Arc<dyn Interface>`.
+Like data-base reference coercion, they apply only after a target type or
+function has been selected and do not make an overload candidate match.
+
+For example:
+
+```cpp
+shared_ptr<Config> current = make_shared<Config>(/* ... */);
+shared_ptr<Config> observer = clone(current);
+
+current = make_shared<Config>(/* replacement */);
+```
+
+The assignment changes `current` to refer to a new immutable `Config`.
+`observer` continues to refer to the original value until its own handle is
+dropped or reassigned.
 
 This list is a starting policy, not a complete specification. Any feature
 proposal should answer all of the following before implementation:
