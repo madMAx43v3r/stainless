@@ -32,11 +32,18 @@ syntax.
 The exact syntax still needs to be specified. The initial language should focus
 on constructs with direct Rust equivalents:
 
-- functions, blocks, local bindings, control flow, structs, enums, and methods;
+- functions, blocks, local bindings, control flow, structs, classes, enums, and
+  methods;
 - namespaces/modules and explicit imports rather than textual inclusion;
+- pure-data structs with data-only inheritance implemented as composition;
+- sealed classes that can implement interfaces but cannot inherit other
+  classes;
+- interfaces and interface inheritance implemented as Rust traits,
+  supertraits, and trait objects where dynamic dispatch is required;
 - value semantics, explicit moves, borrowing, and references governed by
   Rust-like ownership rules;
 - type inference where C++ would commonly use `auto`;
+- function and method overloads resolved by exact parameter types;
 - a deliberately constrained form of parametric generics, once its lowering is
   specified.
 
@@ -44,16 +51,159 @@ The following C++ features should not be accepted in the initial language
 because they have no direct, general safe-Rust translation:
 
 - the preprocessor, textual `#include`, and C/C++ macros;
-- class inheritance, virtual inheritance, and C++ RTTI;
-- function overloading, default arguments, and implicit conversions;
+- behavioral/class implementation inheritance, virtual concrete-class methods
+  outside interface contracts, method overriding between classes, virtual
+  inheritance, and C++ RTTI;
+- default arguments and implicit conversions other than the explicitly defined
+  data-base reference coercion;
 - unrestricted templates, specialization, SFINAE, and template metaprogramming;
 - raw-pointer arithmetic and manual `new`/`delete` memory management;
 - exceptions (`throw`, `try`, and `catch`);
 - C-style variadics, `goto`, and unrestricted unions.
 
-Destructors/`Drop`, operator traits, dynamic dispatch, FFI, async code, and
-other less-direct mappings are deferred. Each needs a written source-level
-semantic model and lowering rule before it becomes part of the language.
+Destructors/`Drop`, operator traits, FFI, async code, and other less-direct
+mappings are deferred. Each needs a written source-level semantic model and
+lowering rule before it becomes part of the language.
+
+### Inheritance model
+
+Stainless gives `struct`, `class`, and `interface` distinct roles instead of
+using them as nearly interchangeable spellings.
+
+An `interface` is behavior-only:
+
+- It contains method signatures but no instance data, constructors, or
+  destructors.
+- Interface inheritance lowers directly to Rust supertraits.
+- An interface may inherit only from other interfaces.
+- A class may implement one or more interfaces.
+- Interface calls may use static dispatch when the concrete class is known or
+  Rust trait-object dispatch when a dynamic interface value is required.
+
+A `struct` is data-only:
+
+- Its declaration contains fields, data-base declarations, and data-related
+  metadata, but no methods.
+- A struct may inherit data only from another struct. This is not subtype
+  inheritance: it lowers to an embedded Rust field containing the base value.
+- A struct cannot inherit or implement an interface and cannot inherit from a
+  class.
+- Inherited fields may use convenient source-level lookup, but the compiler
+  lowers that access to the corresponding embedded-field path. Ambiguous field
+  names must be diagnosed rather than selected by an implicit precedence rule.
+- A reference to a derived struct implicitly coerces to a reference to its data
+  base. This lowers to a safe reference projection such as `&derived.base` or
+  `&mut derived.base`, follows the normal mutability/reborrowing rules, and may
+  traverse multiple unambiguous levels of data inheritance.
+- This reference coercion never converts or slices an owned derived value,
+  permits a base-to-derived downcast, or introduces runtime type information.
+  If the same base is reachable through more than one data-inheritance path,
+  the source must select the intended base path explicitly.
+- There are no virtual data bases, compiler-inserted vtable pointers, C++ object
+  slicing, or C++ layout/ABI guarantees. An explicitly declared field may still
+  contain an interface value whose Rust representation carries trait-object
+  metadata.
+
+A `class` combines data with behavior but is sealed against class inheritance:
+
+- A class may declare its own fields, methods, and implementations of interface
+  methods.
+- A class cannot inherit from another class or from a struct. Data reuse must
+  use fields and composition.
+- A class may implement interfaces, but there is no class method inheritance or
+  overriding. Only calls made through an interface participate in virtual
+  dispatch.
+- An ordinary class method is statically dispatched and cannot be marked
+  `virtual`. An interface method implementation supplies behavior for its
+  interface slot; it does not override a method inherited from another class.
+- Classes may therefore require vtable-based dispatch, while structs are
+  guaranteed never to do so.
+
+“Vtable pointer” describes the semantic distinction using C++ terminology, not
+an object-layout promise. In generated Rust, the vtable metadata will normally
+be carried by a `dyn Interface` fat pointer rather than stored inside the
+concrete class value. Stainless must not expose or depend on the physical vtable
+layout.
+
+Functions and associated functions that operate on a struct are declared in a
+separate implementation construct. They are not members of its data declaration,
+are not inherited by data-derived structs, and cannot be virtual or overridden.
+Reuse of behavior must be explicit: call a base-value function or extract a
+helper function.
+
+For example, data inheritance lowers conceptually as follows:
+
+```cpp
+struct Point2 {
+    float x;
+    float y;
+}
+
+struct Point3 : Point2 {
+    float z;
+}
+```
+
+```rust
+struct Point2 {
+    x: f32,
+    y: f32,
+}
+
+struct Point3 {
+    base: Point2,
+    z: f32,
+}
+```
+
+Consequently, a Stainless reference conversion conceptually lowers as follows:
+
+```cpp
+Point3& derived = /* ... */;
+Point2& base = derived;
+```
+
+```rust
+let derived: &mut Point3 = /* ... */;
+let base: &mut Point2 = &mut derived.base;
+```
+
+The final Stainless syntax may give the embedded base a stable explicit name;
+that decision must be made before field lookup and multiple data bases are
+implemented.
+
+### Function overloading
+
+Stainless supports function and method overloads with deliberately simpler
+rules than C++:
+
+- An overload is selected using the exact canonical types of its arguments.
+  Type aliases may be normalized, but the compiler must not insert numeric
+  widening, borrowing, dereferencing, user-defined conversions, or other
+  implicit conversions to make a candidate match.
+- Data-base reference coercion is likewise not used to make an overload
+  candidate match. It may be applied after a function has already been selected
+  unambiguously, such as for a call to a non-overloaded function.
+- The return type does not participate in overload selection.
+- A call that has no exact match, or more than one exact match, is a compile
+  error with the candidate signatures shown in its diagnostic.
+- Default arguments and variadic overloads are not supported.
+- Every overload lowers to a unique, deterministic Rust name derived from its
+  fully qualified Stainless name and canonical parameter types. The mangling
+  format will be versioned and specified before it becomes a compatibility
+  promise; it must not depend on randomized or implementation-defined hashing.
+
+For example, these Stainless declarations:
+
+```cpp
+int parse(int value);
+int parse(string value);
+```
+
+may lower conceptually to Rust functions named `parse__i32` and
+`parse__string`. The final mangling scheme must also handle modules, methods,
+references, generic arguments, and collisions without relying on this
+illustrative spelling.
 
 This list is a starting policy, not a complete specification. Any feature
 proposal should answer all of the following before implementation:
