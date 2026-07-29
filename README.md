@@ -55,6 +55,9 @@ language specification or executable test suite:
 - [`09_value_semantics.stl`](docs/ref/09_value_semantics.stl) — default
   construction, implicit struct copies, explicit moves, and explicit class
   cloning.
+- [`10_checked_exceptions.stl`](docs/ref/10_checked_exceptions.stl) —
+  C++-style exception structs, `throw`/`try`/`catch`, Java-style checked
+  `throws` declarations, propagation, and partial handling.
 
 As syntax and semantics become executable, these examples should be converted
 into parser, diagnostic, and transpilation fixtures rather than allowed to
@@ -79,6 +82,8 @@ on constructs with direct Rust equivalents:
   Rust-like ownership rules;
 - type inference where C++ would commonly use `auto`;
 - function and method overloads resolved by exact parameter types;
+- checked exceptions with C++-style control flow, Java-style `throws` effects,
+  and generated Rust `Result` values;
 - a deliberately constrained form of parametric generics, once its lowering is
   specified.
 
@@ -94,7 +99,7 @@ because they have no direct, general safe-Rust translation:
   are permitted;
 - unrestricted templates, specialization, SFINAE, and template metaprogramming;
 - raw-pointer arithmetic and manual `new`/`delete` memory management;
-- exceptions (`throw`, `try`, and `catch`);
+- unchecked exceptions, platform exception ABIs, and catching Rust panics;
 - C-style variadics, `goto`, and unrestricted unions.
 
 Destructors/`Drop`, operator traits, FFI, async code, and other less-direct
@@ -361,11 +366,12 @@ const auto name = "stainless";
 It is not initially accepted for fields, parameters, function return types, or
 declarations without an initializer. Ordinary `auto&` and `const auto&` local
 declarations are rejected; the compiler-native guarded `require` declaration
-described below is the sole local-reference form. Copy and move rules apply
-after deduction: a named copyable initializer is copied, while a named non-copy
-value still requires `move(value)`. `auto value = nullptr;` is rejected because
-the pointee type cannot be inferred, and a fluent `void` chain receiver cannot
-be captured with `auto`.
+described below is the only inferred local-reference form. A typed
+`catch (const Error& error)` binder is a separate compiler-managed reference.
+Copy and move rules apply after deduction: a named copyable initializer is
+copied, while a named non-copy value still requires `move(value)`.
+`auto value = nullptr;` is rejected because the pointee type cannot be inferred,
+and a fluent `void` chain receiver cannot be captured with `auto`.
 
 ### Reserved implementation identifiers
 
@@ -544,10 +550,11 @@ void update(Config& value);        // lowers to &mut Config
 
 A reference cannot be declared as a field, an ordinary local variable, a
 namespace-scope variable, a container element, a type-alias target, or a return
-type. The compiler-native guarded `require` declaration below is the only
-local-reference exception. Non-`void` functions always return values. Returning
-`move(value)` explicitly transfers a named local; the compiler may elide or
-optimize the resulting Rust move when doing so preserves observable behavior.
+type. Compiler-managed guarded `require` declarations and const exception
+binders in `catch` clauses are the only local-reference exceptions. Non-`void`
+functions always return values. Returning `move(value)` explicitly transfers a
+named local; the compiler may elide or optimize the resulting Rust move when
+doing so preserves observable behavior.
 
 Reference binding follows these rules:
 
@@ -555,8 +562,9 @@ Reference binding follows these rules:
   access for the duration of the call.
 - `const T&` creates a shared borrow. A `T&` may implicitly reborrow as
   `const T&`.
-- References are non-null. A parameter reference cannot escape the call, and a
-  guarded local reference cannot escape its lexical scope or owner lifetime.
+- References are non-null. A parameter reference cannot escape the call.
+  Guarded and exception references cannot escape their lexical scope or hidden
+  owner lifetime.
 - A derived-struct argument may project to a data-base reference after the
   function has been selected.
 - Passing a `unique_ptr<T>` to a `T&` or `const T&` parameter borrows its
@@ -586,26 +594,52 @@ Stainless provides a compiler-native declaration that combines nullable-owner
 checking with a named, non-null pointee reference:
 
 ```cpp
+void configure(unique_nullptr<Config> maybe) {
+    auto& config = require(maybe);
+    config.version = 2;
+}
+```
+
+In a `void` function, the semicolon form implicitly executes `return;` when the
+owner is null. A failure block in a `void` function may perform work before
+that implicit return:
+
+```cpp
+auto& config = require(maybe) {
+    println("configuration is missing");
+}
+```
+
+If the owner is null, this prints the message and then returns from the
+enclosing function. A function returning a value must instead provide an
+explicitly diverging failure block:
+
+```cpp
 auto& config = require(maybe) {
     return -1;
 }
-
-config.version = 2;
 ```
 
-`const auto&` is also accepted. This is a declaration statement whose failure
-block replaces the normal trailing semicolon. `require` is recognized
-contextually only in this initializer form; it is not a runtime function and
-cannot be overloaded or shadowed for this use.
+`const auto&` is also accepted. The shorthand is an ordinary declaration
+statement ending in a semicolon. In the explicit form, the failure block
+replaces that semicolon. `require` is recognized contextually only in these
+initializer forms; it is not a runtime function and cannot be overloaded or
+shadowed for this use.
 
 The initial form has these rules:
 
 - The operand must have type `unique_nullptr<T>` or `shared_nullptr<T>` and is
   evaluated exactly once. Applying `require` to a non-null owner or an
   unrelated optional value is a type error.
-- If the owner is null, the block executes. The compiler accepts the
-  declaration only when the block cannot fall through, for example because it
-  ends in `return`, `break`, `continue`, or another proven-diverging operation.
+- If the owner is null, the semicolon form returns from its enclosing `void`
+  function. It is rejected in a value-returning function.
+- When an explicit failure block is present, it executes on null. In a `void`
+  function, reaching the end of that block implicitly returns from the
+  function. An explicit `return`, `break`, `continue`, or other diverging
+  operation takes precedence.
+- In a value-returning function, the failure block must not fall through. Every
+  path must return a value, `break` or `continue` an enclosing loop, or perform
+  another proven-diverging operation.
 - `auto&` applied to a mutable `unique_nullptr<T>` binds a mutable `T&`;
   `const auto&` or a const unique owner binds `const T&`.
 - A shared owner always binds `const T&`, even when `auto&` is written, because
@@ -637,6 +671,17 @@ For a shared snapshot this lowers conceptually to Rust `let ... else`:
 let __stainless_owner = slot.__load();
 let Some(config) = __stainless_owner.as_deref() else {
     return -1;
+};
+```
+
+A semicolon-form declaration in a `void` function uses the same lowering with
+`return;` in the `else` branch. For a failure block that can fall through, the
+compiler appends `return;` to that branch:
+
+```rust
+let Some(config) = maybe.as_deref() else {
+    println!("configuration is missing");
+    return;
 };
 ```
 
@@ -744,6 +789,205 @@ may lower conceptually to Rust functions named `parse__i32` and
 `parse__string`. The final mangling scheme must also handle modules, methods,
 references, generic arguments, and collisions without relying on this
 illustrative spelling.
+
+### Checked exceptions
+
+Stainless preserves C++-style `throw`, `try`, and `catch` control flow but makes
+exceptions checked in the Java sense. Every potentially escaping exception
+type appears in the function signature:
+
+```cpp
+Config load(const string& path) throws IoError, ParseError;
+
+Config load(const string& path) throws IoError, ParseError {
+    string source = read_file(path);
+    return parse_config(source);
+}
+```
+
+For a const member function, `throws` follows the C++-style member qualifier:
+
+```cpp
+Config Loader::load(const string& path) const throws IoError;
+```
+
+Every exception type is a struct whose single data-base chain ends at the
+compiler-provided `std::exception` struct:
+
+```cpp
+struct IoError : std::exception {
+    string path;
+};
+
+throw IoError{std::exception("input could not be read"), path};
+```
+
+`std::exception` is a special `native` data struct, not a source-level
+interface. It stores the common exception message and provides
+`string what() const`; `what()` returns an owned Stainless string because
+reference returns are forbidden. Exception structs remain ordinary vtable-free
+Stainless structs and may add fields or derive through the normal single
+data-inheritance chain. A struct that does not ultimately derive from
+`std::exception` cannot appear in `throws`, `throw`, or a typed `catch`.
+
+The `throws` clause is an unordered set of canonical exception-struct types.
+Duplicate entries and entries made redundant by another listed data base are
+rejected. A declared base exception covers every exception derived from it, as
+in Java; otherwise generated ordering and diagnostics use fully qualified type
+identity so they are deterministic. Omitting `throws` means the exception set
+is empty: the function cannot allow any Stainless exception to escape.
+`noexcept` is therefore redundant and is not part of the initial syntax.
+
+An ordinary call keeps C++/Java syntax. There is no source-level Rust `?`
+operator:
+
+```cpp
+Config reload(const string& path) throws IoError, ParseError {
+    return load(path); // either exception is automatically fed forward
+}
+```
+
+The compiler computes the effect of each call. Every exception must be handled
+by a lexically enclosing `try` statement or covered by the same type or one of
+its data bases in the enclosing function's `throws` set. Calling a throwing
+function from an effect-free function without catching every possible type is
+a compile error. Propagating into a declared base or superset is allowed and
+does not slice or otherwise convert the exception object.
+
+`throw expression;` requires an exception-struct value and preserves its
+concrete type. That type must be caught within the function or covered by its
+declared `throws` set. Throwing a named value follows the ordinary Stainless
+copy/move rules, so a named non-copy value requires `throw move(error);`. Bare
+`throw;` is accepted only inside a `catch` handler and rethrows the currently
+handled allocation without copying or reallocating it.
+
+Handling uses C++ syntax:
+
+```cpp
+try {
+    Config config = load(path);
+    use(config);
+} catch (const IoError& error) {
+    report_io_error(error);
+} catch (const ParseError& error) {
+    report_parse_error(error);
+} catch (...) {
+    report_unknown_error();
+}
+```
+
+Typed catches use the exception struct's data-inheritance chain. A handler
+matches when its declared type is the concrete exception type or one of that
+type's exception data bases. Handlers are tested in source order, so a base
+handler placed before a derived handler makes the latter unreachable and is a
+compile error. Interface conformance, numeric conversion, and other coercions
+do not participate. `catch (const std::exception& error)` catches every
+Stainless exception; `catch (...)` catches every remaining exception without a
+binder and must be last.
+
+Only `catch (const E& error)` and `catch (...)` are initially supported. A
+typed catch binder is a non-null, compiler-managed const reference to a hidden
+owned exception value. It exists only for the handler body and cannot be
+returned, stored, moved, or sent to another thread. A bare rethrow retains the
+hidden owned value; it does not copy through that reference.
+
+A `try` statement may handle only part of a call's exception set:
+
+```cpp
+Config load_or_default(const string& path) throws IoError {
+    try {
+        return load(path);
+    } catch (const ParseError& error) {
+        return Config{/* defaults */};
+    }
+}
+```
+
+Here `ParseError` is consumed by the handler and `IoError` is fed forward
+because it is declared by `load_or_default`. An exception raised by a catch
+handler is considered by an enclosing `try` or by the function's `throws`
+clause; sibling handlers do not catch one another's exceptions.
+
+Rust structs do not have C++ derived-to-base object subtyping. A Rust
+`Box<Exception>` could contain only an `Exception` value; converting a derived
+struct to it would discard the derived fields. The backend therefore gives
+each exception struct a compiler-private trait implementation and uses one
+erased owning carrier:
+
+```rust
+trait __StainlessException: std::error::Error {
+    fn __project(
+        &self,
+        target: std::any::TypeId,
+    ) -> Option<&dyn std::any::Any>;
+}
+
+type __ExceptionBox = Box<dyn __StainlessException>;
+
+fn load(path: &String)
+    -> Result<Config, __ExceptionBox>
+{
+    let source = read_file(path)?;
+    let config = parse_config(source)?;
+    Ok(config)
+}
+```
+
+Conceptually, `Result<T, Box<std::exception>>` is therefore close, but the
+actual Rust type is `Result<T, Box<dyn __StainlessException>>`. The compiler
+implements Rust's `Debug`, `Display`, and `std::error::Error` traits for each
+exception struct using its `std::exception` base, making the generated errors
+usable by ordinary Rust tooling without exposing those Rust traits to Stainless
+source.
+
+The private `__project` operation is generated for every exception struct. It
+returns a safe `Any` reference to the concrete value or one of its embedded
+exception data bases. This permits a typed base catch without pointer
+arithmetic or `unsafe`; it uses compiler-private Rust `TypeId`/`Any` inspection
+that Stainless source cannot access. The catch site downcasts that projected
+reference to its statically known handler type. The source compiler still
+checks the exact `throws` hierarchy even though all generated Rust functions
+share the same erased error type.
+
+Creating a new exception with `throw` boxes the complete concrete struct and
+therefore normally performs one allocation. Propagation and bare rethrow move
+the existing box without reallocating it. Catching borrows the value stored in
+that box. The compiler may eliminate an allocation only when doing so preserves
+these observable lifetime and destruction semantics.
+
+The trait-object vtable metadata is stored in the `Box` pointer, not in the
+exception struct. Consequently exception structs retain the same no-vtable
+representation guarantee as every other Stainless struct. This compiler-only
+erasure at a `throw` boundary does not permit source code to convert arbitrary
+structs into interface pointers.
+
+Normal `return value;` in a throwing function lowers to `Ok(value)`, while
+`throw error;` lowers to `Err(Box::new(error))`. A throwing `void` function
+lowers to `Result<(), __ExceptionBox>`; `return;` and normal fallthrough produce
+`Ok(())`. Propagation uses Rust's `?` internally, and `try`/`catch` lowers to
+structured inspection of the boxed error. The compiler must preserve C++
+control-flow behavior for `return`, `break`, and `continue` inside a `try`
+block rather than accidentally targeting a generated Rust closure.
+
+Rust drops already-initialized locals when `Result` propagation returns early.
+This supplies the cleanup behavior expected while unwinding an exception,
+without using Rust panic unwinding. Stainless `catch` handles only declared
+Stainless exceptions; Rust panics, bounds-check panics, allocation failure, and
+foreign exceptions are outside this model and cannot be caught.
+
+The `throws` set is part of Stainless type checking and interface compatibility
+but not of overload identity or deterministic overload mangling. Two
+declarations cannot overload only by changing `throws`, and an out-of-type
+definition must match its declaration's normalized set. An interface
+implementation may expose a subset or derived specialization of the interface
+function's declared exceptions; generated trait code uses the same
+`__ExceptionBox` carrier at the dispatch boundary.
+
+Bundled `native` functions that can fail declare the same Stainless `throws`
+effects, and their trusted Rust implementations return the corresponding
+`Result`. There is no arbitrary Rust-error escape hatch. Crate entry points and
+thread entry functions initially require an empty exception set, so all
+checked exceptions must be caught before those boundaries.
 
 ### Dynamic allocation and owning pointers
 

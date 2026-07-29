@@ -1,0 +1,78 @@
+// Provisional Stainless syntax example.
+// Exceptions use C++ control flow with Java-style checked throws declarations.
+// Generated Rust uses Result and a boxed compiler-private exception trait.
+
+namespace samples {
+
+struct IoError : std::exception {
+    string path;
+};
+
+struct ParseError : std::exception {
+    usize offset;
+};
+
+struct Config {
+    i32 version;
+};
+
+string read_file(const string& path, bool available) throws IoError {
+    if (!available) {
+        throw IoError{
+            std::exception("input could not be read"),
+            path
+        };
+    }
+
+    return "version=1";
+}
+
+Config parse_config(string source, bool valid) throws ParseError {
+    if (!valid) {
+        throw ParseError{
+            std::exception("input could not be parsed"),
+            source.size()
+        };
+    }
+
+    return Config{1};
+}
+
+Config load(
+    const string& path,
+    bool available,
+    bool valid
+) throws IoError, ParseError {
+    // No source-level ? is needed. Both calls feed their checked exceptions
+    // into this function's declared throws set.
+    string source = read_file(path, available);
+    return parse_config(move(source), valid);
+}
+
+Config load_or_default(
+    const string& path,
+    bool available,
+    bool valid
+) throws IoError {
+    try {
+        return load(path, available, valid);
+    } catch (const ParseError& error) {
+        // ParseError is handled; IoError is automatically fed forward.
+        return Config{0};
+    }
+}
+
+i32 run(const string& path, bool available, bool valid) {
+    try {
+        Config config = load(path, available, valid);
+        return config.version;
+    } catch (const IoError& error) {
+        println("input could not be read");
+        return 1;
+    } catch (const ParseError& error) {
+        println("input could not be parsed");
+        return 2;
+    }
+}
+
+} // namespace samples

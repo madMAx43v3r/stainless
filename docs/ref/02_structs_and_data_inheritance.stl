@@ -43,8 +43,8 @@ f32 example() {
     f32 spatial = point.length_squared();
 
     // Binding the argument projects Point3 to its Point2 data base. Ordinary
-    // references exist only as parameters; require(...) is the separate,
-    // guarded local-reference form for nullable pointer pointees.
+    // references exist only as parameters; require(...) and typed catch
+    // binders are separate compiler-managed local-reference forms.
     f32 projected = planar_length_squared(point);
 
     // No virtual override occurs through the base reference parameter.

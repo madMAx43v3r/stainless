@@ -3,6 +3,14 @@
 
 namespace std {
 
+// Every throwable Stainless struct has this struct in its data-base chain.
+// The backend additionally implements a private Rust trait for type erasure.
+struct native exception {
+    exception();
+    exception(string message);
+    string what() const;
+};
+
 interface native sealed vector_api<T> {
     usize size() const;
     bool empty() const;

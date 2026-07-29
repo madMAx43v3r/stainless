@@ -35,7 +35,8 @@ i32 unique_example() {
     i32 borrowed_version = read_version(owner);
 
     // This ordinary parameter borrow has ended, so the unique owner can now
-    // move. require(...) below is the only local-reference declaration form.
+    // move. require(...) below is the guarded local-reference declaration
+    // form; typed catch binders are managed separately by exception handling.
     unique_ptr<Config> relocated = move(owner);
     return borrowed_version + relocated.version;
 }
@@ -64,6 +65,15 @@ i32 guarded_nullable_unique(unique_nullptr<Config> maybe) {
 
     config.version = 2;
     return config.version;
+}
+
+void guarded_nullable_unique_void(unique_nullptr<Config> maybe) {
+    // A void failure block runs before its implicit return.
+    auto& config = require(maybe) {
+        println("configuration is missing");
+    }
+
+    config.version = 2;
 }
 
 i32 shared_example() {
