@@ -1,0 +1,53 @@
+// Provisional Stainless syntax example.
+// Direct returned references borrow from a receiver or from the sole reference
+// parameter. Reference-bearing values such as Option<const T&> remain deferred.
+
+use rust::String;
+
+namespace samples {
+
+struct Config {
+    String name_;
+
+    const String& name() const;
+    String& name_mut();
+};
+
+const String& Config::name() const {
+    // The result is tied to the const receiver.
+    return name_;
+}
+
+String& Config::name_mut() {
+    // A mutable result requires a mutable receiver.
+    return name_;
+}
+
+const String& identity(const String& value) {
+    // A free function may return its sole reference parameter.
+    return value;
+}
+
+usize inspect_name(const Config& config) {
+    const String& name = config.name();
+    return name.len();
+}
+
+usize update_name(Config& config) {
+    String& name = config.name_mut();
+    name.push('!');
+    return name.len();
+}
+
+// Rejected: a by-value parameter is destroyed when the function returns.
+// const String& dangling(String value) {
+//     return value;
+// }
+
+// Rejected initially: two reference inputs make the return lifetime ambiguous.
+// const String& select(
+//     const String& first,
+//     const String& second,
+//     bool choose_first);
+
+} // namespace samples

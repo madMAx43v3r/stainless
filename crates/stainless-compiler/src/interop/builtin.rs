@@ -344,6 +344,7 @@ fn constructor(
         receiver: None,
         parameters,
         return_type,
+        return_borrow: None,
         requirements: vec![],
         lowering,
     }
@@ -361,6 +362,7 @@ fn associated(
         receiver: None,
         parameters,
         return_type,
+        return_borrow: None,
         requirements: vec![],
         lowering: RustLowering::AssociatedFunction { rust_path },
     }
@@ -388,6 +390,7 @@ fn method_with_requirements(
         receiver: Some(receiver),
         parameters,
         return_type,
+        return_borrow: None,
         requirements,
         lowering: RustLowering::Method {
             rust_name: source_name,

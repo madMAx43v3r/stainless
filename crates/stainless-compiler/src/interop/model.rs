@@ -24,7 +24,7 @@ pub enum TypeRef {
         /// Explicit generic arguments.
         arguments: Vec<TypeRef>,
     },
-    /// A non-escaping function parameter borrow.
+    /// A non-null borrow used as a parameter, local, or direct return.
     Reference {
         /// Whether the borrowed value may be mutated.
         mutable: bool,
@@ -63,6 +63,16 @@ impl TypeRef {
     pub const fn is_reference(&self) -> bool {
         matches!(self, Self::Reference { .. })
     }
+
+    /// Returns whether this type is or contains a reference.
+    #[must_use]
+    pub fn contains_reference(&self) -> bool {
+        match self {
+            Self::Native { arguments, .. } => arguments.iter().any(Self::contains_reference),
+            Self::Reference { .. } => true,
+            _ => false,
+        }
+    }
 }
 
 /// How a callable is written in Stainless source.
@@ -85,6 +95,15 @@ pub enum Receiver {
     Mutable,
     /// Rust `self`; consumes and invalidates a named Stainless binding.
     Value,
+}
+
+/// The input borrow that owns a directly returned reference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReturnBorrow {
+    /// The result is borrowed from a method's receiver.
+    Receiver,
+    /// The result is borrowed from the parameter at this zero-based index.
+    Parameter(usize),
 }
 
 /// Per-argument conversion performed after exact Stainless call resolution.
@@ -163,6 +182,8 @@ pub struct CallableBinding {
     pub parameters: Vec<Parameter>,
     /// Stainless-visible return type.
     pub return_type: TypeRef,
+    /// Provenance for a direct reference return.
+    pub return_borrow: Option<ReturnBorrow>,
     /// Rust trait requirements attached to this call.
     pub requirements: Vec<TraitRequirement>,
     /// Rust code-generation operation.
@@ -257,12 +278,7 @@ impl NativeBindings {
 
             let mut signatures = BTreeSet::new();
             for callable in &native_type.callables {
-                if callable.return_type.is_reference() {
-                    return Err(BindingError::ReferenceReturn {
-                        type_path: native_type.stainless_path,
-                        callable: callable.source_name,
-                    });
-                }
+                validate_return_borrow(native_type.stainless_path, callable)?;
 
                 let signature = (
                     callable.style as u8,
@@ -298,6 +314,179 @@ impl NativeBindings {
     }
 }
 
+fn validate_return_borrow(
+    type_path: &'static str,
+    callable: &CallableBinding,
+) -> Result<(), BindingError> {
+    let Some(return_mutable) = direct_reference_mutability(type_path, callable)? else {
+        return if callable.return_borrow.is_some() {
+            invalid_return_borrow(type_path, callable, ReturnBorrowError::UnexpectedProvenance)
+        } else {
+            Ok(())
+        };
+    };
+
+    let Some(source) = callable.return_borrow else {
+        return invalid_return_borrow(type_path, callable, ReturnBorrowError::MissingProvenance);
+    };
+
+    if callable.style == CallStyle::Constructor {
+        return invalid_return_borrow(
+            type_path,
+            callable,
+            ReturnBorrowError::ConstructorCannotReturnReference,
+        );
+    }
+
+    match source {
+        ReturnBorrow::Receiver => {
+            validate_receiver_return_borrow(type_path, callable, return_mutable)
+        }
+        ReturnBorrow::Parameter(index) => {
+            validate_parameter_return_borrow(type_path, callable, index, return_mutable)
+        }
+    }
+}
+
+fn direct_reference_mutability(
+    type_path: &'static str,
+    callable: &CallableBinding,
+) -> Result<Option<bool>, BindingError> {
+    let mutability = match &callable.return_type {
+        TypeRef::Reference { mutable, target } if !target.contains_reference() => Some(*mutable),
+        TypeRef::Reference { .. } => {
+            return invalid_return_borrow(
+                type_path,
+                callable,
+                ReturnBorrowError::NestedReferencesDeferred,
+            );
+        }
+        return_type if return_type.contains_reference() => {
+            return invalid_return_borrow(
+                type_path,
+                callable,
+                ReturnBorrowError::ReferenceBearingValuesDeferred,
+            );
+        }
+        _ => None,
+    };
+    Ok(mutability)
+}
+
+fn validate_receiver_return_borrow(
+    type_path: &'static str,
+    callable: &CallableBinding,
+    return_mutable: bool,
+) -> Result<(), BindingError> {
+    let Some(receiver) = callable.receiver else {
+        return invalid_return_borrow(
+            type_path,
+            callable,
+            ReturnBorrowError::ReceiverSourceRequiresMethod,
+        );
+    };
+    match receiver {
+        Receiver::Value => {
+            invalid_return_borrow(type_path, callable, ReturnBorrowError::ConsumedReceiver)
+        }
+        Receiver::Shared if return_mutable => invalid_return_borrow(
+            type_path,
+            callable,
+            ReturnBorrowError::MutableReturnFromSharedSource,
+        ),
+        Receiver::Shared | Receiver::Mutable => Ok(()),
+    }
+}
+
+fn validate_parameter_return_borrow(
+    type_path: &'static str,
+    callable: &CallableBinding,
+    index: usize,
+    return_mutable: bool,
+) -> Result<(), BindingError> {
+    if callable.style == CallStyle::Method {
+        return invalid_return_borrow(
+            type_path,
+            callable,
+            ReturnBorrowError::MethodReturnMustBorrowReceiver,
+        );
+    }
+
+    if callable
+        .parameters
+        .iter()
+        .filter(|parameter| parameter.ty.is_reference())
+        .count()
+        != 1
+    {
+        return invalid_return_borrow(
+            type_path,
+            callable,
+            ReturnBorrowError::ExactlyOneReferenceParameterRequired,
+        );
+    }
+
+    let Some(parameter) = callable.parameters.get(index) else {
+        return invalid_return_borrow(type_path, callable, ReturnBorrowError::ParameterOutOfRange);
+    };
+    let TypeRef::Reference { mutable, .. } = parameter.ty else {
+        return invalid_return_borrow(
+            type_path,
+            callable,
+            ReturnBorrowError::ParameterIsNotReference,
+        );
+    };
+    if return_mutable && !mutable {
+        return invalid_return_borrow(
+            type_path,
+            callable,
+            ReturnBorrowError::MutableReturnFromSharedSource,
+        );
+    }
+    Ok(())
+}
+
+fn invalid_return_borrow<T>(
+    type_path: &'static str,
+    callable: &CallableBinding,
+    reason: ReturnBorrowError,
+) -> Result<T, BindingError> {
+    Err(BindingError::InvalidReturnBorrow {
+        type_path,
+        callable: callable.source_name,
+        reason,
+    })
+}
+
+/// Why a native callable's returned-reference metadata is invalid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReturnBorrowError {
+    /// A direct reference return omitted its source borrow.
+    MissingProvenance,
+    /// A value return declared reference provenance.
+    UnexpectedProvenance,
+    /// References to references are not part of the initial lifetime model.
+    NestedReferencesDeferred,
+    /// Values such as `Option<&T>` that carry borrows are deferred.
+    ReferenceBearingValuesDeferred,
+    /// Constructors must produce values.
+    ConstructorCannotReturnReference,
+    /// Receiver provenance was attached to a callable without a receiver.
+    ReceiverSourceRequiresMethod,
+    /// A consumed receiver cannot own a returned borrow.
+    ConsumedReceiver,
+    /// A mutable reference cannot originate from a shared borrow.
+    MutableReturnFromSharedSource,
+    /// A method's returned reference must be tied to its receiver.
+    MethodReturnMustBorrowReceiver,
+    /// A non-method reference return currently requires one reference input.
+    ExactlyOneReferenceParameterRequired,
+    /// Parameter provenance named an index outside the signature.
+    ParameterOutOfRange,
+    /// Parameter provenance named a value parameter.
+    ParameterIsNotReference,
+}
+
 /// Invalid compiler-provided native metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BindingError {
@@ -326,12 +515,14 @@ pub enum BindingError {
         /// Invalid callable.
         callable: &'static str,
     },
-    /// A binding attempted to expose a forbidden reference return.
-    ReferenceReturn {
+    /// A callable has invalid or unsupported returned-reference metadata.
+    InvalidReturnBorrow {
         /// Containing type.
         type_path: &'static str,
         /// Invalid callable.
         callable: &'static str,
+        /// Violated returned-borrow rule.
+        reason: ReturnBorrowError,
     },
 }
 
@@ -368,15 +559,44 @@ impl fmt::Display for BindingError {
                 formatter,
                 "non-method `{type_path}::{callable}` has receiver metadata"
             ),
-            Self::ReferenceReturn {
+            Self::InvalidReturnBorrow {
                 type_path,
                 callable,
+                reason,
             } => write!(
                 formatter,
-                "native callable `{type_path}::{callable}` cannot return a reference"
+                "invalid returned borrow on native callable `{type_path}::{callable}`: {}",
+                reason.description()
             ),
         }
     }
 }
 
 impl Error for BindingError {}
+
+impl ReturnBorrowError {
+    const fn description(self) -> &'static str {
+        match self {
+            Self::MissingProvenance => "a direct reference return requires borrow provenance",
+            Self::UnexpectedProvenance => "a value return cannot declare borrow provenance",
+            Self::NestedReferencesDeferred => "nested reference return types are deferred",
+            Self::ReferenceBearingValuesDeferred => {
+                "return values containing references are deferred"
+            }
+            Self::ConstructorCannotReturnReference => "a constructor cannot return a reference",
+            Self::ReceiverSourceRequiresMethod => "receiver provenance requires a method receiver",
+            Self::ConsumedReceiver => "a consumed receiver cannot own a returned reference",
+            Self::MutableReturnFromSharedSource => {
+                "a mutable reference cannot originate from a shared borrow"
+            }
+            Self::MethodReturnMustBorrowReceiver => {
+                "a method reference return must be tied to its receiver"
+            }
+            Self::ExactlyOneReferenceParameterRequired => {
+                "a non-method reference return requires exactly one reference parameter"
+            }
+            Self::ParameterOutOfRange => "the borrow-source parameter index is out of range",
+            Self::ParameterIsNotReference => "the borrow-source parameter is not a reference",
+        }
+    }
+}

@@ -63,6 +63,8 @@ language specification or executable test suite:
   `throws` declarations, propagation, and partial handling.
 - [`11_vec_and_string.stl`](docs/ref/11_vec_and_string.stl) — the initial
   compiler-supported `rust::Vec<T>` and `rust::String` surface.
+- [`12_reference_returns.stl`](docs/ref/12_reference_returns.stl) — direct
+  reference returns tied to a receiver or one reference parameter.
 
 As syntax and semantics become executable, these examples should be converted
 into parser, diagnostic, and transpilation fixtures rather than allowed to
@@ -582,11 +584,12 @@ backend details and are not written as `String::from(...)` in Stainless source.
 uses the language's explicit `move(value)` operation, while duplication calls
 the Rust API explicitly with `value.clone()`. Rust methods such as `len`,
 `is_empty`, `push`, `push_str`, and `into_bytes` keep their real names and
-behavior. Borrow-returning helpers such as `as_str` are used inside generated
-Rust when needed but are not source-callable because Stainless functions
-cannot return references. Integer indexing remains unavailable because Rust
-`String` is UTF-8 and a byte offset need not identify a character boundary.
-Embedded null bytes are ordinary data and no implicit C string is created.
+behavior. `as_str` is used inside generated Rust when an API requires `&str`,
+but it is not source-callable in the initial subset because Stainless does not
+expose Rust's unsized `str` type. Integer indexing remains unavailable because
+Rust `String` is UTF-8 and a byte offset need not identify a character
+boundary. Embedded null bytes are ordinary data and no implicit C string is
+created.
 
 ### Initialization, copying, and moving
 
@@ -714,23 +717,75 @@ Lowering `move(value)` to an actual Rust move lets `rustc` independently verify
 the result, but generated-Rust errors are a backstop rather than the primary
 Stainless diagnostic mechanism.
 
-### References and value returns
+### References and borrowed returns
 
-References normally exist only as function parameters, including the implicit
-receiver of a member function:
+References may be function parameters, direct function return types, and
+explicitly typed local bindings. The implicit receiver of a member function is
+also a reference:
 
 ```cpp
 void inspect(const Config& value); // lowers to &Config
 void update(Config& value);        // lowers to &mut Config
+
+struct Config {
+    const String& name() const; // lowers to &self -> &String
+    String& name_mut();         // lowers to &mut self -> &mut String
+};
 ```
 
-A reference cannot be declared as a field, an ordinary local variable, a
-namespace-scope variable, a container element, a type-alias target, or a return
-type. Compiler-managed guarded `require` declarations and const exception
-binders in `catch` clauses are the only local-reference exceptions. Non-`void`
-functions always return values. Returning `move(value)` explicitly transfers a
-named local; the compiler may elide or optimize the resulting Rust move when
-doing so preserves observable behavior.
+A reference cannot be declared as a field, namespace-scope variable, container
+element, or type-alias target. A direct reference return is permitted only when
+its lifetime has one unambiguous source:
+
+- A member-function or interface-function reference return is tied exclusively
+  to its receiver. A `const T&` result may come from a const or mutable
+  receiver; a `T&` result requires a mutable receiver. A value-consuming
+  receiver cannot return a reference.
+- A free or static function returning a reference must have exactly one
+  reference parameter, and the result is tied to that parameter. Functions
+  with zero or multiple reference parameters cannot return a reference in the
+  initial language.
+- Constructors cannot return references.
+- Every returned expression must be a borrow of the declared source or one of
+  its subobjects. Returning a reference to a local, temporary, by-value
+  parameter, guarded `require` binding, or unrelated global is rejected.
+- Only a direct `T&` or `const T&` return is initially accepted. Values that
+  contain references, such as `Option<const T&>`, tuples containing references,
+  borrowing iterators, and references to references are deferred.
+
+These rules let the compiler infer the Rust lifetime without adding lifetime
+syntax to Stainless. They lower directly to Rust lifetime elision for methods
+and single-borrow functions:
+
+```cpp
+const String& identity(const String& value) {
+    return value;
+}
+
+const String& Config::name() const {
+    return name_;
+}
+```
+
+```rust
+fn identity(value: &String) -> &String;
+fn name(&self) -> &String;
+```
+
+An explicit local reference must be initialized immediately from a compatible
+reference-valued expression and cannot be rebound:
+
+```cpp
+const String& name = config.name();
+```
+
+The borrow of `config` remains active until the last use of `name`. Moving or
+mutating the owner while that borrow is active is rejected; a mutable returned
+borrow additionally excludes every other access to the owner. Rust's
+non-lexical lifetime analysis verifies the emitted borrow boundaries, while
+the Stainless semantic pass remains responsible for source-level diagnostics.
+Ordinary `auto&` and `const auto&` inference remains unavailable; guarded
+`require` declarations retain their dedicated inferred-reference syntax.
 
 Reference binding follows these rules:
 
@@ -738,7 +793,8 @@ Reference binding follows these rules:
   access for the duration of the call.
 - `const T&` creates a shared borrow. A `T&` may implicitly reborrow as
   `const T&`.
-- References are non-null. A parameter reference cannot escape the call.
+- References are non-null. A parameter reference may escape only as the direct
+  return of a function whose declared return is tied to that parameter.
   Guarded and exception references cannot escape their lexical scope or hidden
   owner lifetime.
 - A derived-struct argument may project to a data-base reference after the
@@ -748,19 +804,22 @@ Reference binding follows these rules:
   proven non-null. Passing a `shared_ptr<T>` may bind to `const T&`; a
   `shared_nullptr<T>` may do so only where it is proven non-null.
 
-References to ownership handles are forbidden:
+References to ownership handles are forbidden in parameters, local bindings,
+and return types:
 
 ```cpp
 void invalid(unique_ptr<T>& value);        // rejected
 void invalid(unique_nullptr<T>& value);    // rejected
 void invalid(const shared_ptr<T>& value);  // rejected
 void invalid(shared_nullptr<T>& value);    // rejected
+const shared_ptr<T>& invalid_result();       // rejected
 ```
 
 Owning handles must be passed by value: unique owners require an explicit move,
 while shared owners copy implicitly. The synchronized pointer slots
-`atomic_ptr<T>` and `atomic_nullptr<T>` are the exceptions and may be passed by
-reference because their APIs synchronize access to the binding.
+`atomic_ptr<T>` and `atomic_nullptr<T>` are the exceptions and may appear in
+otherwise valid parameter, local, or direct-return reference positions because
+their APIs synchronize access to the binding.
 
 ### Guarded non-null reference bindings
 
@@ -875,11 +934,10 @@ usize count = buffer.push(30).len();
 ```
 
 This is conceptually similar to returning `self` by reference, but it does not
-create a Stainless reference value and does not relax the prohibition on
-reference return types. The result of a `void` member call is a restricted
-*chain receiver* that may only be the immediate receiver of another member
-function call. It cannot be stored, passed as an argument, returned, or used
-for field access:
+create a Stainless reference value or participate in the returned-borrow
+rules. The result of a `void` member call is a restricted *chain receiver* that
+may only be the immediate receiver of another member function call. It cannot
+be stored, passed as an argument, returned, or used for field access:
 
 ```cpp
 auto invalid = buffer.push(10); // rejected: a chain receiver cannot escape
@@ -1629,12 +1687,16 @@ requires `T: Ord`. Stainless `const String&` arguments to Rust string-slice
 parameters are resolved as exact Stainless parameters first and adapted to
 Rust `&str` only during lowering.
 
-Borrow-returning, iterator-producing, and indexing APIs are not exposed in this
-first subset. Examples include `Vec::get`, `Vec::iter`, `String::as_str`,
-`String::split`, and `String::chars`. Adding one requires a Stainless lifetime
-and return-value model rather than merely placing its name in the registry.
-The parser, semantic call resolver, and Rust emitter are not connected to this
-metadata yet.
+The binding model supports direct reference returns and records whether their
+borrow originates from the receiver or the callable's one reference parameter.
+None of the initial `Vec` and `String` bindings need such a return yet.
+Reference-bearing values, iterator-producing APIs, and indexing are not exposed
+in this first subset: `Vec::get` returns `Option<&T>`, `Vec::iter` returns a
+borrowing iterator, and `String::as_str`, `String::split`, and `String::chars`
+also require either `str` or a borrowing iterator. Adding these requires the
+deferred reference-bearing-value model rather than merely placing their names
+in the registry. The parser, semantic call resolver, and Rust emitter are not
+connected to this metadata yet.
 
 Each Stainless compiler release supports one stable Rust minor release. The
 build helper compares `rustc -Vv` with the metadata version and rejects a
@@ -1709,10 +1771,13 @@ message.
 The initial binding subset admits safe public free functions, associated
 functions, and inherent methods with concrete signatures composed of
 primitives, supported containers, declared opaque types, values, and
-non-escaping input borrows. Reference returns, raw pointers, `unsafe fn`,
-variadics, trait objects other than mapped Stainless interfaces, callbacks,
-async/Future values, `impl Trait`, associated-type projections, higher-ranked
-bounds, and unconstrained lifetimes are rejected. External generic functions
+input borrows. Direct reference returns are admitted only when a method result
+is borrowed from its receiver or a free/associated function has exactly one
+reference parameter; this provenance is stored in binding metadata. Raw
+pointers, reference-bearing return values, `unsafe fn`, variadics, trait
+objects other than mapped Stainless interfaces, callbacks, async/Future
+values, `impl Trait`, associated-type projections, higher-ranked bounds, and
+unconstrained lifetimes are rejected. External generic functions
 require one manifest entry per concrete instantiation; generic Rust types may
 appear only with explicit supported type arguments. A user-authored safe Rust
 adapter is the escape hatch for every rejected signature.

@@ -6,5 +6,6 @@ mod model;
 pub use builtin::standard_bindings;
 pub use model::{
     ArgumentAdaptation, BindingError, CallStyle, CallableBinding, NativeBindings,
-    NativeTypeBinding, Parameter, Receiver, RustLowering, TraitRequirement, TypeRef,
+    NativeTypeBinding, Parameter, Receiver, ReturnBorrow, ReturnBorrowError, RustLowering,
+    TraitRequirement, TypeRef,
 };
