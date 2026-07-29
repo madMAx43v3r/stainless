@@ -94,6 +94,7 @@ void wrong() {
     let diagnostics = analysis
         .diagnostics
         .iter()
+        .filter(|diagnostic| diagnostic.code.starts_with("SEM"))
         .map(|diagnostic| (diagnostic.code, diagnostic.phase))
         .collect::<Vec<_>>();
 

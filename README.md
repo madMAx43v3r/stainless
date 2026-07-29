@@ -4,9 +4,10 @@ Stainless is a new C++-like language that transpiles to Rust.
 
 > **Status:** early implementation. The language design remains provisional;
 > the Rust workspace now contains validated native bindings, a lossless lexer
-> and Rowan parser, typed CST views, compiler-owned AST lowering, and the first
-> structural semantic diagnostics. Name/type/ownership resolution and Rust
-> emission have not started yet.
+> and Rowan parser, typed CST views, compiler-owned AST lowering, structural
+> diagnostics, and an initial name/type/call resolver connected to the
+> `Vec`/`String` binding registry. Ownership dataflow, HIR, and Rust emission
+> have not started yet.
 
 ## Project charter
 
@@ -70,10 +71,11 @@ implemented:
 - [`13_range_for.stl`](docs/ref/13_range_for.stl) — shared, mutable, copied,
   and explicitly consumed C++-style range loops.
 
-`01_basics.stl` and `13_range_for.stl` are currently parsed losslessly in the
-test suite. Other samples remain forward-looking and must become explicit
-parser, diagnostic, and transpilation fixtures rather than being allowed to
-drift from the implementation.
+`01_basics.stl`, `11_vec_and_string.stl`, and `13_range_for.stl` are currently
+parsed, lowered, and resolved without diagnostics in the test suite. Other
+samples remain forward-looking and must become explicit parser, diagnostic,
+and transpilation fixtures rather than being allowed to drift from the
+implementation.
 
 ## Language boundaries
 
@@ -1748,8 +1750,10 @@ in this first subset: `Vec::get` returns `Option<&T>`, `Vec::iter` returns a
 borrowing iterator, and `String::as_str`, `String::split`, and `String::chars`
 also require either `str` or a borrowing iterator. Adding these requires the
 deferred reference-bearing-value model rather than merely placing their names
-in the registry. The parser, semantic call resolver, and Rust emitter are not
-connected to this metadata yet.
+in the registry. The semantic resolver now instantiates this metadata for
+constructors, associated functions, and methods, including receiver mode,
+argument adaptations, generic substitutions, and retained trait obligations.
+The Rust emitter is not connected yet.
 
 Each Stainless compiler release supports one stable Rust minor release. The
 build helper compares `rustc -Vv` with the metadata version and rejects a
@@ -1989,9 +1993,31 @@ implemented structural checks:
 These are deliberately pre-resolution checks, not full type checking.
 Struct/class/interface declarations, constructors, exception statements,
 macros, aggregate initialization, and the remaining reference samples still
-need grammar productions. Calls, names, expression types, borrowing, and moves
-are not yet resolved, and no program is transpiled. Accepting a CST or AST
-shape therefore does not imply that all ownership or type semantics are valid.
+need grammar productions.
+
+The initial `stainless_compiler::resolution` pass now provides:
+
+- namespace-scoped direct, grouped, aliased, and glob import lookup for the
+  implemented single-file subset;
+- primitive and native type resolution, local/parameter scopes, contextual
+  integer literal types, and expression typing for the current operators;
+- exact canonical-type overload selection with value/reference-only conflict
+  diagnostics and deterministic versioned Rust names;
+- classification of Stainless calls, compiler intrinsics such as `move` and
+  primitive casts, and registered native Rust calls;
+- concrete `rust::Vec<T>`/`rust::String` constructor, associated-function, and
+  method resolution, including generic substitution, receiver mutability,
+  consuming-receiver checks, Rust argument adaptations, and default
+  construction;
+- `Vec<T>` range-element resolution for shared, mutable, copied, and explicitly
+  consumed range loops.
+
+This is still not full semantic validation. Struct/class/interface names,
+fields, member functions, checked exceptions, ownership pointers, cross-file
+modules, move/use-after-move dataflow, borrow lifetimes, returned-reference
+provenance, and native trait satisfaction remain unresolved. No program is yet
+transpiled, so accepting an AST shape does not imply that all ownership or type
+semantics are valid.
 
 ## Cargo integration and compiler packaging
 
@@ -2099,13 +2125,13 @@ recorded inline so implemented syntax is not confused with planned work:
    definitions, typed local bindings, blocks, calls, arithmetic, `return`,
    `if`/`else`, and classic/range `for` loops into a Rowan CST with recoverable
    error nodes.
-4. **In progress:** typed CST views, AST lowering, and initial structural
-   validation are implemented. Name/type/ownership resolution, call
-   classification, HIR construction, and unresolved-name/type diagnostics
-   remain.
-5. Connect the initial `Vec` and `String` metadata to resolution and code
-   generation, then generate one explicit wrapper for a small external Cargo
-   dependency and prove that Cargo rejects a stale or incorrect binding.
+4. **In progress:** typed CST views, AST lowering, structural validation, and
+   the initial single-file name/type/call resolver are implemented. Ownership
+   analysis, resolved HIR construction, and broader declaration kinds remain.
+5. **In progress:** the initial `Vec` and `String` metadata is connected to
+   resolution but not code generation. Next, generate Rust for these resolved
+   calls, then add one explicit wrapper for a small external Cargo dependency
+   and prove that Cargo rejects a stale or incorrect binding.
 6. Emit and format Rust, compile representative generated files in integration
    tests, and source-map rustc diagnostics back to Stainless.
 7. Compile every reference sample as it enters the supported milestone subset,

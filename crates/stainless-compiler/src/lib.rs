@@ -8,6 +8,7 @@ pub mod ast;
 mod diagnostic;
 pub mod interop;
 pub mod lowering;
+pub mod resolution;
 pub mod semantics;
 
 pub use diagnostic::{Diagnostic, DiagnosticPhase};
@@ -30,11 +31,27 @@ pub fn analyze(source: &str) -> Analysis {
         })
         .collect::<Vec<_>>();
     diagnostics.extend(semantics::validate(&ast));
+    let semantic_model = match interop::standard_bindings() {
+        Ok(bindings) => {
+            let resolved = resolution::resolve(&ast, &bindings);
+            diagnostics.extend(resolved.diagnostics);
+            resolved.model
+        }
+        Err(error) => {
+            diagnostics.push(Diagnostic::semantic(
+                "INT001",
+                format!("invalid compiler-provided native bindings: {error}"),
+                ast.span,
+            ));
+            resolution::SemanticModel::default()
+        }
+    };
     diagnostics.sort_by_key(|diagnostic| diagnostic.span);
 
     Analysis {
         parse,
         ast,
+        semantics: semantic_model,
         diagnostics,
     }
 }
@@ -46,6 +63,8 @@ pub struct Analysis {
     pub parse: stainless_syntax::Parse,
     /// Compiler-owned semantic syntax tree.
     pub ast: ast::SourceFile,
-    /// Syntax and structural semantic diagnostics, in source order.
+    /// Resolved functions, expression types, and call targets.
+    pub semantics: resolution::SemanticModel,
+    /// Syntax, structural, name, and type diagnostics in source order.
     pub diagnostics: Vec<Diagnostic>,
 }

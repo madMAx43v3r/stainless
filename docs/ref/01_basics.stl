@@ -1,6 +1,6 @@
 // Provisional Stainless syntax example.
-// This file is now an executable lossless-parser fixture. Type checking and
-// transpilation are not implemented yet.
+// This file is an executable parser, AST-lowering, and name/type-resolution
+// fixture. HIR lowering and Rust emission are not implemented yet.
 
 namespace samples {
 

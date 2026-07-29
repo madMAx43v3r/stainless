@@ -5,16 +5,42 @@ use std::fmt;
 /// A type as seen by Stainless semantic analysis.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum TypeRef {
+    /// A type that could not be resolved because of an earlier diagnostic.
+    Error,
     /// The absence of a return value.
     Void,
     /// Stainless `bool`.
     Bool,
     /// Stainless `char`, which is a Rust Unicode scalar value.
     Char,
+    /// Stainless `i8`.
+    I8,
+    /// Stainless `i16`.
+    I16,
+    /// Stainless `i32`.
+    I32,
+    /// Stainless `i64`.
+    I64,
+    /// Stainless `i128`.
+    I128,
+    /// Stainless `isize`.
+    Isize,
     /// Stainless `u8`.
     U8,
+    /// Stainless `u16`.
+    U16,
+    /// Stainless `u32`.
+    U32,
+    /// Stainless `u64`.
+    U64,
+    /// Stainless `u128`.
+    U128,
     /// Stainless `usize`.
     Usize,
+    /// Stainless `f32`.
+    F32,
+    /// Stainless `f64`.
+    F64,
     /// A generic type parameter declared by the native type.
     Parameter(&'static str),
     /// A native Rust type under the reserved Stainless `rust::` namespace.

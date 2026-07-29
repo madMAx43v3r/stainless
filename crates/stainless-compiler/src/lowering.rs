@@ -30,16 +30,7 @@ fn lower_item(item: cst::Item) -> Item {
             span: span(&namespace),
         }),
         cst::Item::Use(declaration) => Item::Use(ast::UseDeclaration {
-            path: declaration
-                .syntax()
-                .descendants_with_tokens()
-                .filter_map(stainless_syntax::SyntaxElement::into_token)
-                .filter(|token| {
-                    !token.kind().is_trivia()
-                        && !matches!(token.kind(), SyntaxKind::UseKw | SyntaxKind::Semicolon)
-                })
-                .map(|token| token.text().to_owned())
-                .collect(),
+            path: lower_use_path(&declaration),
             span: span(&declaration),
         }),
         cst::Item::FunctionDefinition(function) => {
@@ -392,6 +383,26 @@ fn path_from_tokens(tokens: impl Iterator<Item = stainless_syntax::SyntaxToken>)
             .map(|token| token.text().to_owned())
             .collect(),
     }
+}
+
+fn lower_use_path(declaration: &cst::UseDeclaration) -> String {
+    let mut result = String::new();
+    for token in declaration
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(stainless_syntax::SyntaxElement::into_token)
+        .filter(|token| {
+            !token.kind().is_trivia()
+                && !matches!(token.kind(), SyntaxKind::UseKw | SyntaxKind::Semicolon)
+        })
+    {
+        if token.kind() == SyntaxKind::AsKw {
+            result.push_str(" as ");
+        } else {
+            result.push_str(token.text());
+        }
+    }
+    result
 }
 
 fn span(node: &impl AstNode) -> Span {
