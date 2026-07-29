@@ -2,6 +2,8 @@
 // Struct interface calls are always static. Classes may additionally be
 // converted to dynamically dispatched interface references or owning pointers.
 
+use rust::{String, Vec};
+
 namespace samples {
 
 interface Sized {
@@ -9,18 +11,18 @@ interface Sized {
 };
 
 struct Buffer : Sized {
-    vector<i32> values;
+    Vec<i32> values;
 
     usize size() const;
     void push(i32 value);
 };
 
 usize Buffer::size() const {
-    return values.size();
+    return values.len();
 }
 
 void Buffer::push(i32 value) {
-    values.push_back(value);
+    values.push(value);
 }
 
 usize chained_buffer_example() {
@@ -39,20 +41,20 @@ interface Answer {
 };
 
 interface NamedAnswer : Answer {
-    string name() const;
+    String name() const;
 };
 
 class ConstantAnswer : NamedAnswer {
 public:
     i32 value() const;
-    string name() const;
+    String name() const;
 };
 
 i32 ConstantAnswer::value() const {
     return 42;
 }
 
-string ConstantAnswer::name() const {
+String ConstantAnswer::name() const {
     return "constant";
 }
 

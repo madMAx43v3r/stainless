@@ -37,7 +37,7 @@ f32 explicit_base_x(const Point3& point) {
 }
 
 f32 example() {
-    Point3 point = Point3{Point2{3.0f32, 4.0f32}, 12.0f32};
+    Point3 point = Point3{Point2{3.0f, 4.0f}, 12.0f};
 
     // Same-named functions are selected from the static receiver type.
     f32 spatial = point.length_squared();

@@ -45,8 +45,8 @@ i32 class_move_example() {
     unique_ptr<Token> duplicate = owner.clone();
     unique_ptr<Token> moved_owner = move(owner);
 
-    // Copying shared_ptr would alias the same object; Token::clone constructs
-    // a new object and returns a distinct unique owner.
+    // Copying shared_ptr<Token> would alias the same object; Token::clone
+    // constructs a new object and returns a distinct unique owner.
     return 0;
 }
 

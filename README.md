@@ -43,13 +43,13 @@ language specification or executable test suite:
 - [`04_exact_overloads.stl`](docs/ref/04_exact_overloads.stl) — free-function
   and member-function overloads.
 - [`05_ownership_and_containers.stl`](docs/ref/05_ownership_and_containers.stl)
-  — non-null and nullable unique/shared owners, guarded `require` bindings,
-  `vector`, moves, and borrows.
+  — Stainless unique/shared owners, `Vec`, guarded `require` bindings, moves,
+  and borrows.
 - [`06_threads_and_globals.stl`](docs/ref/06_threads_and_globals.stl) —
-  namespace-scope storage, `atomic_ptr`, `atomic_nullptr`, thread-local state,
-  and thread handles.
-- [`07_native_runtime_api.stl`](docs/ref/07_native_runtime_api.stl) — trusted
-  `native`/`sealed` declarations used to define the runtime API whitelist.
+  namespace-scope storage, synchronized shared-pointer slots, thread-local
+  state, and thread handles.
+- [`07_rust_interop.stl`](docs/ref/07_rust_interop.stl) — native APIs reached
+  through `rust::` and generated bindings for external Cargo dependencies.
 - [`08_numeric_types.stl`](docs/ref/08_numeric_types.stl) — fixed-width
   integers, `usize`, `f32`/`f64`, inference defaults, and literal suffixes.
 - [`09_value_semantics.stl`](docs/ref/09_value_semantics.stl) — default
@@ -76,8 +76,15 @@ on constructs with direct Rust equivalents:
   classes;
 - interfaces and interface inheritance implemented as Rust traits,
   supertraits, and trait objects where dynamic dispatch is required;
-- safe dynamic allocation with ownership represented by `unique_ptr<T>`,
-  `unique_nullptr<T>`, `shared_ptr<T>`, `shared_nullptr<T>`, and `weak_ptr<T>`;
+- Stainless ownership types with deliberately restricted Rust lowerings,
+  including `unique_ptr<T>`, `shared_ptr<T>`, and their nullable, weak, and
+  synchronized counterparts;
+- other safe Rust library types under their real names, imported through the
+  reserved `rust` namespace, including `rust::Option<T>`, `rust::Result<T>`,
+  `rust::Vec<T>`, and `rust::String`;
+- direct use of safe Rust `core`, `alloc`, and `std` APIs plus generated,
+  compile-checked wrappers for external Cargo dependencies, all reached through
+  the reserved `rust` namespace;
 - value semantics, explicit moves, borrowing, and references governed by
   Rust-like ownership rules;
 - type inference where C++ would commonly use `auto`;
@@ -180,13 +187,15 @@ Member functions are declared inside their struct or class but defined outside
 it using a qualified C++-style name. Stainless has no Rust-style `impl` syntax:
 
 ```cpp
+use rust::Vec;
+
 struct Buffer : Sequence<i32> {
-    vector<i32> values;
-    usize size() const;
+    Vec<i32> values;
+    usize len() const;
 };
 
-usize Buffer::size() const {
-    return values.size();
+usize Buffer::len() const {
+    return values.len();
 }
 ```
 
@@ -195,9 +204,9 @@ functions are not inherited by data-derived structs and cannot be virtual or
 overridden. Reuse of behavior must be explicit: call a function on the embedded
 base value or extract a helper function. Listing an interface creates an
 implementation obligation: matching member declarations and their out-of-type
-definitions must satisfy every required interface function. A `native`
-declaration is the exception because its definition is supplied by the trusted
-runtime.
+definitions must satisfy every required interface function. Rust items imported
+through the interop mechanism are external declarations and do not use
+out-of-type Stainless definitions.
 
 A data-derived struct may independently declare a function with the same name
 and parameter types as a function declared by its data base. This is not an
@@ -263,32 +272,24 @@ qualifier.
 
 ### Declaration syntax and contextual modifiers
 
-Declaration modifiers follow the declaration kind:
+`sealed` follows the declaration kind:
 
 ```cpp
-interface native sealed vector_api<T> {
-    usize size() const;
-    bool empty() const;
-    void push_back(T value);
-};
-
-struct native vector<T> : vector_api<T> {
-    usize size() const;
-    bool empty() const;
-    void push_back(T value);
+interface sealed Sequence<T> {
+    usize len() const;
 };
 ```
 
-The order is the declaration kind, its modifiers, and then the declared name.
-`native` and `sealed` are contextual declaration modifiers, not globally
-reserved keywords; outside the modifier position they remain ordinary
-identifiers.
+`sealed` is a contextual declaration modifier, not a globally reserved
+keyword; outside the modifier position it remains an ordinary identifier. It
+prevents code outside the defining module from inheriting or implementing the
+declaration.
 
-- `native` means that storage, behavior, or both are supplied by the trusted
-  Rust runtime/backend rather than a Stainless definition. Normal project
-  source cannot use `native` to bind arbitrary Rust code.
-- `sealed` prevents code outside the defining standard-library module from
-  inheriting or implementing the declaration.
+The former `native` declaration modifier and bundled API facade are removed.
+Rust items are imported through `rust::` paths or exposed through generated
+interop bindings; Stainless source does not redeclare the Rust standard
+library. The ownership types remain compiler-defined language types and do not
+require source-level `native` declarations.
 
 The set of modifiers valid for each declaration kind will be explicit in the
 grammar. They must not be parsed as general prefix modifiers.
@@ -311,6 +312,31 @@ lookup only; they do not textually include or execute another file. Explicit,
 grouped, aliased, and glob imports are supported. If imports make an
 unqualified name ambiguous, use is a compile error rather than a
 first-declaration-wins choice.
+
+Every native Rust item is rooted under the compiler-provided `rust` namespace:
+
+```cpp
+use rust::Vec;
+use rust::{Option, Result, String};
+use rust::std::collections::HashMap;
+use rust::regex::Regex;
+```
+
+The virtual root exposes Rust prelude items such as `Vec` and `String` directly,
+standard crates below `rust::core`, `rust::alloc`, and `rust::std`, and each
+Cargo dependency below `rust::<dependency>`. Native Rust names do not enter a
+Stainless namespace automatically. Importing `use rust::Vec;` makes the short
+name `Vec` available in that scope; without the import it must be written
+`rust::Vec`.
+
+Receiver calls remain ordinary after import: a value whose type resolved to
+`rust::Vec` may call `values.push(...)` and `values.len()`. Associated
+functions, free functions, constants, traits, and macros likewise first enter
+name resolution through a `rust::` path or an explicit import from one. This
+keeps native items separate from Stainless declarations with identical names.
+For example, a project-defined `Vec` can coexist with native `rust::Vec`; an
+attempt to import both under the same unqualified name is an ordinary import
+collision and requires qualification or an alias.
 
 Crates and source files follow Rust's module layout with `.stl` replacing
 `.rs`:
@@ -336,9 +362,11 @@ implicitly create modules without the corresponding `mod` declaration.
 Unsupported Rust path overrides such as `#[path = ...]` are not accepted.
 
 The transpiler mirrors this tree in generated `.rs` files. `crate` always means
-the current Stainless crate. Cargo dependencies and arbitrary Rust crates do
-not automatically become Stainless namespaces or bypass the native-runtime
-whitelist.
+the current mixed Stainless/Rust crate. A dependency in the package's
+`Cargo.toml` enters the virtual `rust` root under Cargo's normal dependency
+name. External-crate items are exposed through the generated interop mechanism
+described below; the raw dependency crate never appears as an unqualified
+Stainless namespace.
 
 Member access control follows C++:
 
@@ -359,7 +387,7 @@ described for globals below; access labels are not valid at namespace scope.
 exact type:
 
 ```cpp
-auto count = values.size();
+auto count = values.len();
 const auto name = "stainless";
 ```
 
@@ -375,18 +403,34 @@ and a fluent `void` chain receiver cannot be captured with `auto`.
 
 ### Reserved implementation identifiers
 
-Every identifier beginning with `__` is reserved for the Stainless compiler,
-bundled standard library, and Rust runtime. Project source cannot declare a
+Every identifier beginning with `__` is reserved for the Stainless compiler
+and generated Rust bindings. Project source cannot declare a
 function, type, namespace, field, parameter, local variable, or other symbol
 whose name begins with this prefix. A leading single underscore remains
 available to project code.
 
-User code may call documented compiler-provided operations with reserved names,
-such as `atomic_ptr<T>::__load()`, but cannot define, overload, shadow,
-or replace them. Generated Rust symbols may also use a `__stainless` prefix,
-giving the backend a namespace that cannot collide with source declarations.
-The lexer still treats these spellings as identifiers; name validation enforces
-the reservation and reports their declaration as an error.
+Generated Rust symbols use a `__stainless` prefix, giving the backend and
+wrapper generator a namespace that cannot collide with source declarations.
+The lexer still treats these spellings as identifiers; name validation
+enforces the reservation and reports their declaration as an error. A public
+Rust item whose real name begins with `__` may still be reached through a
+generated non-reserved alias.
+
+Project code may call documented compiler-provided operations whose names begin
+with `__`, currently the `atomic_ptr` and `atomic_nullptr` slot operations, but
+cannot declare, overload, shadow, or replace them.
+
+The top-level `stainless` namespace is also reserved for compiler-provided,
+source-visible language types such as `stainless::Exception`. Project code may
+refer to documented members of that namespace but cannot declare the namespace
+or add declarations to it.
+
+The top-level `rust` namespace is reserved for native Rust name resolution.
+Project code cannot declare, reopen, shadow, or add declarations to it. It is a
+compiler-owned source view over Rust items and is not emitted as a Rust module.
+This reservation does not prevent project code from declaring names such as
+`Vec`, `String`, or `Regex`; those remain distinct from `rust::Vec`,
+`rust::String`, and `rust::regex::Regex`.
 
 ### Primitive numeric types
 
@@ -402,10 +446,13 @@ C++ spellings such as `short`, `int`, `long`, `unsigned`, `size_t`, `float`,
 collection lengths, and address-sized quantities. Public data formats should
 prefer an explicitly sized integer.
 
-Numeric literals follow Rust-style inference and suffixes. An integer literal
-uses its expected type and otherwise defaults to `i32`; a floating literal uses
-its expected type and otherwise defaults to `f64`. Suffixes such as `42u64`,
-`3.0f32`, and `3.0f64` select an exact type.
+Integer literals use Rust-style expected-type inference and otherwise default
+to `i32`; suffixes such as `42u64` select an exact integer type. Floating
+literals follow C++ spelling: an unsuffixed literal such as `3.0` always has
+type `f64`, while the `f` suffix in `3.0f` selects `f32`. Rust literal suffixes
+such as `3.0f32` and `3.0f64` are not accepted in Stainless source. An expected
+`f32` type does not change an unsuffixed literal, so `f32 value = 3.0;` is a
+type error and must be written `f32 value = 3.0f;`.
 
 `f32` and `f64` lower directly to Rust's IEEE-754 binary32 and binary64 types,
 including their infinities, signed zero, and NaN behavior. There is no implicit
@@ -451,43 +498,129 @@ direct Rust equivalents.
 
 ### Strings
 
-An ordinary string literal such as `"text"` has Stainless type `string`, not a
-borrowed character-pointer or string-view type. It lowers to an owned Rust
-`String` value and may allocate when evaluated. `auto text = "hello";`
-therefore deduces `string`.
+Stainless source exposes Rust's owned `rust::String` type with C++ construction
+and reference syntax. An ordinary literal such as `"text"` has that type, and
+the compiler emits the required owned Rust construction automatically. The
+short spelling requires an import:
 
-Stainless `string` otherwise follows Rust `String` semantics:
+```cpp
+use rust::String;
 
-- Contents are always valid UTF-8.
-- `size()` reports the number of UTF-8 bytes.
-- Integer indexing is not supported because a byte offset need not identify a
-  Unicode scalar-value boundary.
-- A string is a copyable Stainless value; implicit copying performs a deep
-  Rust `String::clone`, while `move(value)` transfers its allocation.
-- Embedded null bytes are ordinary string data and there is no implicit
-  null-terminated `const char*` view.
+String owned = "hello";
+auto inferred = "world"; // String
+usize bytes = owned.len();
+```
 
-Only functions declared by the bundled Stainless `string` API are callable;
-following Rust's representation and Unicode rules does not expose arbitrary
-Rust `String` methods. Additional mutation, slicing, iteration, and formatting
-operations require explicit runtime declarations and documented failure
-semantics.
+A borrowed string parameter is written `const String&` after that import, or
+`const rust::String&` when fully qualified. When a selected Rust API expects
+`&str`, the compiler or generated wrapper borrows the `String` and passes its
+UTF-8 string slice. This borrow adaptation happens only after the call target
+is known and therefore never participates in overload selection. A string
+literal can use the same adaptation without an additional source-level
+conversion.
+
+Explicit duplication or conversion to an owned string uses C++ constructor
+syntax:
+
+```cpp
+String copy = String(path);
+```
+
+For an exact supported conversion, this lowers to the corresponding Rust
+`String::from(...)` or `From` implementation. Rust construction functions are
+backend details and are not written as `String::from(...)` in Stainless source.
+
+`String` is not implicitly deep-copied. A consuming Stainless context still
+uses the language's explicit `move(value)` operation, while duplication calls
+the Rust API explicitly with `value.clone()`. Rust methods such as `len`,
+`is_empty`, `push`, `push_str`, and `into_bytes` keep their real names and
+behavior. Borrow-returning helpers such as `as_str` are used inside generated
+Rust when needed but are not source-callable because Stainless functions
+cannot return references. Integer indexing remains unavailable because Rust
+`String` is UTF-8 and a byte offset need not identify a character boundary.
+Embedded null bytes are ordinary data and no implicit C string is created.
 
 ### Initialization, copying, and moving
 
 Stainless never permits uninitialized storage. A declaration without an
-explicit initializer, such as `vector<i32> values;`, requests default
-construction; it does not create an indeterminate value. It is valid only when
-the type has an accessible, non-deleted zero-argument constructor that fully
-initializes the value. Primitive numeric types have no implicit default
-constructor and therefore require an initializer.
+explicit initializer requests a Stainless default constructor; it does not
+create an indeterminate value. For example, this is initialized by the mapped
+zero-argument `Vec` constructor:
+
+```cpp
+use rust::Vec;
+
+Vec<i32> values;
+```
+
+The explicit form is `Vec()`, never Rust's `Vec::new()`. A safe Rust associated
+`new` function is exposed as C++ constructor syntax when it returns `Self`
+directly and its parameters are representable. A zero-argument Rust type that
+has no such function may use `Default::default()` as its mapped Stainless
+default constructor. This mapping is recorded in the compiler's Rust metadata
+and rechecked by Cargo. A Rust factory that returns `Result<Self, E>` remains a
+fallible factory rather than becoming a default constructor. Primitive numeric
+types have no implicit default constructor and therefore require an
+initializer.
 
 When no constructor prevents it, a default constructor may be synthesized only
-if every field can itself be default-constructed. Otherwise it is implicitly
-deleted and a default-construction attempt is a compile error. Stainless may
-use C++-style `= delete` syntax to make a constructor unavailable explicitly.
-Aggregate initialization remains valid only when it initializes every required
-field.
+if the struct data base, when present, and every field can themselves be
+default-constructed. Otherwise it is implicitly deleted and a
+default-construction attempt is a compile error. Stainless may use C++-style
+`= delete` syntax to make a constructor unavailable explicitly. Aggregate
+initialization remains valid only when it initializes every required field.
+
+Like Java, a Stainless constructor may declare checked exceptions:
+
+```cpp
+class Session {
+public:
+    Session(bool available) throws OpenError;
+};
+
+Session::Session(bool available) throws OpenError {
+    if (!available) {
+        throw OpenError{/* ... */};
+    }
+}
+```
+
+The `throws` clause has the same checking rules as a function's clause. Every
+checked exception raised by the constructor body, a delegated constructor, a
+struct data-base constructor, or a field initializer must be caught within the
+constructor or covered by its declared set. The declaration and out-of-type
+definition must have the same normalized set. Constructor overload selection
+continues to use only the exact canonical parameter types; `throws` does not
+distinguish overloads.
+
+Construction is a throwing expression at its call site. The caller must catch
+or feed forward every declared constructor exception:
+
+```cpp
+Session create_session(bool available) throws OpenError {
+    return Session(available);
+}
+```
+
+If construction fails, no `Session` value is produced. Base and field values
+whose initialization completed are destroyed normally; other side effects that
+occurred before the throw are not rolled back. The Rust lowering constructs
+the data base and fields in declaration order using hidden locals and `?`,
+assembles `Self` only after all required values exist, and then executes the
+constructor body. An error from the body drops the assembled value. This
+avoids partially initialized Rust values and does not require `unsafe`.
+
+A compiler-synthesized default constructor has an empty `throws` set, matching
+Java's rule. It is therefore synthesized only when every implicit data-base and
+field default construction is non-throwing. If an in-class field initializer
+can throw, the type must explicitly declare at least one constructor and every
+constructor must declare a covering exception type, again following Java's
+checked-initializer rule.
+
+`make_unique<T>(arguments...)` and `make_shared<T>(arguments...)` carry the
+selected `T` constructor's checked effect. Generated Rust constructs `T` first
+and places it in `Box` or `Arc` only after construction succeeds. A failed
+constructor therefore produces no owning pointer.
 
 Structs are value types:
 
@@ -510,9 +643,9 @@ Classes are identity-oriented and never copyable:
 - Explicit deep duplication is ordinary class behavior, conventionally a
   `clone() const` member returning `unique_ptr<Class>`. This creates a new
   object; `unique_ptr` itself is not cloneable.
-- Copying a non-null `shared_ptr<Class>` or nullable
-  `shared_nullptr<Class>` duplicates only its ownership handle and continues to
-  refer to the same immutable class object; it does not clone that object.
+- Copying a `shared_ptr<Class>` or `shared_nullptr<Class>` duplicates only its
+  shared ownership handle and continues to refer to the same immutable class
+  object; it does not clone that object.
 
 A named value never moves implicitly. Passing, returning, initializing, or
 assigning from a named non-copy value requires `move(value)`. A fresh temporary
@@ -521,16 +654,11 @@ afterward. Using a moved binding is a compile error until it is explicitly
 reinitialized in a context where assignment is allowed. An active borrow also
 prevents moving its owner.
 
-`unique_ptr<T>` and nullable `unique_nullptr<T>` are non-copyable value types
-that transfer ownership only through `move(pointer)`.
-
-`shared_ptr<T>` is an implicitly copyable, non-null value type.
-`shared_nullptr<T>` is its implicitly copyable nullable counterpart. Copying a
-non-null handle increments its strong reference count; copying a null
-`shared_nullptr<T>` simply copies the null state. Copy construction, assignment,
-and pass-by-value leave the source handle valid. `move(pointer)` transfers the
-handle or null state without a reference-count increment and invalidates the
-source binding.
+`unique_ptr<T>` and `unique_nullptr<T>` are non-copyable owning values that
+transfer through `move(value)`. `shared_ptr<T>` and `shared_nullptr<T>` are
+implicitly copyable: copying increments the underlying `Arc` strong count and
+leaves the source valid. `move(value)` transfers a shared handle without that
+increment and invalidates the source binding.
 
 The Stainless semantic pass must track moves, borrows, conditional control
 flow, and reinitialization so it can diagnose errors against `.stl` source.
@@ -568,10 +696,9 @@ Reference binding follows these rules:
 - A derived-struct argument may project to a data-base reference after the
   function has been selected.
 - Passing a `unique_ptr<T>` to a `T&` or `const T&` parameter borrows its
-  pointee. A `unique_nullptr<T>` may bind to either reference only where
-  control-flow analysis proves it is non-null. Passing a `shared_ptr<T>` may
-  always bind to `const T&`; a `shared_nullptr<T>` may do so only where it is
-  proven non-null.
+  pointee. A `unique_nullptr<T>` may bind to either reference only where it is
+  proven non-null. Passing a `shared_ptr<T>` may bind to `const T&`; a
+  `shared_nullptr<T>` may do so only where it is proven non-null.
 
 References to ownership handles are forbidden:
 
@@ -582,11 +709,10 @@ void invalid(const shared_ptr<T>& value);  // rejected
 void invalid(shared_nullptr<T>& value);    // rejected
 ```
 
-Owning handles must be passed by value: `unique_ptr<T>` and
-`unique_nullptr<T>` require an explicit move, while `shared_ptr<T>` and
-`shared_nullptr<T>` copy implicitly. The exceptions are the synchronized
-pointer slots `atomic_ptr<T>` and `atomic_nullptr<T>`, which may be passed by
-reference because their APIs provide synchronized access to the binding.
+Owning handles must be passed by value: unique owners require an explicit move,
+while shared owners copy implicitly. The synchronized pointer slots
+`atomic_ptr<T>` and `atomic_nullptr<T>` are the exceptions and may be passed by
+reference because their APIs synchronize access to the binding.
 
 ### Guarded non-null reference bindings
 
@@ -606,7 +732,7 @@ that implicit return:
 
 ```cpp
 auto& config = require(maybe) {
-    println("configuration is missing");
+    rust::println!("configuration is missing");
 }
 ```
 
@@ -630,7 +756,7 @@ The initial form has these rules:
 
 - The operand must have type `unique_nullptr<T>` or `shared_nullptr<T>` and is
   evaluated exactly once. Applying `require` to a non-null owner or an
-  unrelated optional value is a type error.
+  unrelated `Option` value is a type error.
 - If the owner is null, the semicolon form returns from its enclosing `void`
   function. It is rejected in a value-returning function.
 - When an explicit failure block is present, it executes on null. In a `void`
@@ -645,8 +771,7 @@ The initial form has these rules:
 - A shared owner always binds `const T&`, even when `auto&` is written, because
   pointees owned through `shared_ptr` and `shared_nullptr` are immutable.
 - The binding refers to the pointee, not to the ownership handle, so this form
-  does not weaken the prohibition on `unique_ptr<T>&`, `shared_ptr<T>&`, and
-  other pointer-handle references.
+  does not weaken the prohibition on pointer-handle references.
 
 The reference may be used for member access or passed to compatible reference
 parameters, but it cannot be returned, stored, captured by an escaping closure,
@@ -686,8 +811,9 @@ let Some(config) = maybe.as_deref() else {
 ```
 
 A mutable named unique owner instead uses `as_deref_mut()`. The lowering does
-not clone an `Arc<T>` merely to create the reference; `atomic_nullptr::__load`
-has already produced the owning snapshot whose lifetime is being extended.
+not clone an `Arc<T>` merely to create the reference;
+`atomic_nullptr::__load` has already produced the owning snapshot whose
+lifetime is being extended.
 
 ### Fluent `void` member calls
 
@@ -697,7 +823,7 @@ implicitly chainable:
 ```cpp
 Buffer buffer;
 buffer.push(10).push(20);
-usize count = buffer.push(30).size();
+usize count = buffer.push(30).len();
 ```
 
 This is conceptually similar to returning `self` by reference, but it does not
@@ -716,6 +842,10 @@ declared `const` produces a const chain receiver. Consequently, a mutating
 function cannot follow a const function in the same chain. Free functions and
 static member functions have no receiver and retain ordinary `void` semantics.
 Function bodies still use `return;` and cannot return an expression.
+
+This fluent rule applies only to Stainless-declared `void` members. A Rust
+method returning `()` retains its exact Rust API and cannot be chained unless
+its Rust return type itself supports the next operation.
 
 The compiler evaluates the original receiver exactly once, invokes each member
 from left to right, and reuses that receiver until a non-`void` call terminates
@@ -781,12 +911,14 @@ rules than C++:
 For example, these Stainless declarations:
 
 ```cpp
+use rust::String;
+
 i32 parse(i32 value);
-i32 parse(string value);
+i32 parse(String value);
 ```
 
 may lower conceptually to Rust functions named `parse__i32` and
-`parse__string`. The final mangling scheme must also handle modules, methods,
+`parse__String`. The final mangling scheme must also handle modules, methods,
 references, generic arguments, and collisions without relying on this
 illustrative spelling.
 
@@ -797,38 +929,72 @@ exceptions checked in the Java sense. Every potentially escaping exception
 type appears in the function signature:
 
 ```cpp
-Config load(const string& path) throws IoError, ParseError;
+use rust::String;
 
-Config load(const string& path) throws IoError, ParseError {
-    string source = read_file(path);
-    return parse_config(source);
+Config load(const String& path) throws IoError, ParseError;
+
+Config load(const String& path) throws IoError, ParseError {
+    String source = read_file(path);
+    return parse_config(move(source));
 }
 ```
 
 For a const member function, `throws` follows the C++-style member qualifier:
 
 ```cpp
-Config Loader::load(const string& path) const throws IoError;
+Config Loader::load(const String& path) const throws IoError;
 ```
 
-Every exception type is a struct whose single data-base chain ends at the
-compiler-provided `std::exception` struct:
+Constructors place the same clause after their parameter list:
 
 ```cpp
-struct IoError : std::exception {
-    string path;
-};
-
-throw IoError{std::exception("input could not be read"), path};
+Loader::Loader(const String& path) throws IoError;
 ```
 
-`std::exception` is a special `native` data struct, not a source-level
-interface. It stores the common exception message and provides
-`string what() const`; `what()` returns an owned Stainless string because
-reference returns are forbidden. Exception structs remain ordinary vtable-free
-Stainless structs and may add fields or derive through the normal single
-data-inheritance chain. A struct that does not ultimately derive from
-`std::exception` cannot appear in `throws`, `throw`, or a typed `catch`.
+Constructor invocation participates in the same mandatory catch-or-feed-forward
+analysis as an ordinary throwing call. Constructor bodies, data-base and field
+initialization, failed-construction cleanup, and the non-throwing synthesized
+default constructor are specified in the initialization section above.
+
+Every exception type is a struct whose single data-base chain ends at the
+compiler-provided `stainless::Exception` struct:
+
+```cpp
+struct IoError : stainless::Exception {
+    String path;
+};
+
+throw IoError{
+    stainless::Exception("input could not be read"),
+    String(path)
+};
+```
+
+`stainless::Exception` is a compiler-provided data struct, not a source-level
+interface and not an attempt to add a type to Rust's `std` namespace. It stores
+an owned `String` message. The backend supplies `Display` and
+`std::error::Error` implementations for generated exception types, so ordinary
+Rust error formatting and `.to_string()` work on the Rust side. Exception
+structs remain ordinary vtable-free Stainless structs and may add fields or
+derive through the normal single data-inheritance chain. A struct that does not
+ultimately derive from `stainless::Exception` cannot appear in `throws`,
+`throw`, or a typed `catch`.
+
+The compiler also provides one generic native-error exception:
+
+```cpp
+// Conceptual compiler-provided declaration; project code cannot redeclare it.
+namespace stainless {
+    struct RustError : Exception {
+    };
+}
+```
+
+`stainless::RustError` represents an error value crossing from a native Rust
+`Result` into Stainless's checked exception model. It retains an owned
+human-readable message but not the native Rust error's concrete type or fields.
+Consequently project code catches `stainless::RustError`; it cannot catch or
+downcast to the Rust `E` type.
 
 The `throws` clause is an unordered set of canonical exception-struct types.
 Duplicate entries and entries made redundant by another listed data base are
@@ -842,7 +1008,7 @@ An ordinary call keeps C++/Java syntax. There is no source-level Rust `?`
 operator:
 
 ```cpp
-Config reload(const string& path) throws IoError, ParseError {
+Config reload(const String& path) throws IoError, ParseError {
     return load(path); // either exception is automatically fed forward
 }
 ```
@@ -881,7 +1047,7 @@ matches when its declared type is the concrete exception type or one of that
 type's exception data bases. Handlers are tested in source order, so a base
 handler placed before a derived handler makes the latter unreachable and is a
 compile error. Interface conformance, numeric conversion, and other coercions
-do not participate. `catch (const std::exception& error)` catches every
+do not participate. `catch (const stainless::Exception& error)` catches every
 Stainless exception; `catch (...)` catches every remaining exception without a
 binder and must be last.
 
@@ -894,7 +1060,7 @@ hidden owned value; it does not copy through that reference.
 A `try` statement may handle only part of a call's exception set:
 
 ```cpp
-Config load_or_default(const string& path) throws IoError {
+Config load_or_default(const String& path) throws IoError {
     try {
         return load(path);
     } catch (const ParseError& error) {
@@ -933,12 +1099,12 @@ fn load(path: &String)
 }
 ```
 
-Conceptually, `Result<T, Box<std::exception>>` is therefore close, but the
+Conceptually, `Result<T, Box<stainless::Exception>>` is therefore close, but the
 actual Rust type is `Result<T, Box<dyn __StainlessException>>`. The compiler
 implements Rust's `Debug`, `Display`, and `std::error::Error` traits for each
-exception struct using its `std::exception` base, making the generated errors
-usable by ordinary Rust tooling without exposing those Rust traits to Stainless
-source.
+exception struct using its `stainless::Exception` base, making the generated
+errors usable by ordinary Rust tooling without exposing those Rust traits to
+Stainless source.
 
 The private `__project` operation is generated for every exception struct. It
 returns a safe `Any` reference to the concrete value or one of its embedded
@@ -983,219 +1149,220 @@ implementation may expose a subset or derived specialization of the interface
 function's declared exceptions; generated trait code uses the same
 `__ExceptionBox` carrier at the dispatch boundary.
 
-Bundled `native` functions that can fail declare the same Stainless `throws`
-effects, and their trusted Rust implementations return the corresponding
-`Result`. There is no arbitrary Rust-error escape hatch. Crate entry points and
-thread entry functions initially require an empty exception set, so all
-checked exceptions must be caught before those boundaries.
+Rust functions returning `Result<T, E>` retain that type in Stainless.
+The `unwrap()` method on native `rust::Result<T, E>` is compiler-adapted: it
+consumes its receiver, returns the `T` inside `Ok`, and throws
+`stainless::RustError` when it contains `Err`. The checked effect must be caught
+or listed in the enclosing function's `throws` clause. No per-error adapter is
+required, and the backend never calls Rust's panicking implementation.
+
+A fresh result temporary is consumed directly, avoiding a named intermediate:
+
+```cpp
+Regex expression = Regex::new("^stainless$").unwrap();
+```
+
+A method call on a named result explicitly consumes and invalidates that
+binding:
+
+```cpp
+Result<Regex, RustRegexError> compiled = Regex::new("^stainless$");
+Regex expression = compiled.unwrap();
+```
+
+Using `compiled` after the call is a use-after-consume error. This is a
+specified consuming operation rather than an implicit move caused by ordinary
+function argument passing. An unrelated Stainless member function named
+`unwrap` remains an ordinary method.
+
+Stainless also inserts the same checked unwrap when a target of exact type `T`
+is initialized or assigned from `rust::Result<T, E>`:
+
+```cpp
+Regex expression = Regex::new("^stainless$");
+```
+
+This is not an implicit conversion used by overload resolution. It is a
+target-typed assignment rule applied only after the destination type and
+right-hand expression type are known. The inserted operation has checked effect
+`throws stainless::RustError`, exactly like an explicit `.unwrap()`, so the
+enclosing function must catch or declare it.
+
+The initial rule applies to explicitly typed variable and field initialization,
+aggregate field initialization, and assignment to an existing value. It does
+not apply to function arguments, return expressions, overload matching, or
+`auto` deduction. Thus `auto expression = Regex::new(...)` deduces the native
+`Result`, while `auto expression = Regex::new(...).unwrap()` deduces `Regex`.
+Normal copy/move rules still apply to a named result: a non-copyable named
+`result` requires `Regex expression = move(result);`, after which the compiler
+inserts the checked unwrap. A fresh result temporary needs no explicit move.
+
+When the compiler can prove that `E` implements Rust `Display`, the generated
+shim uses that representation as the exception message. Otherwise it uses
+`Debug` when that trait is proven. If neither formatting trait is available,
+the operation still works but uses the fixed message `"native Rust operation
+failed"`. This choice is made statically from verified Rust trait metadata; it
+does not use unsafe inspection or unstable specialization. The original `E`
+value is consumed and dropped after the message is produced.
+
+This compiler-generated match replaces Rust's panicking `Result::unwrap`,
+keeping panic unwinding outside the Stainless exception model. Crate entry
+points and thread entry functions initially require an empty exception set, so
+`stainless::RustError` must be caught before those boundaries.
+
+After receiver type and method resolution, a `.unwrap()` call whose receiver is
+native `rust::Result<T, E>` becomes a dedicated `UnwrapRustResult` HIR
+operation. Detection uses the resolved receiver type and Rust item identity,
+not method spelling alone, so project-defined methods with the same name are
+unaffected. In the simplest feed-forward context, the generated Rust is
+conceptually:
+
+```rust
+let expression = match compiled {
+    Ok(value) => value,
+    Err(error) => {
+        let message = /* Display, Debug, or the fixed fallback */;
+        return Err(Box::new(__RustError::from_message(message)));
+    }
+};
+```
+
+The actual backend uses the compiler-private erased exception carrier described
+above. Within a Stainless `try` block, the `Err` branch targets that block's
+generated handler boundary instead of returning past it. The wrapper is
+specialized and emitted inline at the call site; there is no user-visible
+conversion function and no requirement that all native error types share a
+Rust representation.
+
+A native call returning `Result<T, E>` remains an ordinary `Result` unless
+source calls its compiler-adapted `.unwrap()` method or places it in one of the
+exact target-typed initialization or assignment contexts above. Both forms
+lower to the same `UnwrapRustResult` HIR operation.
 
 ### Dynamic allocation and owning pointers
 
-Dynamic allocation is supported only through ownership-bearing types. Stainless
-does not have an owning raw-pointer form:
+Stainless keeps its deliberately restricted pointer vocabulary even though
+other library APIs use Rust names. These are compiler-known ownership types,
+not aliases that expose every method of their Rust lowering:
 
 | Stainless | Rust lowering | Semantics |
 | --- | --- | --- |
 | `unique_ptr<T>` | `Box<T>` | One non-null owner; movable but not copyable |
-| `unique_nullptr<T>` | `Option<Box<T>>` | Nullable unique owner; movable but not copyable |
-| `shared_ptr<T>` | `Arc<T>` | Non-null, implicitly copyable, atomically reference-counted, immutable shared ownership |
-| `shared_nullptr<T>` | `Option<Arc<T>>` | Nullable counterpart to `shared_ptr<T>` with the same immutable pointee |
-| `weak_ptr<T>` | `Weak<T>` | Non-owning observation that does not keep the allocation alive |
-| `atomic_ptr<T>` | Initially `RwLock<Arc<T>>` | Synchronized, replaceable non-null shared handle |
-| `atomic_nullptr<T>` | Initially `RwLock<Option<Arc<T>>>` | Synchronized, replaceable nullable shared handle |
-| `vector<T>` | `Vec<T>` | Owned dynamically sized sequence |
+| `unique_nullptr<T>` | `Option<Box<T>>` | Nullable unique owner |
+| `shared_ptr<T>` | `Arc<T>` | Non-null, implicitly copyable, immutable shared ownership |
+| `shared_nullptr<T>` | `Option<Arc<T>>` | Nullable shared ownership |
+| `weak_ptr<T>` | `Weak<T>` | Non-owning observation |
+| `atomic_ptr<T>` | Initially `RwLock<Arc<T>>` | Replaceable non-null shared slot |
+| `atomic_nullptr<T>` | Initially `RwLock<Option<Arc<T>>>` | Replaceable nullable shared slot |
 
-`optional<T>` does not accept a pointer or synchronized pointer-slot type as
-`T`. The compiler rejects all of the following after normalizing type aliases:
-
-```cpp
-optional<unique_ptr<T>> invalid_unique;
-optional<unique_nullptr<T>> invalid_nullable_unique;
-optional<shared_ptr<T>> invalid_shared;
-optional<shared_nullptr<T>> invalid_nullable_shared;
-optional<weak_ptr<T>> invalid_weak;
-optional<atomic_ptr<T>> invalid_atomic;
-optional<atomic_nullptr<T>> invalid_nullable_atomic;
-```
-
-This restriction applies when the direct `T` is a pointer type; an ordinary
-struct containing a pointer field may still be placed in `optional`. Pointer
-nullability must be represented by a dedicated pointer type with defined
-ownership semantics. `shared_nullptr<T>` is therefore the sole nullable shared
-owner, and `unique_nullptr<T>` is the sole nullable unique owner.
+Native `rust::Option<T>` remains available for ordinary optional values, but
+Stainless rejects a pointer or synchronized pointer-slot type as its direct
+`T`. Pointer nullability must use `unique_nullptr<T>` or
+`shared_nullptr<T>`, preserving the ownership-specific refinement and
+conversion rules instead of allowing both representations.
 
 Allocation uses `make_unique<T>(...)` or `make_shared<T>(...)`. There is no
 owning `new`, `delete`, placement allocation, or dynamically allocated C-style
-array. `drop(move(value))` may consume a named owning handle before the end of
-its scope; a fresh temporary may be dropped directly. This keeps the rule that
-named values never move implicitly. Otherwise destruction happens
-automatically. The initial allocation-failure behavior follows ordinary Rust
-allocation and aborts instead of throwing an exception.
+array. `drop(move(value))` may consume a named owning handle early; otherwise
+destruction is automatic. Allocation failure follows ordinary Rust allocation
+behavior and aborts rather than throwing a Stainless exception.
 
 `unique_ptr<T>` and `unique_nullptr<T>` provide exclusive ownership:
 
-- `unique_ptr<T>` has no default constructor and cannot be assigned
-  `nullptr`. `make_unique<T>(...)` produces a `unique_ptr<T>`.
-- Default construction and assignment from `nullptr` produce a null
-  `unique_nullptr<T>`.
-- Either type permits mutation of its pointee when its binding is mutable, its
-  pointee is present, and no active borrow prevents mutation.
-- Neither type is copyable. Moving transfers the `Box<T>` or null state and
-  invalidates the previous binding.
+- `unique_ptr<T>` is non-null, has no default constructor, and cannot be
+  assigned `nullptr`.
+- Default construction or assignment from `nullptr` makes a
+  `unique_nullptr<T>` null.
+- A mutable unique owner permits mutable pointee access when present and not
+  borrowed.
+- Neither type is copyable. Moving transfers its `Box<T>` or null state and
+  invalidates the source.
 
 `shared_ptr<T>` and `shared_nullptr<T>` deliberately provide immutable shared
 data:
 
-- `shared_ptr<T>` has no default constructor and cannot be assigned
-  `nullptr`. `make_shared<T>(...)` produces a `shared_ptr<T>`.
-- Default construction and assignment from `nullptr` produce a null
-  `shared_nullptr<T>`.
-- Dereferencing it yields only a shared/const reference.
-- Fields cannot be assigned through it, a mutable reference cannot be extracted
-  from it, and mutating methods cannot be called through it.
-- Stainless does not expose `Arc::get_mut`, copy-on-write operations such as
-  `Arc::make_mut`, or an interior-mutability escape hatch.
-- Reassigning a mutable shared-handle binding is allowed.
-  Reassignment replaces only that handle and decrements the old allocation's
-  strong count; it neither changes the old pointee nor redirects other handles.
-- Copy construction, assignment, and pass-by-value implicitly duplicate the
-  non-null handle and lower to an `Arc::clone` where a reference-count
-  increment is required. Copying a null `shared_nullptr<T>` remains null.
-- `move(pointer)` remains available when the caller wants to transfer a handle
-  without incrementing its reference count.
-- `lock(pointer)` returns a non-null `shared_nullptr<T>` when the weak
-  allocation remains alive and a null `shared_nullptr<T>` otherwise.
+- `shared_ptr<T>` is non-null, has no default constructor, and cannot be
+  assigned `nullptr`.
+- Default construction or assignment from `nullptr` makes a
+  `shared_nullptr<T>` null.
+- Dereferencing yields only a shared/const reference. Fields cannot be assigned
+  and mutating methods cannot be called through the handle.
+- The source API does not expose `Arc::get_mut`, `Arc::make_mut`, or an
+  interior-mutability escape hatch through these pointer types.
+- A shared pointee must be deeply share-immutable. Rust types containing
+  `UnsafeCell`-based interior mutability, including `Mutex`, `RwLock`, and
+  atomic cells, cannot be used as `T`; synchronization of the pointer binding
+  itself uses `atomic_ptr` or `atomic_nullptr`.
+- Reassigning a mutable handle changes only that handle, not the allocation
+  observed by other handles.
+- Copy construction, assignment, and pass-by-value implicitly clone the
+  underlying `Arc`; copying a null `shared_nullptr<T>` remains null.
+- `move(pointer)` transfers the handle without incrementing its reference count.
+- `lock(pointer)` returns a `shared_nullptr<T>` promoted from `weak_ptr<T>`.
 
 #### Nullable owner conversions and refinement
 
-Conversions between unique-owner representations are always moving
-conversions:
+Conversions between unique-owner representations are moving conversions:
 
 ```cpp
-unique_ptr<Config> definite_unique =
+unique_ptr<Config> definite =
     make_unique<Config>(/* ... */);
-unique_nullptr<Config> maybe_unique =
-    unique_nullptr<Config>(move(definite_unique));
+unique_nullptr<Config> maybe =
+    unique_nullptr<Config>(move(definite));
 
-if (maybe_unique) {
+if (maybe) {
     unique_ptr<Config> recovered =
-        unique_ptr<Config>(move(maybe_unique));
+        unique_ptr<Config>(move(maybe));
 }
 ```
 
-`unique_nullptr<T>(move(pointer))` consumes a `unique_ptr<T>` and wraps its
-`Box<T>` in `Some`; a fresh `unique_ptr<T>` temporary may transfer directly.
-The reverse `unique_ptr<T>(move(pointer))` consumes a proven-non-null
-`unique_nullptr<T>` and extracts its `Box<T>`. Because unique owners cannot be
-copied, omitting `move` in either direction is a compile error. Recovering a
-`unique_ptr<T>` is also a compile error when the nullable source is not proven
-non-null.
+The first conversion consumes `unique_ptr<T>` and wraps its `Box<T>` in
+`Some`; the reverse consumes a proven-non-null `unique_nullptr<T>`. Omitting
+`move` or extracting from a source not proven non-null is a compile error.
 
-Conversions between the two shared-handle types use constructor syntax and do
-not participate in overload resolution:
+Shared conversions are explicit constructor-style conversions:
 
 ```cpp
 shared_ptr<Config> definite = make_shared<Config>(/* ... */);
-
-// Copy or move a non-null handle into the nullable representation.
 shared_nullptr<Config> maybe = shared_nullptr<Config>(definite);
-shared_nullptr<Config> moved_maybe =
-    shared_nullptr<Config>(move(definite));
-```
 
-Constructing `shared_nullptr<T>` from a named `shared_ptr<T>` clones its
-`Arc<T>`; construction from `move(pointer)` transfers the `Arc<T>` into
-`Some`. The source remains valid in the copying form and is invalidated in the
-moving form. A fresh `shared_ptr<T>` temporary transfers directly because it
-has no source binding that could remain usable.
-
-The reverse conversion requires the nullable source to be proven non-null:
-
-```cpp
 if (maybe) {
     shared_ptr<Config> copied = shared_ptr<Config>(maybe);
     shared_ptr<Config> moved = shared_ptr<Config>(move(maybe));
 }
 ```
 
-The copying form lowers to `Arc::clone` of the contained handle. The moving
-form consumes the `Option<Arc<T>>` and extracts its `Arc<T>` without changing
-the strong count. Either form is a compile error when control-flow analysis
-cannot prove the source non-null. Conversion is explicit even in a
-non-overloaded call, preserving the rule that Stainless does not implicitly
-wrap or unwrap an optional representation.
+Converting a named `shared_ptr<T>` to `shared_nullptr<T>` copies its `Arc`
+unless `move` is written. Converting back requires a non-null proof; the copy
+form clones the contained `Arc`, while the move form extracts it without a
+reference-count increment. These conversions never participate in overload
+selection.
 
-For pointee access, Stainless tracks whether each `unique_nullptr<T>` and
-`shared_nullptr<T>` binding is definitely null, definitely non-null, or
-unknown. Member access and conversion to a reference parameter require a
-definitely non-null binding:
+The compiler tracks nullable pointer bindings as definitely null, definitely
+non-null, or unknown. Construction, assignment, `move`, `if (pointer)`,
+`!pointer`, and comparisons with `nullptr` update or refine that fact.
+Member access and conversion to a pointee reference require a non-null fact:
 
 ```cpp
-shared_nullptr<Config> config; // default-constructed null handle
+shared_nullptr<Config> config;
 
 if (!config) {
-    config = shared_nullptr<Config>(make_shared<Config>(/* ... */));
+    config = shared_nullptr<Config>(
+        make_shared<Config>(/* ... */));
 }
 
-i32 version = config.version; // accepted: non-null on every incoming path
+i32 version = config.version;
 ```
 
-Only `unique_nullptr<T>` and `shared_nullptr<T>` support contextual boolean
-tests and comparisons or assignment involving `nullptr`. Applying a null check
-to `unique_ptr<T>` or `shared_ptr<T>` is rejected as a type error because those
-types are non-null by construction.
-
-The initial analysis is deliberately conservative:
-
-- Construction from a corresponding non-null owner establishes non-null and
-  `nullptr` establishes null.
-- `if (pointer)`, `!pointer`, and comparisons with `nullptr` refine the
-  corresponding control-flow branches.
-- A guard that exits the null branch establishes non-null afterward.
-- Initialization, copying, or assignment gives the destination the source
-  expression's fact; assignment first invalidates the destination's old fact.
-- `move(pointer)` transfers the fact to its destination and invalidates the
-  source binding along with its fact.
-- At a control-flow merge, a fact survives only when it agrees on every
-  incoming path. Complex cases that the analysis cannot prove are rejected.
-
-After a successful guard such as `if (!config) return;`, code generation
-introduces a hidden borrowed refinement of type `&T` and directs pointee access
-through it:
-
-```rust
-let config: Option<Arc<Config>> = /* ... */;
-
-let __stainless_config_nonnull: &Config = match config.as_deref() {
-    Some(value) => value,
-    None => return,
-};
-
-let version = __stainless_config_nonnull.version;
-```
-
-The guarded `auto& value = require(owner) { ... }` form exposes this same
-refinement as a source-level name and performs the failing control flow in one
-declaration. Its operand is still subject to the same null-state analysis and
-borrow rules.
-
-The hidden binding is valid only until assignment, move, or a control-flow
-boundary invalidates the proof. A later non-null generation receives a new
-hidden binding. Nullable unique-owner state remains in `Option<Box<T>>`;
-nullable shared-handle operations such as implicit copying continue to use the
-original `Option<Arc<T>>`.
-
-The compiler must not create an extra owned `Arc<T>` merely to represent a
-non-null fact: cloning would observably increase the strong count and could
-delay destruction, while moving the `Arc` out would change the source handle.
-The hidden `&T` changes neither ownership nor lifetime.
+At control-flow merges a fact survives only if it agrees on every incoming
+path. After a successful guard, code generation introduces a hidden borrowed
+`&T` and routes pointee access through it. The compiler must not clone or move
+the contained `Arc` merely to represent that proof.
 
 #### Member access and owning-pointer operations
 
 Stainless does not have C++'s `->` member-access operator. The `.` operator
-automatically dereferences references, `unique_ptr<T>`, `shared_ptr<T>`, and a
-proven-non-null `unique_nullptr<T>` or `shared_nullptr<T>` when resolving a
-field or member function on `T`:
+automatically dereferences references and Stainless ownership types:
 
 ```cpp
 unique_ptr<Config> unique = make_unique<Config>(/* ... */);
@@ -1207,26 +1374,14 @@ i32 version = shared.version;
 
 Automatic receiver dereferencing is a member-access rule, not a general
 implicit conversion used during overload selection. A mutable unique owner may
-provide mutable member access when borrowing permits it; a shared owner always
-provides const member access. A nullable owner must first be proven non-null.
-The same dot syntax calls an interface function through an owning interface
-pointer, with the same proof required for either nullable form.
+provide mutable member access when borrowing permits it; a shared owner provides
+only const access. A nullable owner must first be proven non-null.
 
-`unique_ptr<T>`, `unique_nullptr<T>`, `shared_ptr<T>`, and
-`shared_nullptr<T>` do not expose their own member functions, so their
-operations cannot collide with members of `T`. Ownership operations use free
-functions:
-
-- `move(pointer)` transfers an owning handle.
-- `drop(move(pointer))` consumes and releases a named handle early.
-- `downgrade(pointer)` creates a `weak_ptr<T>` from a `shared_ptr<T>` or a
-  proven-non-null `shared_nullptr<T>`.
-- `lock(pointer)` attempts to promote a weak handle.
-
-No `get`, `release`, `reset`, pointer arithmetic, or raw-pointer escape is
-provided. `atomic_ptr<T>` and `atomic_nullptr<T>` are synchronized slots rather
-than dereferenceable owning pointers, so their own `__load`, `__store`, and
-`__swap` operations continue to use dot syntax.
+The pointer wrappers do not expose the methods of `Box`, `Arc`, `Option`, or
+`Weak`. Their operations are the compiler-defined `move`, `drop`,
+`downgrade`, and `lock` functions plus the documented constructors and atomic
+slot operations. There is no `get`, `release`, `reset`, pointer arithmetic, or
+raw-pointer escape.
 
 #### Thread safety
 
@@ -1238,9 +1393,8 @@ therefore applies all of the following rules:
   `T` is `Send`. The source binding is invalidated, and the unique handle is
   never shared between threads.
 - A `shared_ptr<T>` or `shared_nullptr<T>` may cross a thread boundary only
-  when `T` satisfies the equivalents of Rust's `Send` and `Sync` traits.
-  `Send` permits ownership and destruction on another thread; `Sync` permits
-  concurrent shared references.
+  when `T` is both `Send` and `Sync`. Atomic reference counting alone is
+  insufficient.
 - These properties are structural for generated types: a struct or class is
   sendable and shareable only when all of its fields are. Stainless code cannot
   provide an unchecked manual implementation of either property.
@@ -1248,50 +1402,39 @@ therefore applies all of the following rules:
   `Arc<dyn Interface + Send + Sync>`; its nullable counterpart lowers to
   `Option<Arc<dyn Interface + Send + Sync>>`. Every concrete class stored in a
   handle must satisfy both bounds.
-- Passing either shared-handle type to a thread copies it by value unless the
-  caller explicitly uses `move(pointer)`. Atomic reference counts make
-  concurrent copying and dropping of separate handles safe.
+- Passing a shared handle to a thread copies it by value unless the caller
+  explicitly uses `move(pointer)`. Separate handles may then be copied and
+  dropped concurrently because the underlying reference count is atomic.
 - A thread may reassign its own local handle. The same mutable pointer binding
   cannot be concurrently accessed or reassigned by multiple threads.
 - An ordinary global `shared_ptr<T>` or `shared_nullptr<T>` binding is immutable
   after initialization, so threads may only read or copy its handle. An
-  ordinary mutable global shared pointer is rejected.
+  ordinary mutable global shared handle is rejected.
 
-Globally replaceable shared state uses a synchronized pointer slot, not an
-ordinary shared-handle binding. Both slot types change which immutable
-allocation the slot points to; neither mutates a pointee.
+Globally replaceable handles use compiler-known synchronized slots:
 
-`atomic_ptr<T>` is non-null:
+- `atomic_ptr<T>` lowers initially to `RwLock<Arc<T>>`. `__load()` returns a
+  copied `shared_ptr<T>`, `__store(value)` replaces it, and `__swap(value)`
+  returns the previous handle.
+- `atomic_nullptr<T>` lowers initially to
+  `RwLock<Option<Arc<T>>>`. Its corresponding operations use
+  `shared_nullptr<T>` and preserve null.
 
-- It is constructed from `shared_ptr<T>` and initially lowers to
-  `RwLock<Arc<T>>`.
-- `__load()` returns a copied `shared_ptr<T>` snapshot.
-- `__store(new_value)` accepts `shared_ptr<T>` and replaces the slot's handle.
-- `__swap(new_value)` accepts `shared_ptr<T>`, replaces the handle, and returns
-  the previous `shared_ptr<T>`.
+Both atomic slot types are non-copyable; copying a lock would create an
+independent slot. Existing loaded snapshots continue to refer to the old
+allocation after a store or swap. The `__` operation names are reserved
+compiler API, and a more specialized lowering may replace `RwLock` later
+without changing Stainless semantics.
 
-`atomic_nullptr<T>` is nullable:
-
-- Default construction creates a null slot. It may also be constructed from
-  `shared_nullptr<T>` and initially lowers to `RwLock<Option<Arc<T>>>`.
-- `__load()` returns a copied `shared_nullptr<T>` snapshot.
-- `__store(new_value)` accepts `shared_nullptr<T>` and replaces the slot's
-  handle, including with null.
-- `__swap(new_value)` accepts `shared_nullptr<T>`, replaces the handle, and
-  returns the previous `shared_nullptr<T>`.
-
-A value for one slot kind must be converted to the corresponding non-atomic
-handle type before being stored in the other kind. Existing snapshots continue
-to refer to the old allocation after either slot changes.
-
-Both slot types are non-copyable because copying a synchronization object would
-create an independent slot rather than another reference to the same binding.
-They may be explicitly moved when no reference to the slot is active.
-References to them follow ordinary lifetime rules even though synchronized
-operations are thread-safe.
-
-A more specialized atomic implementation may replace either initial `RwLock`
-lowering later without changing these source semantics.
+Thread entry uses Rust's `std::thread::spawn`, reached in Stainless through
+`rust::std::thread::spawn` or an import such as
+`use rust::std::thread;`. The provisional C++ lambda syntax shown in the
+reference examples lowers to a Rust closure with explicit capture
+initialization. The Stainless checker must enforce the closure's `Send`,
+return-value `Send`, and `'static` capture requirements before generation, and
+`rustc` checks the same bounds again. A borrowed `T&` therefore cannot be
+captured by a spawned thread; an owned value must be moved or a `shared_ptr`
+copied into the closure.
 
 #### Namespace-scope variables
 
@@ -1304,13 +1447,11 @@ Namespace-scope declarations must use one of the following safe forms:
 
 - `const T value = ...;` declares an immutable global. It may be accessed from
   multiple threads only when `T` is `Sync`.
-- `const shared_ptr<T> value = ...;` declares an immutable global handle.
-  It is always non-null, and threads may access or copy it when `T` is
-  `Send + Sync`.
-- `const shared_nullptr<T> value = ...;` declares an immutable nullable global
-  handle. Threads may inspect or copy it when `T` is `Send + Sync`.
-- A synchronization-aware `atomic_ptr<T>` or `atomic_nullptr<T>` may be changed
-  through its `__load`, `__store`, and `__swap` operations.
+- `const shared_ptr<T> value = ...;` declares an immutable non-null shared
+  handle. Threads may access or copy it when `T` is `Send + Sync`.
+- `const shared_nullptr<T> value = ...;` is the nullable counterpart.
+- An `atomic_ptr<T>` or `atomic_nullptr<T>` may be changed through its
+  `__load`, `__store`, and `__swap` operations.
 - `thread_local T value = ...;` gives each thread an independent instance.
 
 An ordinary mutable namespace-scope variable is rejected because it would
@@ -1327,18 +1468,17 @@ before runtime-initialized globals are implemented.
 The Stainless type checker must enforce the thread-boundary rules itself so it
 can issue source-level diagnostics. Generated Rust retains the corresponding
 `Send`/`Sync` bounds, allowing `rustc` to verify them again. Combined with the
-ban on mutable pointee access, unsafe code, owning raw pointers, and
-interior-mutability escape hatches, this provides the language's data-race
+immutable shared-pointee rule, the synchronized slot types, and the absence of
+unsafe/raw-pointer escape hatches, this provides the pointer layer's data-race
 guarantee.
 
 For classes, `unique_ptr<Class>`, `unique_nullptr<Class>`,
 `shared_ptr<Class>`, and `shared_nullptr<Class>` may coerce to the
-corresponding pointer to an implemented interface. These ownership-preserving
-interface coercions lower to `Box<dyn Interface>`,
-`Option<Box<dyn Interface>>`, `Arc<dyn Interface>`, or
-`Option<Arc<dyn Interface>>`, respectively; a nullable null owner remains
-null. Like data-base reference coercion, they apply only after a target type or
-function has been selected and do not make an overload candidate match.
+corresponding owner of an implemented interface. These lower to
+`Box<dyn Interface>`, `Option<Box<dyn Interface>>`, `Arc<dyn Interface>`, or
+`Option<Arc<dyn Interface>>`; null remains null. Like data-base reference
+coercion, they apply only after a target type or function has been selected and
+do not make an overload candidate match.
 
 For example:
 
@@ -1353,64 +1493,131 @@ The assignment changes `current` to refer to a new immutable `Config`.
 `observer` continues to refer to the original value until its own handle is
 dropped or reassigned.
 
-### Standard-library prelude and Rust runtime
+### Rust APIs and Cargo crate interoperability
 
-Standard ownership and container types have canonical declarations in the
-Stainless `std` namespace and are also re-exported by the built-in prelude.
-Both `std::vector<i32>` and unqualified `vector<i32>` name the same type without
-a user-written `using` statement. This initially includes `unique_ptr`,
-`unique_nullptr`, `shared_ptr`, `shared_nullptr`, `weak_ptr`, `atomic_ptr`,
-`atomic_nullptr`, `optional`, `vector`, and `string`.
-
-A compact `stainless-runtime` Rust crate supplies the native implementations.
-The bundled Stainless declarations are the source-level API whitelist:
+Except for the ownership layer, Stainless follows Rust's standard vocabulary
+instead of recreating either the C++ or Rust standard library. The Stainless
+prelude includes the compiler-defined ownership types `unique_ptr`,
+`unique_nullptr`, `shared_ptr`, `shared_nullptr`, and `weak_ptr`. Native Rust
+types are not added to that prelude; they are selected through the reserved
+`rust` namespace and may then be imported under their real short names:
 
 ```cpp
-vector<i32> values;
-values.push_back(10); // accepted Stainless API
-values.size();        // accepted Stainless API
-values.len();         // error: vector<i32> has no member named len
+use rust::{Option, Result, String, Vec};
+use rust::std::collections::HashMap;
 ```
 
-`Vec::len`, `Arc::clone`, and other Rust APIs may be used inside the runtime,
-but they are never added to Stainless name resolution. Target-Rust paths such
-as `std::vec::Vec` are likewise not Stainless declarations and cannot be called
-or named by source programs.
+Safe, representable APIs from `core`, `alloc`, and `std` keep their Rust module
+paths below the virtual root, method names, signatures, and trait constraints.
+Thus Rust `std::collections::HashMap` is
+`rust::std::collections::HashMap` before import. Construction keeps C++ syntax:
+an associated Rust `Type::new(arguments...) -> Self` is written
+`Type(arguments...)`, `From<U>` may provide an exact one-argument constructor,
+and a default construction may be written simply as `Type value;`. After
+`use rust::Vec;`, examples therefore include `Vec()`, `.push`, and `.len`.
+After `use rust::String;`, they include `String()` and `.push_str`. There is no
+general Stainless facade that renames `.len()` to `.size()`. The deliberate
+exception is ownership: source code uses the restricted Stainless pointer
+operations specified above instead of naming `Box`, `Arc`, or `Weak` directly.
+`rustc` remains the final check that every emitted standard-library call is
+valid.
 
-Native standard types implement their bundled Stainless interfaces statically.
-For example, the runtime may implement its generated `VectorApi<T>` Rust trait
-for `Vec<T>` and translate `vector<T>::size()` to that trait's `size` method.
-The generated call uses fully qualified static dispatch, so this does not create
-a trait object or give the Stainless struct a vtable.
+The compiler still needs semantic signatures before it can produce useful
+Stainless diagnostics. Each compiler release therefore carries exact,
+machine-generated metadata for the supported Rust toolchain's representable
+`core`, `alloc`, and `std` APIs. This is type/trait/borrow metadata, not wrapper
+implementations or a second API. Its paths and names remain Rust's except for
+the explicit ownership mapping, its version is tied to the supported Rust
+toolchain, and generated calls are revalidated by that toolchain.
 
-The compiler resolves every call to one of three typed HIR forms:
+Rust macros do not have ordinary callable signatures. The initial compiler may
+recognize a small specified set of standard formatting macros such as
+`rust::println!`, preserving their Rust spelling below the virtual root.
+`use rust::println;` permits the short `println!` spelling in that scope. An
+external crate macro requires a purpose-built safe Rust adapter or a future
+checked macro-binding design; function-wrapper generation must not pretend that
+an arbitrary token macro is a normal function.
+
+Cargo dependencies are declared in the surrounding Rust project's
+`Cargo.toml`, and native paths begin with `rust::<dependency>::...`; for
+example, `use rust::regex::Regex;`. Non-standard crates use generated wrappers
+because a Rust public signature can contain features that Stainless cannot
+directly spell or validate: inferred lifetimes, associated types, `impl Trait`,
+higher-ranked bounds, closure traits, macros, and unsafe contracts. The initial
+stable toolchain flow is:
+
+1. Cargo metadata identifies the exact package version, enabled features, and
+   target configuration.
+2. An explicit Stainless binding declaration selects each public item and
+   states the Stainless-representable signature and ownership effects. The
+   concrete binding-file syntax is still to be designed.
+3. The compiler generates a deterministic Rust shim in a private
+   `__stainless_bindings` module. It calls the real crate item and may
+   specialize generics, introduce a safe newtype, or normalize an otherwise
+   unrepresentable return type.
+4. Cargo compiles the shim against the selected dependency. A wrong path,
+   signature, trait bound, feature assumption, or ownership claim is therefore
+   a compile error rather than trusted foreign metadata.
+5. The verified signature becomes available to Stainless name and type
+   resolution, and wrapper/rustc diagnostics are source-mapped to the binding
+   declaration and call site.
+
+At an interop boundary, Rust `Box<T>`, `Option<Box<T>>`, `Arc<T>`,
+`Option<Arc<T>>`, and `Weak<T>` map to the corresponding Stainless pointer
+types. Binding metadata records whether an owner is consumed, produced, or
+borrowed. A Rust borrow such as `&Arc<T>` may therefore become a
+non-consuming wrapper call that accepts `shared_ptr<T>` without making
+`shared_ptr<T>&` a source-level type. A signature is rejected when this
+adaptation cannot preserve observable ownership behavior.
+
+The wrapper should preserve the Rust item and method name whenever no
+adaptation requires a distinct name. Its generated Rust symbol is still
+deterministically mangled so two specializations cannot collide. Wrappers are
+generated only for selected APIs, not for an entire dependency, and generated
+files are rebuildable artifacts rather than source to edit by hand.
+
+Stable `cargo metadata` supplies the resolved dependency graph but not complete
+Rust item signatures. Rustdoc JSON can provide richer API metadata, but it is
+still a nightly, unstable interface, so it may be an optional binding-generator
+accelerator rather than the required foundation. A later stable compiler API
+could reduce the amount of explicit binding metadata without changing the shim
+boundary.
+
+Only safe Rust calls are admitted directly. An external `unsafe fn` or an API
+whose safety depends on raw-pointer invariants requires a user-authored safe
+Rust adapter outside Stainless; the generated binding then targets that safe
+function. This is a language safety boundary, not a sandbox against users
+editing their own Rust project.
+
+Rust `Result` remains an ordinary Rust type. `Option` also retains its Rust API
+for permitted element types, with the one ownership-layer restriction that its
+direct `T` cannot be a Stainless pointer type. Calling the compiler-adapted
+`.unwrap()` method is an explicit request to enter Stainless's checked
+exception model and has `stainless::RustError` as its checked effect.
+The compiler formats the native `E` when possible and otherwise supplies the
+generic fallback message; binding metadata does not need to define an error
+conversion. Exact target-typed initialization or assignment from `Result<T, E>`
+to `T` inserts the same operation implicitly; it is not used for arguments,
+returns, overload resolution, or `auto` deduction. Other `Result` operations do
+not make this semantic change implicitly.
+
+The compiler resolves calls into explicit HIR forms:
 
 ```text
-user function(FunctionId)
-runtime item(RuntimeItemId)
-compiler intrinsic(IntrinsicId)
+Stainless function(FunctionId)
+direct Rust item(RustItemId)
+generated external wrapper(BindingId)
+compiler intrinsic(IntrinsicId, including UnwrapRustResult)
 ```
 
-There is no arbitrary “call this Rust path” form. A runtime item is registered
-by a bundled `native` declaration and has a stable ID, Stainless signature,
-receiver constness/mutability, ownership effects, generic constraints, and
-runtime entry point. Free functions such as `make_unique` are registered the
-same way; only operations that the type or borrow checker must understand,
-such as `move`, guarded `require` bindings, nullable-owner representation
-conversion, and ownership/interface coercions, remain compiler intrinsics.
-
-Normal project source cannot declare a `native` binding. This prevents the
-runtime mechanism from becoming an accidental Rust FFI escape hatch. It is a
-language-semantic boundary rather than a security sandbox: a user can still
-edit generated Rust or their Cargo project outside Stainless.
-
-The runtime should use `#![forbid(unsafe_code)]` for the supported safe standard
-library. Its API version must match the compiler, and conformance tests must
-verify that every bundled runtime declaration has exactly one implementation
-with the expected generated Rust signature. C++ standard-library functions are
-included only when Stainless can give them safe, documented semantics; unsafe
-escape APIs such as `unique_ptr::release`, `vector::data`, and `string::c_str`
-remain absent.
+The compact support runtime is limited to genuine Stainless language features,
+such as checked-exception erasure and diagnostic/source-map support. It is not
+a general standard-library facade. The ownership types are a narrow
+compiler-defined exception and lower to ordinary safe Rust ownership and
+synchronization primitives. Operations whose rules the compiler must
+understand, such as explicit `move`, guarded `require`, nullable-owner
+conversion, atomic pointer slots, data-base projection, and
+ownership-preserving interface coercions, remain intrinsics.
 
 This list is a starting policy, not a complete specification. Any feature
 proposal should answer all of the following before implementation:
@@ -1428,10 +1635,12 @@ source
   -> tokens (including comments and whitespace)
   -> lossless concrete syntax tree (CST)
   -> typed language AST
+  -> imported Rust API and generated-wrapper metadata
   -> name, type, and ownership analysis
   -> small Rust-shaped high-level IR (HIR)
   -> Rust syntax tree/tokens
   -> formatted .rs source
+  -> Cargo/rustc validation
 ```
 
 The CST and semantic AST should remain separate. The CST retains the spelling,
@@ -1475,21 +1684,22 @@ first compiler spike is created rather than copied from this document.
 The first milestone should prove the whole architecture with a deliberately tiny
 language rather than attempt broad C++ compatibility:
 
-1. Create a Cargo workspace with separate syntax, semantic/HIR, bundled
-   standard-library declarations, compact Rust runtime, Rust-codegen, and
-   CLI/public-facade crates.
+1. Create a Cargo workspace with separate syntax, semantic/HIR, Rust interop,
+   compact language-runtime, Rust-codegen, and CLI/public-facade crates.
 2. Tokenize identifiers, literals, comments, punctuation, and a few keywords
    with byte spans and lossless trivia.
 3. Parse function definitions, typed local bindings, blocks, calls, arithmetic,
    `return`, and `if`/`else` into a Rowan CST, including recoverable error nodes.
-4. Lower the CST to a small typed AST/HIR, classify every call as user-defined,
-   registered runtime, or intrinsic, and reject unresolved names and type
-   mismatches before code generation.
-5. Implement one native standard type and its interface in the safe Rust
-   runtime, proving that unregistered Rust methods remain invisible to
-   Stainless.
-6. Emit and format Rust, then compile representative generated files in
-   integration tests.
+4. Lower the CST to a small typed AST/HIR, classify every call as
+   Stainless-defined, direct standard Rust, generated external wrapper, or
+   intrinsic, and reject unresolved names and type mismatches before code
+   generation.
+5. Import enough real Rust metadata to construct `Vec()` and call `.push` and
+   `.len`,
+   then generate one explicit wrapper for a small external Cargo dependency
+   and prove that Cargo rejects a stale or incorrect binding.
+6. Emit and format Rust, compile representative generated files in integration
+   tests, and source-map rustc diagnostics back to Stainless.
 7. Compare the hand-written parser with a narrowly scoped Chumsky prototype
    before the grammar grows. Keep the option with clearer recovery behavior and
    more maintainable tests.
@@ -1502,8 +1712,9 @@ CST, invalid source and its diagnostics, and source-to-generated-Rust behavior.
 - Being a drop-in C++ compiler or transpiling arbitrary existing C++.
 - Preserving C++ ABI, undefined behavior, or platform-specific implementation
   details.
-- Calling arbitrary Rust functions or treating Rust crates as implicit
-  Stainless namespaces.
+- Pretending every Rust signature is directly expressible in Stainless without
+  preserving its lifetime, trait, unsafe, and ownership constraints or using a
+  checked wrapper where necessary.
 - Using generated Rust as a substitute for defining Stainless semantics.
 - Adding syntax before its ownership, type-checking, and lowering behavior is
   specified.

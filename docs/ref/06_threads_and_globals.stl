@@ -1,6 +1,7 @@
 // Provisional Stainless syntax example.
-// Namespace-scope declarations have static storage duration without a
-// separate "global" keyword.
+// Ownership uses Stainless pointers; thread handles retain Rust API names.
+
+use rust::std::thread;
 
 namespace samples {
 
@@ -8,6 +9,8 @@ struct Config {
     i32 version;
 };
 
+// Namespace-scope declarations have static storage duration without a
+// separate "global" keyword.
 const shared_ptr<Config> startup_config =
     make_shared<Config>(Config{1});
 
@@ -21,19 +24,16 @@ atomic_nullptr<Config> current_config =
 thread_local i32 reads_on_this_thread = 0;
 
 i32 read_required(const atomic_ptr<Config>& slot) {
-    // Synchronized pointer slots are the sole pointer-handle types that may be
-    // passed by reference. This load is always non-null.
     shared_ptr<Config> snapshot = slot.__load();
     return snapshot.version;
 }
 
 i32 read_slot(const atomic_nullptr<Config>& slot) {
-    // require evaluates __load once, retains its shared snapshot in a hidden
-    // owner, and binds snapshot as a non-null const Config&.
-    auto& snapshot = require(slot.__load()) {
+    // require retains the shared snapshot returned by __load and exposes only
+    // its non-null const Config reference.
+    const auto& snapshot = require(slot.__load()) {
         return -1;
     }
-
     return snapshot.version;
 }
 
@@ -59,14 +59,18 @@ shared_ptr<Config> exchange_required(shared_ptr<Config> replacement) {
 }
 
 void worker(shared_ptr<Config> local) {
-    // shared_ptr is non-null; each thread owns its own immutable shared handle.
     i32 version = local.version;
 }
 
-void start_worker() {
-    // Passing shared_ptr by value implicitly copies its thread-safe handle.
-    thread background = spawn(worker, startup_config);
-    background.join();
+bool start_worker() {
+    // Copying a shared_ptr creates the separate Arc handle captured by the
+    // thread. The thread handle itself uses Rust's join/Result API.
+    shared_ptr<Config> local = startup_config;
+    auto background = thread::spawn([local = move(local)]() {
+        worker(move(local));
+    });
+    auto joined = move(background).join();
+    return joined.is_ok();
 }
 
 } // namespace samples

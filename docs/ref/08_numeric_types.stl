@@ -1,5 +1,7 @@
 // Provisional Stainless syntax example.
-// Numeric primitives, inference defaults, and literal suffixes follow Rust.
+// Numeric type names follow Rust; floating literal suffixes follow C++.
+
+use rust::Vec;
 
 namespace samples {
 
@@ -16,7 +18,7 @@ f32 rectangle_area_f32(f32 width, f32 height) {
 }
 
 f64 average_f64(f64 left, f64 right) {
-    return (left + right) / 2.0f64;
+    return (left + right) / 2.0;
 }
 
 i32 default_integer_literal() {
@@ -30,7 +32,7 @@ f64 default_floating_literal() {
 }
 
 f32 suffixed_floating_literal() {
-    auto value = 0.5f32;
+    auto value = 0.5f;
     return value;
 }
 
@@ -39,11 +41,11 @@ u32 explicit_numeric_cast(i64 value) {
     return u32(value);
 }
 
-usize element_count(const vector<i32>& values) {
-    return values.size();
+usize element_count(const Vec<i32>& values) {
+    return values.len();
 }
 
 // Mixed-width arithmetic is invalid without an explicit conversion:
-// f64 invalid = 1.0f32 + 2.0f64;
+// f64 invalid = 1.0f + 2.0;
 
 } // namespace samples

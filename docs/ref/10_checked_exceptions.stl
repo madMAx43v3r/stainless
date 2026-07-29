@@ -2,13 +2,15 @@
 // Exceptions use C++ control flow with Java-style checked throws declarations.
 // Generated Rust uses Result and a boxed compiler-private exception trait.
 
+use rust::{println, String};
+
 namespace samples {
 
-struct IoError : std::exception {
-    string path;
+struct IoError : stainless::Exception {
+    String path;
 };
 
-struct ParseError : std::exception {
+struct ParseError : stainless::Exception {
     usize offset;
 };
 
@@ -16,41 +18,60 @@ struct Config {
     i32 version;
 };
 
-string read_file(const string& path, bool available) throws IoError {
+class Session {
+public:
+    Session(bool available) throws IoError;
+};
+
+String read_file(const String& path, bool available) throws IoError {
     if (!available) {
         throw IoError{
-            std::exception("input could not be read"),
-            path
+            stainless::Exception("input could not be read"),
+            String(path)
         };
     }
 
     return "version=1";
 }
 
-Config parse_config(string source, bool valid) throws ParseError {
+Config parse_config(String source, bool valid) throws ParseError {
     if (!valid) {
         throw ParseError{
-            std::exception("input could not be parsed"),
-            source.size()
+            stainless::Exception("input could not be parsed"),
+            source.len()
         };
     }
 
     return Config{1};
 }
 
+Session::Session(bool available) throws IoError {
+    if (!available) {
+        throw IoError{
+            stainless::Exception("session could not be opened"),
+            "session"
+        };
+    }
+}
+
+unique_ptr<Session> open_session(bool available) throws IoError {
+    // Construction is checked before the successful value is placed in Box.
+    return make_unique<Session>(available);
+}
+
 Config load(
-    const string& path,
+    const String& path,
     bool available,
     bool valid
 ) throws IoError, ParseError {
     // No source-level ? is needed. Both calls feed their checked exceptions
     // into this function's declared throws set.
-    string source = read_file(path, available);
+    String source = read_file(path, available);
     return parse_config(move(source), valid);
 }
 
 Config load_or_default(
-    const string& path,
+    const String& path,
     bool available,
     bool valid
 ) throws IoError {
@@ -62,15 +83,15 @@ Config load_or_default(
     }
 }
 
-i32 run(const string& path, bool available, bool valid) {
+i32 run(const String& path, bool available, bool valid) {
     try {
         Config config = load(path, available, valid);
         return config.version;
     } catch (const IoError& error) {
-        println("input could not be read");
+        println!("input could not be read");
         return 1;
     } catch (const ParseError& error) {
-        println("input could not be parsed");
+        println!("input could not be parsed");
         return 2;
     }
 }

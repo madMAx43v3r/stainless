@@ -2,6 +2,8 @@
 // Overloads match exact canonical parameter types and receive deterministic
 // target-Rust names.
 
+use rust::String;
+
 namespace samples {
 
 i32 select(i32 left, i32 right) {
@@ -11,7 +13,7 @@ i32 select(i32 left, i32 right) {
 // i32 select(const i32& left, const i32& right); // Invalid: this differs
 // from select(i32, i32) only in value/reference passing semantics.
 
-string select(string left, string right) {
+String select(String left, String right) {
     return move(left);
 }
 
@@ -27,14 +29,14 @@ i32 reborrow(i32& value) {
 
 struct Selector {
     i32 choose(i32 left, i32 right) const;
-    string choose(string left, string right) const;
+    String choose(String left, String right) const;
 };
 
 i32 Selector::choose(i32 left, i32 right) const {
     return right;
 }
 
-string Selector::choose(string left, string right) const {
+String Selector::choose(String left, String right) const {
     return move(right);
 }
 
