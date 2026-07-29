@@ -2,8 +2,8 @@
 // Native Rust APIs enter through the reserved rust namespace. Selected APIs
 // from non-standard Cargo dependencies use deterministic generated bindings.
 
-// `regex = "..."` is declared in the surrounding Cargo.toml. An explicit
-// binding declaration (syntax still to be designed) selects Regex::new and
+// `regex = "..."` is declared in the surrounding Cargo.toml. Entries in the
+// package's versioned stainless-bindings.toml select Regex::new and
 // Regex::is_match. Cargo compiles the generated shim against that exact crate.
 // External Box/Arc/Weak ownership types would appear at this boundary as the
 // corresponding Stainless unique_ptr/shared_ptr/weak_ptr types.

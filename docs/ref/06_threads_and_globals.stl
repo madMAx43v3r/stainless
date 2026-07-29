@@ -10,22 +10,24 @@ struct Config {
 };
 
 // Namespace-scope declarations have static storage duration without a
-// separate "global" keyword.
-const shared_ptr<Config> startup_config =
-    make_shared<Config>(Config{1});
+// separate "global" keyword. Initializers must be compile-time evaluable.
+const Config startup_config = Config{1};
 
-atomic_ptr<Config> required_config =
-    atomic_ptr<Config>(startup_config);
-
-atomic_nullptr<Config> current_config =
-    atomic_nullptr<Config>(
-        shared_nullptr<Config>(startup_config));
+// A null atomic slot has a const-evaluable initializer. Allocating an Arc for
+// atomic_ptr at namespace scope would require runtime initialization.
+atomic_nullptr<Config> current_config;
 
 thread_local i32 reads_on_this_thread = 0;
 
 i32 read_required(const atomic_ptr<Config>& slot) {
     shared_ptr<Config> snapshot = slot.__load();
     return snapshot.version;
+}
+
+i32 local_required_example() {
+    shared_ptr<Config> initial = make_shared<Config>(Config{1});
+    atomic_ptr<Config> required = atomic_ptr<Config>(initial);
+    return read_required(required);
 }
 
 i32 read_slot(const atomic_nullptr<Config>& slot) {
@@ -50,14 +52,6 @@ shared_nullptr<Config> exchange(shared_nullptr<Config> replacement) {
     return current_config.__swap(move(replacement));
 }
 
-void install_required(shared_ptr<Config> replacement) {
-    required_config.__store(move(replacement));
-}
-
-shared_ptr<Config> exchange_required(shared_ptr<Config> replacement) {
-    return required_config.__swap(move(replacement));
-}
-
 void worker(shared_ptr<Config> local) {
     i32 version = local.version;
 }
@@ -65,7 +59,7 @@ void worker(shared_ptr<Config> local) {
 bool start_worker() {
     // Copying a shared_ptr creates the separate Arc handle captured by the
     // thread. The thread handle itself uses Rust's join/Result API.
-    shared_ptr<Config> local = startup_config;
+    shared_ptr<Config> local = make_shared<Config>(startup_config);
     auto background = thread::spawn([local = move(local)]() {
         worker(move(local));
     });

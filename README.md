@@ -65,8 +65,8 @@ drift from the implementation.
 
 ## Language boundaries
 
-The exact syntax still needs to be specified. The initial language should focus
-on constructs with direct Rust equivalents:
+The initial grammar and semantic boundary are frozen below and focus on
+constructs with direct Rust equivalents:
 
 - functions, blocks, local bindings, control flow, structs, classes, enums, and
   methods;
@@ -91,8 +91,7 @@ on constructs with direct Rust equivalents:
 - function and method overloads resolved by exact parameter types;
 - checked exceptions with C++-style control flow, Java-style `throws` effects,
   and generated Rust `Result` values;
-- a deliberately constrained form of parametric generics, once its lowering is
-  specified.
+- the deliberately constrained generic type declarations specified below.
 
 The following C++ features should not be accepted in the initial language
 because they have no direct, general safe-Rust translation:
@@ -112,6 +111,41 @@ because they have no direct, general safe-Rust translation:
 Destructors/`Drop`, operator traits, FFI, async code, and other less-direct
 mappings are deferred. Each needs a written source-level semantic model and
 lowering rule before it becomes part of the language.
+
+### Initial grammar and semantic freeze
+
+The first compiler uses the following conservative grammar policy:
+
+- Source identifiers are ASCII and match `[A-Za-z_][A-Za-z0-9_]*`. Unicode
+  identifiers may be added later without affecting type semantics.
+- User generic type declarations use `struct Name<T>`, `class Name<T>`, or
+  `interface Name<T>`. Parameters are invariant, type arguments are explicit,
+  and only type parameters are supported. Default arguments, non-type
+  parameters, specialization, generic free functions, and user-written trait
+  bounds are deferred. Compiler metadata may still expose supported generic
+  Rust types and methods such as `Vec<T>`.
+- `sealed` is valid after `interface` and prevents inheritance or
+  implementation outside the module. It is also valid after `struct` and
+  prevents use as a data base outside the module. Every class already forbids
+  class inheritance, so `class sealed` is redundant and rejected. `native` is
+  not a declaration modifier.
+- Lambdas require an explicit capture list. `[value]` copies a copyable value,
+  `[value = move(value)]` consumes it, and `[&value]` creates a non-escaping
+  borrow. Default captures are rejected. The imported Rust signature determines
+  whether the closure may escape; a borrowed capture therefore fails the
+  `'static` requirement of `rust::std::thread::spawn`.
+- User-defined destructors and `Drop` implementations are not accepted.
+  Generated Rust automatically drops locals and fields using Rust scope and
+  field-declaration order. Resource-owning native Rust fields retain their
+  ordinary Rust `Drop` behavior.
+- Rust-style `match`, `if let`, and destructuring patterns are deferred.
+  Native `Result` values initially use ordinary non-consuming query methods,
+  compiler-adapted `.unwrap()`, target-typed checked unwrap, or a purpose-built
+  Rust adapter.
+
+These restrictions freeze the first parser boundary; accepting more syntax
+requires an explicit semantic and lowering extension rather than permissive
+parsing followed by rejection.
 
 ### Inheritance model
 
@@ -291,8 +325,9 @@ interop bindings; Stainless source does not redeclare the Rust standard
 library. The ownership types remain compiler-defined language types and do not
 require source-level `native` declarations.
 
-The set of modifiers valid for each declaration kind will be explicit in the
-grammar. They must not be parsed as general prefix modifiers.
+No other declaration-kind modifier is accepted initially. These contextual
+spellings are parsed only in their documented post-kind positions, never as
+general prefix modifiers.
 
 ### Namespaces, imports, access control, and `auto`
 
@@ -904,9 +939,7 @@ rules than C++:
   error with the candidate signatures shown in its diagnostic.
 - Default arguments and variadic overloads are not supported.
 - Every overload lowers to a unique, deterministic Rust name derived from its
-  fully qualified Stainless name and canonical parameter types. The mangling
-  format will be versioned and specified before it becomes a compatibility
-  promise; it must not depend on randomized or implementation-defined hashing.
+  fully qualified Stainless name and canonical parameter types.
 
 For example, these Stainless declarations:
 
@@ -917,10 +950,25 @@ i32 parse(i32 value);
 i32 parse(String value);
 ```
 
-may lower conceptually to Rust functions named `parse__i32` and
-`parse__String`. The final mangling scheme must also handle modules, methods,
-references, generic arguments, and collisions without relying on this
-illustrative spelling.
+use the initial versioned textual encoding:
+
+```text
+__stainless_v1_f_2_7_samples_5_parse__p_1_i32
+__stainless_v1_f_2_7_samples_5_parse__p_1_n_2_4_rust_6_String
+```
+
+The prefix contains the mangling version and item kind. A path is encoded as
+its segment count followed by each segment's decimal byte length and ASCII
+contents. `p` introduces the canonical parameter count. Primitive types use
+their Stainless spelling; `n` introduces a named-type path; and `g` introduces
+a named generic type followed by `a`, its argument count, and recursive type
+encodings. A member's owning type is part of its path. Return types, `throws`,
+reference passing mode, and parameter `const` are excluded because they do not
+distinguish legal overloads. The ASCII identifier restriction makes every
+encoded name a valid Rust identifier, length prefixes make the encoding
+unambiguous, and the reserved `__` prefix prevents source collisions. Any
+incompatible encoding change increments `v1`; no randomized or
+implementation-defined hash participates.
 
 ### Checked exceptions
 
@@ -1291,8 +1339,10 @@ data:
   interior-mutability escape hatch through these pointer types.
 - A shared pointee must be deeply share-immutable. Rust types containing
   `UnsafeCell`-based interior mutability, including `Mutex`, `RwLock`, and
-  atomic cells, cannot be used as `T`; synchronization of the pointer binding
-  itself uses `atomic_ptr` or `atomic_nullptr`.
+  atomic cells, cannot be used directly as `T`; synchronization of the pointer
+  binding itself uses `atomic_ptr` or `atomic_nullptr`. The isolated
+  `frozen_adapter` foreign-newtype contract described under Rust interop is the
+  only initial escape hatch for an opaque native representation.
 - Reassigning a mutable handle changes only that handle, not the allocation
   observed by other handles.
 - Copy construction, assignment, and pass-by-value implicitly clone the
@@ -1407,18 +1457,20 @@ therefore applies all of the following rules:
   dropped concurrently because the underlying reference count is atomic.
 - A thread may reassign its own local handle. The same mutable pointer binding
   cannot be concurrently accessed or reassigned by multiple threads.
-- An ordinary global `shared_ptr<T>` or `shared_nullptr<T>` binding is immutable
-  after initialization, so threads may only read or copy its handle. An
-  ordinary mutable global shared handle is rejected.
+- Namespace-scope pointer storage is subject to the compile-time-initialization
+  rule below. In the initial implementation this permits a null
+  `shared_nullptr<T>` or `atomic_nullptr<T>`, but not an allocated
+  `shared_ptr<T>` or non-null `atomic_ptr<T>`.
 
 Globally replaceable handles use compiler-known synchronized slots:
 
 - `atomic_ptr<T>` lowers initially to `RwLock<Arc<T>>`. `__load()` returns a
   copied `shared_ptr<T>`, `__store(value)` replaces it, and `__swap(value)`
-  returns the previous handle.
+  returns the previous handle. It is non-null and has no default constructor.
 - `atomic_nullptr<T>` lowers initially to
   `RwLock<Option<Arc<T>>>`. Its corresponding operations use
-  `shared_nullptr<T>` and preserve null.
+  `shared_nullptr<T>` and preserve null. Its default constructor creates a null
+  slot and is const-evaluable.
 
 Both atomic slot types are non-copyable; copying a lock would create an
 independent slot. Existing loaded snapshots continue to refer to the old
@@ -1428,8 +1480,8 @@ without changing Stainless semantics.
 
 Thread entry uses Rust's `std::thread::spawn`, reached in Stainless through
 `rust::std::thread::spawn` or an import such as
-`use rust::std::thread;`. The provisional C++ lambda syntax shown in the
-reference examples lowers to a Rust closure with explicit capture
+`use rust::std::thread;`. The explicit C++ lambda syntax shown in the reference
+examples lowers to a Rust closure with explicit capture
 initialization. The Stainless checker must enforce the closure's `Send`,
 return-value `Send`, and `'static` capture requirements before generation, and
 `rustc` checks the same bounds again. A borrowed `T&` therefore cannot be
@@ -1445,14 +1497,18 @@ controls linkage/visibility rather than whether the variable is global.
 
 Namespace-scope declarations must use one of the following safe forms:
 
-- `const T value = ...;` declares an immutable global. It may be accessed from
-  multiple threads only when `T` is `Sync`.
-- `const shared_ptr<T> value = ...;` declares an immutable non-null shared
-  handle. Threads may access or copy it when `T` is `Send + Sync`.
-- `const shared_nullptr<T> value = ...;` is the nullable counterpart.
+- `const T value = ...;` declares an immutable global when its initializer is
+  const-evaluable. It may be accessed from multiple threads only when `T` is
+  `Sync`.
+- A null `const shared_nullptr<T>` is allowed because `None` requires no
+  allocation. A non-null `shared_ptr<T>` or `shared_nullptr<T>` initializer is
+  rejected because constructing its `Arc` requires runtime allocation.
 - An `atomic_ptr<T>` or `atomic_nullptr<T>` may be changed through its
-  `__load`, `__store`, and `__swap` operations.
-- `thread_local T value = ...;` gives each thread an independent instance.
+  `__load`, `__store`, and `__swap` operations, but its initial state must
+  itself be const-evaluable. Initially that admits a null `atomic_nullptr<T>`;
+  a non-null `atomic_ptr<T>` must be local because it needs an allocated owner.
+- `thread_local T value = ...;` gives each thread an independent instance and
+  likewise requires a const-evaluable initializer.
 
 An ordinary mutable namespace-scope variable is rejected because it would
 require Rust `static mut`-like unsynchronized access. It must instead be made
@@ -1460,10 +1516,14 @@ immutable, thread-local, or represented by an explicitly synchronized type.
 Threads may refer to safe namespace-scope variables directly; the values do not
 need to be passed as thread arguments.
 
-Constant global initializers may lower directly to Rust statics. Runtime global
-initialization requires a thread-safe one-time initialization mechanism such as
-`OnceLock`; its precise source-order and failure semantics must be specified
-before runtime-initialized globals are implemented.
+Every namespace-scope initializer must lower directly to a Rust const/static
+initializer. The accepted subset consists of literals, primitive const
+arithmetic, enum values, null nullable owners, and aggregate construction whose
+data base and fields are recursively const-evaluable. Ordinary Stainless
+function calls, user constructor bodies, heap allocation, I/O, native calls not
+verified as `const`, and any expression with a checked exception effect are
+rejected. There is no `OnceLock`, lazy initialization, source-order dynamic
+initialization, or global initialization failure in the initial language.
 
 The Stainless type checker must enforce the thread-boundary rules itself so it
 can issue source-level diagnostics. Generated Rust retains the corresponding
@@ -1522,7 +1582,7 @@ operations specified above instead of naming `Box`, `Arc`, or `Weak` directly.
 `rustc` remains the final check that every emitted standard-library call is
 valid.
 
-The compiler still needs semantic signatures before it can produce useful
+The compiler requires semantic signatures before it can produce useful
 Stainless diagnostics. Each compiler release therefore carries exact,
 machine-generated metadata for the supported Rust toolchain's representable
 `core`, `alloc`, and `std` APIs. This is type/trait/borrow metadata, not wrapper
@@ -1530,27 +1590,93 @@ implementations or a second API. Its paths and names remain Rust's except for
 the explicit ownership mapping, its version is tied to the supported Rust
 toolchain, and generated calls are revalidated by that toolchain.
 
-Rust macros do not have ordinary callable signatures. The initial compiler may
-recognize a small specified set of standard formatting macros such as
-`rust::println!`, preserving their Rust spelling below the virtual root.
-`use rust::println;` permits the short `println!` spelling in that scope. An
-external crate macro requires a purpose-built safe Rust adapter or a future
-checked macro-binding design; function-wrapper generation must not pretend that
-an arbitrary token macro is a normal function.
+Each Stainless compiler release supports one stable Rust minor release. The
+build helper compares `rustc -Vv` with the metadata version and rejects a
+different minor version with an actionable diagnostic; patch releases are
+accepted and Cargo still performs final validation. The repository pins that
+minor in `rust-toolchain.toml`. Supporting multiple Rust minors in one compiler
+is deferred until the metadata generator and compatibility costs are known.
+
+Rust macros do not have ordinary callable signatures. The initial compiler
+recognizes the fixed set `rust::print!`, `rust::println!`, `rust::eprint!`,
+`rust::eprintln!`, `rust::format!`, `rust::vec!`, `rust::assert!`,
+`rust::assert_eq!`, and `rust::assert_ne!`. Importing one from `rust` permits
+its short spelling, including the required `!`. The parser validates each
+supported macro's Stainless argument grammar and codegen reconstructs the
+corresponding Rust invocation; arbitrary Rust token trees are not passed
+through. `panic!`, `todo!`, `unreachable!`, `dbg!`, `write!`, `writeln!`, and
+all external-crate macros are initially rejected. An external macro requires a
+purpose-built safe Rust function adapter.
 
 Cargo dependencies are declared in the surrounding Rust project's
 `Cargo.toml`, and native paths begin with `rust::<dependency>::...`; for
 example, `use rust::regex::Regex;`. Non-standard crates use generated wrappers
 because a Rust public signature can contain features that Stainless cannot
 directly spell or validate: inferred lifetimes, associated types, `impl Trait`,
-higher-ranked bounds, closure traits, macros, and unsafe contracts. The initial
-stable toolchain flow is:
+higher-ranked bounds, closure traits, macros, and unsafe contracts.
+
+The package root may contain one versioned `stainless-bindings.toml` manifest.
+Its version-1 schema uses structured entries whose type strings are parsed with
+the Stainless type grammar:
+
+```toml
+schema = 1
+
+[[type]]
+dependency = "regex"
+rust_path = "regex::Regex"
+stainless_path = "rust::regex::Regex"
+representation = "opaque"
+
+[[type]]
+dependency = "regex"
+rust_path = "regex::Error"
+stainless_path = "rust::regex::Error"
+representation = "opaque"
+error_format = "display"
+
+[[function]]
+dependency = "regex"
+rust_path = "regex::Regex::new"
+stainless_path = "rust::regex::Regex::new"
+parameters = ["const rust::String&"]
+return = "rust::Result<rust::regex::Regex, rust::regex::Error>"
+
+[[method]]
+receiver_type = "rust::regex::Regex"
+rust_name = "is_match"
+stainless_name = "is_match"
+receiver = "const"
+parameters = ["const rust::String&"]
+return = "bool"
+```
+
+Unknown keys, duplicate Stainless signatures, paths outside the named Cargo
+dependency, and unversioned manifests are errors. `receiver` is one of
+`value`, `const`, or `mut`, corresponding to Rust `self`, `&self`, or
+`&mut self`. Parameter passing is expressed by the Stainless value/reference
+syntax; wrapper-specific adaptations such as `const rust::String&` to Rust
+`&str` are compiler-known. `error_format` may be `display` or `debug`; generated
+Rust proves the requested trait before Stainless uses it for a `RustError`
+message.
+
+The initial binding subset admits safe public free functions, associated
+functions, and inherent methods with concrete signatures composed of
+primitives, supported containers, declared opaque types, values, and
+non-escaping input borrows. Reference returns, raw pointers, `unsafe fn`,
+variadics, trait objects other than mapped Stainless interfaces, callbacks,
+async/Future values, `impl Trait`, associated-type projections, higher-ranked
+bounds, and unconstrained lifetimes are rejected. External generic functions
+require one manifest entry per concrete instantiation; generic Rust types may
+appear only with explicit supported type arguments. A user-authored safe Rust
+adapter is the escape hatch for every rejected signature.
+
+The initial stable toolchain flow is:
 
 1. Cargo metadata identifies the exact package version, enabled features, and
    target configuration.
-2. An explicit Stainless binding declaration selects each public item and
-   states the Stainless-representable signature and ownership effects. The
-   concrete binding-file syntax is still to be designed.
+2. The versioned binding manifest selects each public item and states its
+   Stainless-representable signature and ownership effects.
 3. The compiler generates a deterministic Rust shim in a private
    `__stainless_bindings` module. It calls the real crate item and may
    specialize generics, introduce a safe newtype, or normalize an otherwise
@@ -1569,6 +1695,17 @@ borrowed. A Rust borrow such as `&Arc<T>` may therefore become a
 non-consuming wrapper call that accepts `shared_ptr<T>` without making
 `shared_ptr<T>&` a source-level type. A signature is rejected when this
 adaptation cannot preserve observable ownership behavior.
+
+An opaque native `T` may be stored by value or behind a unique owner. It is
+forbidden as the pointee of `shared_ptr`, `shared_nullptr`, `weak_ptr`,
+`atomic_ptr`, or `atomic_nullptr` by default because Rust `Sync` does not prove
+Stainless's stronger logical-immutability rule. The only initial opt-in is a
+user-authored safe Rust newtype listed with
+`representation = "frozen_adapter"`. This is an explicit semantic promise that
+the selected API exposes no observable mutation through shared access; the
+generated shim additionally asserts `Send + Sync`. Native values crossing a
+thread boundary by value receive an ordinary generated `Send` assertion.
+Stainless-defined types continue to derive these properties structurally.
 
 The wrapper should preserve the Rust item and method name whenever no
 adaptation requires a distinct name. Its generated Rust symbol is still
@@ -1649,6 +1786,63 @@ The AST/HIR should contain only validated Stainless concepts with defined Rust
 semantics. Transpilation must happen from the validated HIR, not directly from
 parser nodes.
 
+## Cargo integration and compiler packaging
+
+The initial implementation is a Cargo workspace with five publishable crates:
+
+- `stainless-syntax` owns tokens, the lossless CST, and typed syntax wrappers.
+- `stainless-compiler` owns AST/HIR lowering, name/type/ownership analysis,
+  Rust metadata and binding handling, source maps, and Rust emission.
+- `stainless-runtime` contains only generated-code support such as erased
+  checked exceptions.
+- `stainless-build` provides the Cargo build-script API.
+- `stainlessc` is a thin CLI over `stainless-compiler` for diagnostics,
+  fixtures, and standalone generation.
+
+Keeping semantics, interop, and codegen as modules inside `stainless-compiler`
+avoids premature crate boundaries; they may be split after their APIs stabilize.
+A procedural macro is not used because whole-file parsing, external manifests,
+generated modules, dependency shims, and source-mapped diagnostics fit a build
+step better.
+
+An existing Rust package integrates Stainless explicitly:
+
+```toml
+[dependencies]
+stainless-runtime = "0.1"
+
+[build-dependencies]
+stainless-build = "0.1"
+```
+
+```rust
+// build.rs
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    stainless_build::Builder::new()
+        .crate_root("src/lib.stl")
+        .bindings("stainless-bindings.toml")
+        .compile()
+}
+```
+
+The builder resolves paths relative to `CARGO_MANIFEST_DIR`, writes generated
+files and source maps only beneath Cargo's `OUT_DIR`, emits
+`cargo:rerun-if-changed` for every source and binding input, and produces one
+root include file. The Rust crate chooses where to expose the generated items:
+
+```rust
+// src/lib.rs
+include!(concat!(env!("OUT_DIR"), "/stainless.rs"));
+```
+
+Including at crate root preserves Stainless `crate::` paths and permits direct
+calls between generated and hand-written Rust modules. A duplicate Rust and
+Stainless item name is a normal compile error unless one side is placed in a
+module. Generated files are rebuildable artifacts and are never written into
+`src`. `stainless-build` and `stainless-runtime` must use the same major/minor
+language version as `stainless-compiler`; incompatible generated-runtime ABI
+versions are rejected.
+
 ## Rust library survey
 
 Research snapshot: 2026-07-29. Versions should be selected and locked when the
@@ -1657,8 +1851,8 @@ first compiler spike is created rather than copied from this document.
 | Area | Candidate | Assessment |
 | --- | --- | --- |
 | Lexing | [`logos`](https://docs.rs/logos/latest/logos/) | **Recommended.** Rust-native, derive-based, fast, and provides byte spans. Trivia should be tokenized rather than skipped so the CST stays lossless. Context-dependent token combinations can be handled by the parser. |
-| Parsing | Hand-written recursive descent plus a Pratt expression parser | **Recommended starting point.** This gives precise control over C++-like ambiguities, recovery, contextual keywords, and CST events. It also keeps the grammar and compiler fully in Rust. |
-| Parsing alternative | [`chumsky`](https://docs.rs/chumsky/latest/chumsky/) | **Worth a small comparison spike.** It supports token-stream parsing, context-sensitive parsers, spans, and error recovery. It is attractive if it remains readable and can emit the lossless CST/error nodes we need; combinator complexity should be measured before adopting it. |
+| Parsing | Hand-written recursive descent plus a Pratt expression parser | **Selected.** This gives precise control over C++-like ambiguities, recovery, contextual keywords, and CST events while keeping the grammar and compiler fully in Rust. |
+| Parsing alternative | [`chumsky`](https://docs.rs/chumsky/latest/chumsky/) | **Not selected initially.** It remains a possible later replacement if the hand-written parser's recovery or maintenance cost proves poor, but the first compiler will not carry two parser implementations. |
 | Lossless CST | [`rowan`](https://docs.rs/rowan/latest/rowan/) | **Recommended.** It provides immutable green trees, syntax nodes/tokens, text ranges, and typed-AST support while leaving the language-specific node model to us. It is a tree library, not a parser. |
 | CST schema/code generation | [`ungrammar`](https://docs.rs/ungrammar/latest/ungrammar/) | **Optional later.** Useful for declaring CST shapes and generating typed wrappers. It explicitly does not generate a parser, so it is not needed for the first slice. |
 | Diagnostics | [`miette`](https://docs.rs/miette/latest/miette/) | **Recommended at the public API/CLI boundary.** It supports structured diagnostics, source spans, labels, error codes, rich terminal output, and a narratable renderer. Internal compiler diagnostics should remain our own data types. |
@@ -1684,8 +1878,8 @@ first compiler spike is created rather than copied from this document.
 The first milestone should prove the whole architecture with a deliberately tiny
 language rather than attempt broad C++ compatibility:
 
-1. Create a Cargo workspace with separate syntax, semantic/HIR, Rust interop,
-   compact language-runtime, Rust-codegen, and CLI/public-facade crates.
+1. Create the five-crate workspace described above: syntax, compiler,
+   compact runtime, Cargo build integration, and CLI.
 2. Tokenize identifiers, literals, comments, punctuation, and a few keywords
    with byte spans and lossless trivia.
 3. Parse function definitions, typed local bindings, blocks, calls, arithmetic,
@@ -1700,9 +1894,9 @@ language rather than attempt broad C++ compatibility:
    and prove that Cargo rejects a stale or incorrect binding.
 6. Emit and format Rust, compile representative generated files in integration
    tests, and source-map rustc diagnostics back to Stainless.
-7. Compare the hand-written parser with a narrowly scoped Chumsky prototype
-   before the grammar grows. Keep the option with clearer recovery behavior and
-   more maintainable tests.
+7. Compile every reference sample as it enters the supported milestone subset,
+   and keep unsupported later-stage samples as explicit expected diagnostics
+   rather than silently accepting partial semantics.
 
 Every accepted construct should have three kinds of tests: valid source and its
 CST, invalid source and its diagnostics, and source-to-generated-Rust behavior.
