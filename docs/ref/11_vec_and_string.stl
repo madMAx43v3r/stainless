@@ -1,0 +1,43 @@
+// Provisional Stainless syntax example.
+// This file stays within the first compiler-provided Vec and String binding
+// subset. These are the real Rust types, selected through the rust namespace.
+
+use rust::{String, Vec};
+
+namespace samples {
+
+usize vec_basics() {
+    // No initializer means an ordinary default construction, equivalent to
+    // the explicit Vec() form and lowered to Rust Vec::new().
+    Vec<String> values;
+    values.reserve(3);
+    values.push("stainless");
+    values.push("rust");
+    values.insert(1, "to");
+
+    if (values.contains("rust")) {
+        values.sort();
+    }
+
+    return values.len();
+}
+
+String string_basics(const String& suffix) {
+    String text = "stainless";
+    text.push(' ');
+    text.push_str(suffix);
+
+    if (!text.ends_with("!")) {
+        text.push('!');
+    }
+
+    // Returning a named non-copy value uses the language's explicit move.
+    return move(text);
+}
+
+Vec<u8> consume_string(String text) {
+    // into_bytes consumes its String receiver.
+    return move(text).into_bytes();
+}
+
+} // namespace samples

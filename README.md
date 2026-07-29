@@ -2,7 +2,10 @@
 
 Stainless is a new C++-like language that transpiles to Rust.
 
-> **Status:** design and library-research stage. No language syntax is stable yet.
+> **Status:** early implementation. The language design remains provisional;
+> the Rust compiler crate now contains the first validated native bindings for
+> `rust::Vec<T>` and `rust::String`, while parsing and Rust emission have not
+> started yet.
 
 ## Project charter
 
@@ -58,6 +61,8 @@ language specification or executable test suite:
 - [`10_checked_exceptions.stl`](docs/ref/10_checked_exceptions.stl) —
   C++-style exception structs, `throw`/`try`/`catch`, Java-style checked
   `throws` declarations, propagation, and partial handling.
+- [`11_vec_and_string.stl`](docs/ref/11_vec_and_string.stl) — the initial
+  compiler-supported `rust::Vec<T>` and `rust::String` surface.
 
 As syntax and semantics become executable, these examples should be converted
 into parser, diagnostic, and transpilation fixtures rather than allowed to
@@ -530,6 +535,14 @@ Stainless does not insert its own arithmetic checks or silently select
 wrapping operations. Explicit checked, wrapping, saturating, or overflowing
 arithmetic may be added later only through documented Stainless APIs with
 direct Rust equivalents.
+
+### Characters
+
+Stainless `char` is Rust's `char`: one Unicode scalar value, not a C++ byte-sized
+integer. A character literal such as `'x'` or `'🦀'` has type `char`. Character
+literals containing zero or multiple scalar values are rejected, and `char`
+does not implicitly convert to or from an integer. Byte-oriented data uses
+`u8`; the first compiler does not expose Rust byte-literal syntax.
 
 ### Strings
 
@@ -1583,12 +1596,45 @@ operations specified above instead of naming `Box`, `Arc`, or `Weak` directly.
 valid.
 
 The compiler requires semantic signatures before it can produce useful
-Stainless diagnostics. Each compiler release therefore carries exact,
-machine-generated metadata for the supported Rust toolchain's representable
-`core`, `alloc`, and `std` APIs. This is type/trait/borrow metadata, not wrapper
+Stainless diagnostics. Each compiler release will therefore carry exact
+metadata for the supported Rust toolchain's representable `core`, `alloc`, and
+`std` APIs. The first checked-in subset is deliberately hand-authored and
+validated; it can become machine-generated when the metadata format and
+generator are mature. This is type/trait/borrow metadata, not wrapper
 implementations or a second API. Its paths and names remain Rust's except for
 the explicit ownership mapping, its version is tied to the supported Rust
 toolchain, and generated calls are revalidated by that toolchain.
+
+#### Implemented `Vec` and `String` subset
+
+The compiler crate currently registers the following source-visible APIs:
+
+- `rust::Vec<T>`: `Vec()`, `Vec::with_capacity`, `len`, `is_empty`,
+  `capacity`, `reserve`, `reserve_exact`, `shrink_to`, `shrink_to_fit`,
+  `push`, `pop`, `clear`, `truncate`, `insert`, `remove`, `swap_remove`,
+  `append`, `reverse`, `clone`, `contains`, `sort`, and `dedup`.
+- `rust::String`: `String()`, the explicit copy constructor
+  `String(const String&)`, `String::with_capacity`, `clone`, `into_bytes`,
+  `len`, `is_empty`, `capacity`, `reserve`, `reserve_exact`, `shrink_to`,
+  `shrink_to_fit`, `truncate`, `clear`, `push`, `push_str`, `pop`, `insert`,
+  `insert_str`, `remove`, `make_ascii_lowercase`, `make_ascii_uppercase`,
+  `is_ascii`, `contains`, `starts_with`, `ends_with`,
+  `eq_ignore_ascii_case`, `replace`, `repeat`, `to_lowercase`, and
+  `to_uppercase`.
+
+The metadata records `&self`, `&mut self`, and consuming `self` separately.
+Generic `Vec` methods also retain their Rust trait requirements: `clone`
+requires `T: Clone`, `contains` and `dedup` require `T: PartialEq`, and `sort`
+requires `T: Ord`. Stainless `const String&` arguments to Rust string-slice
+parameters are resolved as exact Stainless parameters first and adapted to
+Rust `&str` only during lowering.
+
+Borrow-returning, iterator-producing, and indexing APIs are not exposed in this
+first subset. Examples include `Vec::get`, `Vec::iter`, `String::as_str`,
+`String::split`, and `String::chars`. Adding one requires a Stainless lifetime
+and return-value model rather than merely placing its name in the registry.
+The parser, semantic call resolver, and Rust emitter are not connected to this
+metadata yet.
 
 Each Stainless compiler release supports one stable Rust minor release. The
 build helper compares `rustc -Vv` with the metadata version and rejects a
@@ -1788,7 +1834,7 @@ parser nodes.
 
 ## Cargo integration and compiler packaging
 
-The initial implementation is a Cargo workspace with five publishable crates:
+The target packaging is a Cargo workspace with five publishable crates:
 
 - `stainless-syntax` owns tokens, the lossless CST, and typed syntax wrappers.
 - `stainless-compiler` owns AST/HIR lowering, name/type/ownership analysis,
@@ -1804,6 +1850,10 @@ avoids premature crate boundaries; they may be split after their APIs stabilize.
 A procedural macro is not used because whole-file parsing, external manifests,
 generated modules, dependency shims, and source-mapped diagnostics fit a build
 step better.
+
+The repository currently starts with `stainless-compiler`; the remaining
+crates will be added when an executable compiler slice needs their public
+boundaries.
 
 An existing Rust package integrates Stainless explicitly:
 
@@ -1878,8 +1928,9 @@ first compiler spike is created rather than copied from this document.
 The first milestone should prove the whole architecture with a deliberately tiny
 language rather than attempt broad C++ compatibility:
 
-1. Create the five-crate workspace described above: syntax, compiler,
-   compact runtime, Cargo build integration, and CLI.
+1. Start with `stainless-compiler`, then add the syntax, compact runtime, Cargo
+   build integration, and CLI crates when the first end-to-end slice reaches
+   those boundaries.
 2. Tokenize identifiers, literals, comments, punctuation, and a few keywords
    with byte spans and lossless trivia.
 3. Parse function definitions, typed local bindings, blocks, calls, arithmetic,
@@ -1888,10 +1939,9 @@ language rather than attempt broad C++ compatibility:
    Stainless-defined, direct standard Rust, generated external wrapper, or
    intrinsic, and reject unresolved names and type mismatches before code
    generation.
-5. Import enough real Rust metadata to construct `Vec()` and call `.push` and
-   `.len`,
-   then generate one explicit wrapper for a small external Cargo dependency
-   and prove that Cargo rejects a stale or incorrect binding.
+5. Connect the initial `Vec` and `String` metadata to resolution and code
+   generation, then generate one explicit wrapper for a small external Cargo
+   dependency and prove that Cargo rejects a stale or incorrect binding.
 6. Emit and format Rust, compile representative generated files in integration
    tests, and source-map rustc diagnostics back to Stainless.
 7. Compile every reference sample as it enters the supported milestone subset,
