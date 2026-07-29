@@ -27,6 +27,35 @@ been explicitly designed.
 Correct semantics and useful diagnostics take priority over accepting more C++
 syntax.
 
+## Provisional syntax examples
+
+The `.stl` files in [`docs/ref`](docs/ref/) show the intended source style
+before the parser exists. They are design references rather than a stable
+language specification or executable test suite:
+
+- [`01_basics.stl`](docs/ref/01_basics.stl) — functions, namespaces, local
+  variables, and control flow.
+- [`02_structs_and_data_inheritance.stl`](docs/ref/02_structs_and_data_inheritance.stl)
+  — out-of-type function definitions, data inheritance, and base-reference
+  coercion.
+- [`03_interfaces.stl`](docs/ref/03_interfaces.stl) — static struct interfaces
+  and dynamically dispatched class interfaces.
+- [`04_exact_overloads.stl`](docs/ref/04_exact_overloads.stl) — free-function
+  and member-function overloads.
+- [`05_ownership_and_containers.stl`](docs/ref/05_ownership_and_containers.stl)
+  — `unique_ptr`, immutable `shared_ptr`, `vector`, moves, and borrows.
+- [`06_threads_and_globals.stl`](docs/ref/06_threads_and_globals.stl) —
+  namespace-scope storage, `atomic_shared_ptr`, thread-local state, and thread
+  handles.
+- [`07_native_runtime_api.stl`](docs/ref/07_native_runtime_api.stl) — trusted
+  `native`/`sealed` declarations used to define the runtime API whitelist.
+- [`08_numeric_types.stl`](docs/ref/08_numeric_types.stl) — fixed-width
+  integers, `usize`, `f32`/`f64`, inference defaults, and literal suffixes.
+
+As syntax and semantics become executable, these examples should be converted
+into parser, diagnostic, and transpilation fixtures rather than allowed to
+drift from the implementation.
+
 ## Language boundaries
 
 The exact syntax still needs to be specified. The initial language should focus
@@ -35,7 +64,7 @@ on constructs with direct Rust equivalents:
 - functions, blocks, local bindings, control flow, structs, classes, enums, and
   methods;
 - namespaces/modules and explicit imports rather than textual inclusion;
-- pure-data structs with data-only inheritance implemented as composition;
+- vtable-free structs with data-only inheritance implemented as composition;
 - sealed classes that can implement interfaces but cannot inherit other
   classes;
 - interfaces and interface inheritance implemented as Rust traits,
@@ -75,21 +104,26 @@ using them as nearly interchangeable spellings.
 An `interface` is behavior-only:
 
 - It contains method signatures but no instance data, constructors, or
-  destructors.
+  destructors. Function bodies cannot appear inside the interface.
 - Interface inheritance lowers directly to Rust supertraits.
 - An interface may inherit only from other interfaces.
-- A class may implement one or more interfaces.
+- A struct or class may implement one or more interfaces.
+- Interface calls on a concrete struct, or through a generic constrained by an
+  interface, always use static dispatch. A struct cannot be converted to an
+  interface reference or owning interface pointer.
 - Interface calls may use static dispatch when the concrete class is known or
-  Rust trait-object dispatch when a dynamic interface value is required.
+  Rust trait-object dispatch when a class is converted to a dynamic interface
+  value.
 
-A `struct` is data-only:
+A `struct` has a data-only representation:
 
-- Its declaration contains fields, data-base declarations, and data-related
-  metadata, but no methods.
+- Its declaration may contain fields, data-base and interface declarations,
+  data-related metadata, and member-function declarations. A member-function
+  body cannot appear inside the struct.
 - A struct may inherit data only from another struct. This is not subtype
   inheritance: it lowers to an embedded Rust field containing the base value.
-- A struct cannot inherit or implement an interface and cannot inherit from a
-  class.
+- A struct may implement interfaces using static dispatch, but cannot inherit
+  from a class.
 - Inherited fields may use convenient source-level lookup, but the compiler
   lowers that access to the corresponding embedded-field path. Ambiguous field
   names must be diagnosed rather than selected by an implicit precedence rule.
@@ -105,11 +139,15 @@ A `struct` is data-only:
   slicing, or C++ layout/ABI guarantees. An explicitly declared field may still
   contain an interface value whose Rust representation carries trait-object
   metadata.
+- Implementing an interface does not change a struct's representation. The
+  generated Rust uses an ordinary trait implementation with static dispatch,
+  and Stainless prohibits creating a `dyn Interface` from the struct.
 
 A `class` combines data with behavior but is sealed against class inheritance:
 
-- A class may declare its own fields, methods, and implementations of interface
-  methods.
+- A class may declare its own fields, member functions, and implementations of
+  interface methods. As with a struct, only declarations appear inside the
+  class; function bodies are defined outside it.
 - A class cannot inherit from another class or from a struct. Data reuse must
   use fields and composition.
 - A class may implement interfaces, but there is no class method inheritance or
@@ -127,23 +165,40 @@ be carried by a `dyn Interface` fat pointer rather than stored inside the
 concrete class value. Stainless must not expose or depend on the physical vtable
 layout.
 
-Functions and associated functions that operate on a struct are declared in a
-separate implementation construct. They are not members of its data declaration,
-are not inherited by data-derived structs, and cannot be virtual or overridden.
-Reuse of behavior must be explicit: call a base-value function or extract a
-helper function.
+Member functions are declared inside their struct or class but defined outside
+it using a qualified C++-style name. Stainless has no Rust-style `impl` syntax:
+
+```cpp
+struct Buffer : Sequence<i32> {
+    vector<i32> values;
+    usize size() const;
+};
+
+usize Buffer::size() const {
+    return values.size();
+}
+```
+
+The declaration and definition signatures must match exactly. Struct member
+functions are not inherited by data-derived structs and cannot be virtual or
+overridden. Reuse of behavior must be explicit: call a function on the embedded
+base value or extract a helper function. Listing an interface creates an
+implementation obligation: matching member declarations and their out-of-type
+definitions must satisfy every required interface function. A `native`
+declaration is the exception because its definition is supplied by the trusted
+runtime.
 
 For example, data inheritance lowers conceptually as follows:
 
 ```cpp
 struct Point2 {
-    float x;
-    float y;
-}
+    f32 x;
+    f32 y;
+};
 
 struct Point3 : Point2 {
-    float z;
-}
+    f32 z;
+};
 ```
 
 ```rust
@@ -174,6 +229,65 @@ The final Stainless syntax may give the embedded base a stable explicit name;
 that decision must be made before field lookup and multiple data bases are
 implemented.
 
+### Declaration syntax and contextual modifiers
+
+Declaration modifiers follow the declaration kind:
+
+```cpp
+interface native sealed vector_api<T> {
+    usize size() const;
+    bool empty() const;
+    void push_back(T value);
+};
+
+struct native vector<T> : vector_api<T> {
+    usize size() const;
+    bool empty() const;
+    void push_back(T value);
+};
+```
+
+The order is the declaration kind, its modifiers, and then the declared name.
+`native` and `sealed` are contextual declaration modifiers, not globally
+reserved keywords; outside the modifier position they remain ordinary
+identifiers.
+
+- `native` means that storage, behavior, or both are supplied by the trusted
+  Rust runtime/backend rather than a Stainless definition. Normal project
+  source cannot use `native` to bind arbitrary Rust code.
+- `sealed` prevents code outside the defining standard-library module from
+  inheriting or implementing the declaration.
+
+The set of modifiers valid for each declaration kind will be explicit in the
+grammar. They must not be parsed as general prefix modifiers.
+
+### Primitive numeric types
+
+Stainless uses Rust's explicit primitive numeric names:
+
+- Signed integers: `i8`, `i16`, `i32`, `i64`, `i128`, and `isize`.
+- Unsigned integers: `u8`, `u16`, `u32`, `u64`, `u128`, and `usize`.
+- Floating-point numbers: `f32` and `f64`.
+
+C++ spellings such as `short`, `int`, `long`, `unsigned`, `size_t`, `float`,
+`double`, and `long double` are not type names in Stainless. `usize` and
+`isize` have the target pointer width and should primarily be used for indices,
+collection lengths, and address-sized quantities. Public data formats should
+prefer an explicitly sized integer.
+
+Numeric literals follow Rust-style inference and suffixes. An integer literal
+uses its expected type and otherwise defaults to `i32`; a floating literal uses
+its expected type and otherwise defaults to `f64`. Suffixes such as `42u64`,
+`3.0f32`, and `3.0f64` select an exact type.
+
+`f32` and `f64` lower directly to Rust's IEEE-754 binary32 and binary64 types,
+including their infinities, signed zero, and NaN behavior. There is no implicit
+promotion between numeric types: mixed-width arithmetic and overload arguments
+must use an explicit conversion. The conversion syntax, float-to-integer
+behavior, and integer-overflow policy must be specified before implementation;
+overflow behavior must not accidentally vary with the generated Cargo build
+profile.
+
 ### Function overloading
 
 Stainless supports function and method overloads with deliberately simpler
@@ -198,8 +312,8 @@ rules than C++:
 For example, these Stainless declarations:
 
 ```cpp
-int parse(int value);
-int parse(string value);
+i32 parse(i32 value);
+i32 parse(string value);
 ```
 
 may lower conceptually to Rust functions named `parse__i32` and
@@ -338,6 +452,63 @@ The assignment changes `current` to refer to a new immutable `Config`.
 `observer` continues to refer to the original value until its own handle is
 dropped or reassigned.
 
+### Standard-library prelude and Rust runtime
+
+Standard ownership and container types have canonical declarations in the
+Stainless `std` namespace and are also re-exported by the built-in prelude.
+Both `std::vector<i32>` and unqualified `vector<i32>` name the same type without
+a user-written `using` statement. This initially includes `unique_ptr`,
+`shared_ptr`, `weak_ptr`, `optional`, `vector`, and `string`.
+
+A compact `stainless-runtime` Rust crate supplies the native implementations.
+The bundled Stainless declarations are the source-level API whitelist:
+
+```cpp
+vector<i32> values;
+values.push_back(10); // accepted Stainless API
+values.size();        // accepted Stainless API
+values.len();         // error: vector<i32> has no member named len
+```
+
+`Vec::len`, `Arc::clone`, and other Rust APIs may be used inside the runtime,
+but they are never added to Stainless name resolution. Target-Rust paths such
+as `std::vec::Vec` are likewise not Stainless declarations and cannot be called
+or named by source programs.
+
+Native standard types implement their bundled Stainless interfaces statically.
+For example, the runtime may implement its generated `VectorApi<T>` Rust trait
+for `Vec<T>` and translate `vector<T>::size()` to that trait's `size` method.
+The generated call uses fully qualified static dispatch, so this does not create
+a trait object or give the Stainless struct a vtable.
+
+The compiler resolves every call to one of three typed HIR forms:
+
+```text
+user function(FunctionId)
+runtime item(RuntimeItemId)
+compiler intrinsic(IntrinsicId)
+```
+
+There is no arbitrary “call this Rust path” form. A runtime item is registered
+by a bundled `native` declaration and has a stable ID, Stainless signature,
+receiver constness/mutability, ownership effects, generic constraints, and
+runtime entry point. Free functions such as `make_unique` are registered the
+same way; only operations that the type or borrow checker must understand,
+such as `move` and ownership/interface coercions, remain compiler intrinsics.
+
+Normal project source cannot declare a `native` binding. This prevents the
+runtime mechanism from becoming an accidental Rust FFI escape hatch. It is a
+language-semantic boundary rather than a security sandbox: a user can still
+edit generated Rust or their Cargo project outside Stainless.
+
+The runtime should use `#![forbid(unsafe_code)]` for the supported safe standard
+library. Its API version must match the compiler, and conformance tests must
+verify that every bundled runtime declaration has exactly one implementation
+with the expected generated Rust signature. C++ standard-library functions are
+included only when Stainless can give them safe, documented semantics; unsafe
+escape APIs such as `unique_ptr::release`, `vector::data`, and `string::c_str`
+remain absent.
+
 This list is a starting policy, not a complete specification. Any feature
 proposal should answer all of the following before implementation:
 
@@ -401,17 +572,22 @@ first compiler spike is created rather than copied from this document.
 The first milestone should prove the whole architecture with a deliberately tiny
 language rather than attempt broad C++ compatibility:
 
-1. Create a Cargo workspace with separate syntax, semantic/HIR, Rust-codegen,
-   and CLI/public-facade crates.
+1. Create a Cargo workspace with separate syntax, semantic/HIR, bundled
+   standard-library declarations, compact Rust runtime, Rust-codegen, and
+   CLI/public-facade crates.
 2. Tokenize identifiers, literals, comments, punctuation, and a few keywords
    with byte spans and lossless trivia.
 3. Parse function definitions, typed local bindings, blocks, calls, arithmetic,
    `return`, and `if`/`else` into a Rowan CST, including recoverable error nodes.
-4. Lower the CST to a small typed AST/HIR and reject unresolved names and type
+4. Lower the CST to a small typed AST/HIR, classify every call as user-defined,
+   registered runtime, or intrinsic, and reject unresolved names and type
    mismatches before code generation.
-5. Emit and format Rust, then compile representative generated files in
+5. Implement one native standard type and its interface in the safe Rust
+   runtime, proving that unregistered Rust methods remain invisible to
+   Stainless.
+6. Emit and format Rust, then compile representative generated files in
    integration tests.
-6. Compare the hand-written parser with a narrowly scoped Chumsky prototype
+7. Compare the hand-written parser with a narrowly scoped Chumsky prototype
    before the grammar grows. Keep the option with clearer recovery behavior and
    more maintainable tests.
 
@@ -423,6 +599,8 @@ CST, invalid source and its diagnostics, and source-to-generated-Rust behavior.
 - Being a drop-in C++ compiler or transpiling arbitrary existing C++.
 - Preserving C++ ABI, undefined behavior, or platform-specific implementation
   details.
+- Calling arbitrary Rust functions or treating Rust crates as implicit
+  Stainless namespaces.
 - Using generated Rust as a substitute for defining Stainless semantics.
 - Adding syntax before its ownership, type-checking, and lowering behavior is
   specified.
