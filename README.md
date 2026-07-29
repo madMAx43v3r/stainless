@@ -38,15 +38,16 @@ language specification or executable test suite:
 - [`02_structs_and_data_inheritance.stl`](docs/ref/02_structs_and_data_inheritance.stl)
   — out-of-type function definitions, data inheritance, and base-reference
   coercion.
-- [`03_interfaces.stl`](docs/ref/03_interfaces.stl) — static struct interfaces
-  and dynamically dispatched class interfaces.
+- [`03_interfaces.stl`](docs/ref/03_interfaces.stl) — static struct interfaces,
+  dynamically dispatched class interfaces, and fluent `void` member calls.
 - [`04_exact_overloads.stl`](docs/ref/04_exact_overloads.stl) — free-function
   and member-function overloads.
 - [`05_ownership_and_containers.stl`](docs/ref/05_ownership_and_containers.stl)
-  — `unique_ptr`, immutable `shared_ptr`, `vector`, moves, and borrows.
+  — non-null and nullable unique/shared owners, guarded `require` bindings,
+  `vector`, moves, and borrows.
 - [`06_threads_and_globals.stl`](docs/ref/06_threads_and_globals.stl) —
-  namespace-scope storage, `atomic_shared_ptr`, thread-local state, and thread
-  handles.
+  namespace-scope storage, `atomic_ptr`, `atomic_nullptr`, thread-local state,
+  and thread handles.
 - [`07_native_runtime_api.stl`](docs/ref/07_native_runtime_api.stl) — trusted
   `native`/`sealed` declarations used to define the runtime API whitelist.
 - [`08_numeric_types.stl`](docs/ref/08_numeric_types.stl) — fixed-width
@@ -73,7 +74,7 @@ on constructs with direct Rust equivalents:
 - interfaces and interface inheritance implemented as Rust traits,
   supertraits, and trait objects where dynamic dispatch is required;
 - safe dynamic allocation with ownership represented by `unique_ptr<T>`,
-  `shared_ptr<T>`, and `weak_ptr<T>`;
+  `unique_nullptr<T>`, `shared_ptr<T>`, `shared_nullptr<T>`, and `weak_ptr<T>`;
 - value semantics, explicit moves, borrowing, and references governed by
   Rust-like ownership rules;
 - type inference where C++ would commonly use `auto`;
@@ -126,6 +127,9 @@ A `struct` has a data-only representation:
   body cannot appear inside the struct.
 - A struct may inherit data only from another struct. This is not subtype
   inheritance: it lowers to an embedded Rust field containing the base value.
+- A struct may have at most one direct struct data base. It may additionally
+  implement any number of interfaces, and a chain of single data bases is
+  allowed, but multiple struct inheritance is rejected.
 - A struct may implement interfaces using static dispatch, but cannot inherit
   from a class.
 - Inherited fields may use convenient source-level lookup, but the compiler
@@ -134,11 +138,9 @@ A `struct` has a data-only representation:
 - A reference to a derived struct implicitly coerces to a reference to its data
   base. This lowers to a safe reference projection such as `&derived.base` or
   `&mut derived.base`, follows the normal mutability/reborrowing rules, and may
-  traverse multiple unambiguous levels of data inheritance.
+  traverse multiple levels of the single data-base chain.
 - This reference coercion never converts or slices an owned derived value,
   permits a base-to-derived downcast, or introduces runtime type information.
-  If the same base is reachable through more than one data-inheritance path,
-  the source must select the intended base path explicitly.
 - There are no virtual data bases, compiler-inserted vtable pointers, C++ object
   slicing, or C++ layout/ABI guarantees. An explicitly declared field may still
   contain an interface value whose Rust representation carries trait-object
@@ -240,9 +242,19 @@ let derived: Point3 = /* ... */;
 let length = planar_length(&derived.base);
 ```
 
-The final Stainless syntax may give the embedded base a stable explicit name;
-that decision must be made before field lookup and multiple data bases are
-implemented.
+An inherited field may be selected explicitly with a C++-style qualified member
+access:
+
+```cpp
+f32 x = point.Point2::x;
+```
+
+`receiver.Base::field` names the `Base` subobject in the receiver's single
+data-base chain and lowers to the corresponding embedded-field path. Ordinary
+`receiver.field` remains available when lookup finds exactly one field. If a
+derived struct and one of its data bases declare the same field name, the
+unqualified access is rejected and the source must use the explicit base
+qualifier.
 
 ### Declaration syntax and contextual modifiers
 
@@ -276,6 +288,85 @@ identifiers.
 The set of modifiers valid for each declaration kind will be explicit in the
 grammar. They must not be parsed as general prefix modifiers.
 
+### Namespaces, imports, access control, and `auto`
+
+Namespace declarations retain C++ syntax. Import declarations use a Rust-like
+`use` syntax with `::` paths:
+
+```cpp
+use geometry::Point;
+use geometry::{length, Point3};
+use geometry::Point as Position;
+use geometry::*;
+```
+
+`crate`, `self`, and `super` provide Rust-like absolute and relative path
+anchors. Imports are namespace-scoped, order-independent, and affect name
+lookup only; they do not textually include or execute another file. Explicit,
+grouped, aliased, and glob imports are supported. If imports make an
+unqualified name ambiguous, use is a compile error rather than a
+first-declaration-wins choice.
+
+Crates and source files follow Rust's module layout with `.stl` replacing
+`.rs`:
+
+- `src/lib.stl` is a library crate root and `src/main.stl` is a binary crate
+  root. A package containing both defines separate library and binary crates,
+  as in Rust.
+- `mod geometry;` declares a child module and loads either
+  `geometry.stl` or `geometry/mod.stl` relative to the declaring module. Both
+  forms existing at once is an ambiguity error.
+- A `mod child;` declaration inside `geometry.stl` loads
+  `geometry/child.stl` or `geometry/child/mod.stl`.
+- Additional binary crate roots use Rust's `src/bin/name.stl` and
+  `src/bin/name/main.stl` conventions.
+- A module file contains that module's body and does not wrap its contents in a
+  same-named namespace block.
+
+`namespace name { ... }` is the C++-style Stainless spelling for an inline
+module, while `mod name;` declares a file-backed module. A module name may be
+declared only once within a parent; C++-style reopening of the same namespace
+is rejected so the module tree remains identical to Rust's. Source paths do not
+implicitly create modules without the corresponding `mod` declaration.
+Unsupported Rust path overrides such as `#[path = ...]` are not accepted.
+
+The transpiler mirrors this tree in generated `.rs` files. `crate` always means
+the current Stainless crate. Cargo dependencies and arbitrary Rust crates do
+not automatically become Stainless namespaces or bypass the native-runtime
+whitelist.
+
+Member access control follows C++:
+
+- Members of a `struct` are public by default; members of a `class` are private
+  by default.
+- `public:` and `private:` labels change access for subsequent declarations.
+  `protected:` is not supported because Stainless has no behavioral class
+  inheritance.
+- Interface functions are always public and access labels are rejected inside
+  an interface.
+- An out-of-type member-function definition has access to its type's private
+  members. Private data-base fields remain inaccessible to a derived struct.
+
+Namespace-scope visibility and linkage continue to use the C++-like rules
+described for globals below; access labels are not valid at namespace scope.
+
+`auto` is supported for local value bindings when an initializer determines one
+exact type:
+
+```cpp
+auto count = values.size();
+const auto name = "stainless";
+```
+
+It is not initially accepted for fields, parameters, function return types, or
+declarations without an initializer. Ordinary `auto&` and `const auto&` local
+declarations are rejected; the compiler-native guarded `require` declaration
+described below is the sole local-reference form. Copy and move rules apply
+after deduction: a named copyable initializer is copied, while a named non-copy
+value still requires `move(value)`. `auto value = nullptr;` is rejected because
+the pointee type cannot be inferred, and a fluent `void` chain receiver cannot
+be captured with `auto`.
+
 ### Reserved implementation identifiers
 
 Every identifier beginning with `__` is reserved for the Stainless compiler,
@@ -285,7 +376,7 @@ whose name begins with this prefix. A leading single underscore remains
 available to project code.
 
 User code may call documented compiler-provided operations with reserved names,
-such as `atomic_shared_ptr<T>::__load()`, but cannot define, overload, shadow,
+such as `atomic_ptr<T>::__load()`, but cannot define, overload, shadow,
 or replace them. Generated Rust symbols may also use a `__stainless` prefix,
 giving the backend a namespace that cannot collide with source declarations.
 The lexer still treats these spellings as identifiers; name validation enforces
@@ -313,10 +404,68 @@ its expected type and otherwise defaults to `f64`. Suffixes such as `42u64`,
 `f32` and `f64` lower directly to Rust's IEEE-754 binary32 and binary64 types,
 including their infinities, signed zero, and NaN behavior. There is no implicit
 promotion between numeric types: mixed-width arithmetic and overload arguments
-must use an explicit conversion. The conversion syntax, float-to-integer
-behavior, and integer-overflow policy must be specified before implementation;
-overflow behavior must not accidentally vary with the generated Cargo build
-profile.
+must use an explicit conversion.
+
+Explicit primitive casts use constructor-style syntax:
+
+```cpp
+u32 narrowed = u32(wide_value);
+f64 measurement = f64(integer_value);
+```
+
+The allowed primitive conversions and their results are those of Rust's safe
+primitive `as` casts, but Rust's `as` spelling is not exposed in Stainless.
+This includes Rust's truncation behavior for narrowing integers and saturating
+float-to-integer behavior, with NaN converting to zero. Pointer casts are not
+primitive conversions and remain forbidden. C-style casts such as
+`(u32)value`, `static_cast`, and implicit numeric widening are not supported.
+For a non-primitive target, `Type(arguments...)` invokes a constructor rather
+than a cast.
+
+Implicit coercion follows the restricted Rust-like rules documented elsewhere:
+literal type inference, mutable-to-const reborrowing, safe pointer receiver
+borrowing, data-base reference projection, and owning interface coercion.
+Stainless does not add C++ conversion sequences or use coercions to select an
+overload.
+
+Ordinary integer arithmetic follows Rust exactly and is emitted using ordinary
+Rust operators. Its overflow behavior therefore follows the generated Cargo
+crate's `overflow-checks` setting: with checks enabled, overflow panics; with
+checks disabled, Rust's wrapping behavior applies. The usual Cargo development
+and release profile defaults may consequently behave differently, and this is
+an intentional part of Stainless semantics rather than an accidental backend
+difference. Constant-expression overflow and operations such as division by
+zero receive the same diagnostics or runtime behavior as the corresponding
+generated Rust.
+
+Stainless does not insert its own arithmetic checks or silently select
+wrapping operations. Explicit checked, wrapping, saturating, or overflowing
+arithmetic may be added later only through documented Stainless APIs with
+direct Rust equivalents.
+
+### Strings
+
+An ordinary string literal such as `"text"` has Stainless type `string`, not a
+borrowed character-pointer or string-view type. It lowers to an owned Rust
+`String` value and may allocate when evaluated. `auto text = "hello";`
+therefore deduces `string`.
+
+Stainless `string` otherwise follows Rust `String` semantics:
+
+- Contents are always valid UTF-8.
+- `size()` reports the number of UTF-8 bytes.
+- Integer indexing is not supported because a byte offset need not identify a
+  Unicode scalar-value boundary.
+- A string is a copyable Stainless value; implicit copying performs a deep
+  Rust `String::clone`, while `move(value)` transfers its allocation.
+- Embedded null bytes are ordinary string data and there is no implicit
+  null-terminated `const char*` view.
+
+Only functions declared by the bundled Stainless `string` API are callable;
+following Rust's representation and Unicode rules does not expose arbitrary
+Rust `String` methods. Additional mutation, slicing, iteration, and formatting
+operations require explicit runtime declarations and documented failure
+semantics.
 
 ### Initialization, copying, and moving
 
@@ -355,9 +504,9 @@ Classes are identity-oriented and never copyable:
 - Explicit deep duplication is ordinary class behavior, conventionally a
   `clone() const` member returning `unique_ptr<Class>`. This creates a new
   object; `unique_ptr` itself is not cloneable.
-- Copying a `shared_ptr<Class>` duplicates only its ownership handle and
-  continues to refer to the same immutable class object; it does not clone that
-  object.
+- Copying a non-null `shared_ptr<Class>` or nullable
+  `shared_nullptr<Class>` duplicates only its ownership handle and continues to
+  refer to the same immutable class object; it does not clone that object.
 
 A named value never moves implicitly. Passing, returning, initializing, or
 assigning from a named non-copy value requires `move(value)`. A fresh temporary
@@ -366,11 +515,16 @@ afterward. Using a moved binding is a compile error until it is explicitly
 reinitialized in a context where assignment is allowed. An active borrow also
 prevents moving its owner.
 
-`shared_ptr<T>` is an implicitly copyable, nullable value type. Copying a
-non-null handle increments its strong reference count; copying a null handle
-simply copies the null state. Copy construction, assignment, and pass-by-value
-leave the source handle valid. `move(shared_pointer)` transfers either state
-without a reference-count increment and invalidates the source binding.
+`unique_ptr<T>` and nullable `unique_nullptr<T>` are non-copyable value types
+that transfer ownership only through `move(pointer)`.
+
+`shared_ptr<T>` is an implicitly copyable, non-null value type.
+`shared_nullptr<T>` is its implicitly copyable nullable counterpart. Copying a
+non-null handle increments its strong reference count; copying a null
+`shared_nullptr<T>` simply copies the null state. Copy construction, assignment,
+and pass-by-value leave the source handle valid. `move(pointer)` transfers the
+handle or null state without a reference-count increment and invalidates the
+source binding.
 
 The Stainless semantic pass must track moves, borrows, conditional control
 flow, and reinitialization so it can diagnose errors against `.stl` source.
@@ -378,21 +532,22 @@ Lowering `move(value)` to an actual Rust move lets `rustc` independently verify
 the result, but generated-Rust errors are a backstop rather than the primary
 Stainless diagnostic mechanism.
 
-### Reference parameters and value returns
+### References and value returns
 
-References exist only as function parameters, including the implicit receiver
-of a member function:
+References normally exist only as function parameters, including the implicit
+receiver of a member function:
 
 ```cpp
 void inspect(const Config& value); // lowers to &Config
 void update(Config& value);        // lowers to &mut Config
 ```
 
-A reference cannot be declared as a field, local variable, namespace-scope
-variable, container element, type alias target, or return type. Functions always
-return values. Returning `move(value)` explicitly transfers a named local; the
-compiler may elide or optimize the resulting Rust move when doing so preserves
-observable behavior.
+A reference cannot be declared as a field, an ordinary local variable, a
+namespace-scope variable, a container element, a type-alias target, or a return
+type. The compiler-native guarded `require` declaration below is the only
+local-reference exception. Non-`void` functions always return values. Returning
+`move(value)` explicitly transfers a named local; the compiler may elide or
+optimize the resulting Rust move when doing so preserves observable behavior.
 
 Reference binding follows these rules:
 
@@ -400,24 +555,148 @@ Reference binding follows these rules:
   access for the duration of the call.
 - `const T&` creates a shared borrow. A `T&` may implicitly reborrow as
   `const T&`.
-- References are non-null and cannot escape the call.
+- References are non-null. A parameter reference cannot escape the call, and a
+  guarded local reference cannot escape its lexical scope or owner lifetime.
 - A derived-struct argument may project to a data-base reference after the
   function has been selected.
 - Passing a `unique_ptr<T>` to a `T&` or `const T&` parameter borrows its
-  pointee; passing a `shared_ptr<T>` may bind only to `const T&` and only where
-  control-flow analysis proves that the shared pointer is non-null.
+  pointee. A `unique_nullptr<T>` may bind to either reference only where
+  control-flow analysis proves it is non-null. Passing a `shared_ptr<T>` may
+  always bind to `const T&`; a `shared_nullptr<T>` may do so only where it is
+  proven non-null.
 
 References to ownership handles are forbidden:
 
 ```cpp
 void invalid(unique_ptr<T>& value);        // rejected
+void invalid(unique_nullptr<T>& value);    // rejected
 void invalid(const shared_ptr<T>& value);  // rejected
+void invalid(shared_nullptr<T>& value);    // rejected
 ```
 
-Owning handles must be passed by value: `unique_ptr<T>` requires an explicit
-move, while `shared_ptr<T>` copies implicitly. The exception is a synchronized
-pointer slot such as `atomic_shared_ptr<T>`, which may be passed by reference
-because its API provides synchronized access to the binding.
+Owning handles must be passed by value: `unique_ptr<T>` and
+`unique_nullptr<T>` require an explicit move, while `shared_ptr<T>` and
+`shared_nullptr<T>` copy implicitly. The exceptions are the synchronized
+pointer slots `atomic_ptr<T>` and `atomic_nullptr<T>`, which may be passed by
+reference because their APIs provide synchronized access to the binding.
+
+### Guarded non-null reference bindings
+
+Stainless provides a compiler-native declaration that combines nullable-owner
+checking with a named, non-null pointee reference:
+
+```cpp
+auto& config = require(maybe) {
+    return -1;
+}
+
+config.version = 2;
+```
+
+`const auto&` is also accepted. This is a declaration statement whose failure
+block replaces the normal trailing semicolon. `require` is recognized
+contextually only in this initializer form; it is not a runtime function and
+cannot be overloaded or shadowed for this use.
+
+The initial form has these rules:
+
+- The operand must have type `unique_nullptr<T>` or `shared_nullptr<T>` and is
+  evaluated exactly once. Applying `require` to a non-null owner or an
+  unrelated optional value is a type error.
+- If the owner is null, the block executes. The compiler accepts the
+  declaration only when the block cannot fall through, for example because it
+  ends in `return`, `break`, `continue`, or another proven-diverging operation.
+- `auto&` applied to a mutable `unique_nullptr<T>` binds a mutable `T&`;
+  `const auto&` or a const unique owner binds `const T&`.
+- A shared owner always binds `const T&`, even when `auto&` is written, because
+  pointees owned through `shared_ptr` and `shared_nullptr` are immutable.
+- The binding refers to the pointee, not to the ownership handle, so this form
+  does not weaken the prohibition on `unique_ptr<T>&`, `shared_ptr<T>&`, and
+  other pointer-handle references.
+
+The reference may be used for member access or passed to compatible reference
+parameters, but it cannot be returned, stored, captured by an escaping closure,
+or sent to another thread. It cannot be rebound. The owner cannot be assigned
+or moved while the reference is live; a mutable unique-owner binding also
+excludes other access to its pointee. The borrow ends after its last use where
+Rust's non-lexical lifetime analysis permits that result.
+
+When the operand is a temporary, the compiler materializes a hidden owner whose
+lifetime covers the reference. This makes an atomic nullable-pointer snapshot
+concise and safe:
+
+```cpp
+auto& config = require(slot.__load()) {
+    return -1;
+}
+```
+
+For a shared snapshot this lowers conceptually to Rust `let ... else`:
+
+```rust
+let __stainless_owner = slot.__load();
+let Some(config) = __stainless_owner.as_deref() else {
+    return -1;
+};
+```
+
+A mutable named unique owner instead uses `as_deref_mut()`. The lowering does
+not clone an `Arc<T>` merely to create the reference; `atomic_nullptr::__load`
+has already produced the owning snapshot whose lifetime is being extended.
+
+### Fluent `void` member calls
+
+Every non-static member function declared with a `void` return type is
+implicitly chainable:
+
+```cpp
+Buffer buffer;
+buffer.push(10).push(20);
+usize count = buffer.push(30).size();
+```
+
+This is conceptually similar to returning `self` by reference, but it does not
+create a Stainless reference value and does not relax the prohibition on
+reference return types. The result of a `void` member call is a restricted
+*chain receiver* that may only be the immediate receiver of another member
+function call. It cannot be stored, passed as an argument, returned, or used
+for field access:
+
+```cpp
+auto invalid = buffer.push(10); // rejected: a chain receiver cannot escape
+```
+
+A non-const `void` member produces a mutable chain receiver; a `void` member
+declared `const` produces a const chain receiver. Consequently, a mutating
+function cannot follow a const function in the same chain. Free functions and
+static member functions have no receiver and retain ordinary `void` semantics.
+Function bodies still use `return;` and cannot return an expression.
+
+The compiler evaluates the original receiver exactly once, invokes each member
+from left to right, and reuses that receiver until a non-`void` call terminates
+the chain. Conceptually:
+
+```cpp
+buffer.push(10).push(20);
+```
+
+lowers to:
+
+```rust
+Buffer::push(&mut buffer, 10);
+Buffer::push(&mut buffer, 20);
+```
+
+Generated Rust functions continue to return `()`: they do not return `&Self` or
+`&mut Self`. This avoids extending a borrow across calls and also supports
+dynamic interface calls without adding reference-returning trait methods. A
+complex or temporary receiver is first evaluated into a hidden local so its
+side effects occur once and it remains alive for the chain.
+
+For `unique_nullptr<T>` or `shared_nullptr<T>`, the receiver must already be
+proven non-null. A nullable unique owner reuses a hidden `&mut T` or `&T` based
+on receiver mutability. A nullable shared owner reuses its hidden `&T`, and
+only const member functions are available through it.
 
 ### Function overloading
 
@@ -474,11 +753,32 @@ does not have an owning raw-pointer form:
 | Stainless | Rust lowering | Semantics |
 | --- | --- | --- |
 | `unique_ptr<T>` | `Box<T>` | One non-null owner; movable but not copyable |
-| `shared_ptr<T>` | `Option<Arc<T>>` | Nullable, implicitly copyable, atomically reference-counted, immutable shared ownership |
+| `unique_nullptr<T>` | `Option<Box<T>>` | Nullable unique owner; movable but not copyable |
+| `shared_ptr<T>` | `Arc<T>` | Non-null, implicitly copyable, atomically reference-counted, immutable shared ownership |
+| `shared_nullptr<T>` | `Option<Arc<T>>` | Nullable counterpart to `shared_ptr<T>` with the same immutable pointee |
 | `weak_ptr<T>` | `Weak<T>` | Non-owning observation that does not keep the allocation alive |
-| `optional<unique_ptr<T>>` | `Option<Box<T>>` | Nullable unique ownership |
-| `atomic_shared_ptr<T>` | Initially `RwLock<Option<Arc<T>>>` | Synchronized, replaceable nullable shared handle |
+| `atomic_ptr<T>` | Initially `RwLock<Arc<T>>` | Synchronized, replaceable non-null shared handle |
+| `atomic_nullptr<T>` | Initially `RwLock<Option<Arc<T>>>` | Synchronized, replaceable nullable shared handle |
 | `vector<T>` | `Vec<T>` | Owned dynamically sized sequence |
+
+`optional<T>` does not accept a pointer or synchronized pointer-slot type as
+`T`. The compiler rejects all of the following after normalizing type aliases:
+
+```cpp
+optional<unique_ptr<T>> invalid_unique;
+optional<unique_nullptr<T>> invalid_nullable_unique;
+optional<shared_ptr<T>> invalid_shared;
+optional<shared_nullptr<T>> invalid_nullable_shared;
+optional<weak_ptr<T>> invalid_weak;
+optional<atomic_ptr<T>> invalid_atomic;
+optional<atomic_nullptr<T>> invalid_nullable_atomic;
+```
+
+This restriction applies when the direct `T` is a pointer type; an ordinary
+struct containing a pointer field may still be placed in `optional`. Pointer
+nullability must be represented by a dedicated pointer type with defined
+ownership semantics. `shared_nullptr<T>` is therefore the sole nullable shared
+owner, and `unique_nullptr<T>` is the sole nullable unique owner.
 
 Allocation uses `make_unique<T>(...)` or `make_shared<T>(...)`. There is no
 owning `new`, `delete`, placement allocation, or dynamically allocated C-style
@@ -488,49 +788,123 @@ named values never move implicitly. Otherwise destruction happens
 automatically. The initial allocation-failure behavior follows ordinary Rust
 allocation and aborts instead of throwing an exception.
 
-`unique_ptr<T>` permits mutation of its pointee when the pointer binding is
-mutable and no active borrow prevents it. Moving it transfers ownership and
-invalidates the previous binding.
+`unique_ptr<T>` and `unique_nullptr<T>` provide exclusive ownership:
 
-`shared_ptr<T>` deliberately provides immutable shared data:
+- `unique_ptr<T>` has no default constructor and cannot be assigned
+  `nullptr`. `make_unique<T>(...)` produces a `unique_ptr<T>`.
+- Default construction and assignment from `nullptr` produce a null
+  `unique_nullptr<T>`.
+- Either type permits mutation of its pointee when its binding is mutable, its
+  pointee is present, and no active borrow prevents mutation.
+- Neither type is copyable. Moving transfers the `Box<T>` or null state and
+  invalidates the previous binding.
 
-- Default construction and assignment from `nullptr` produce a null handle.
-  `make_shared<T>(...)` produces a non-null handle.
+`shared_ptr<T>` and `shared_nullptr<T>` deliberately provide immutable shared
+data:
+
+- `shared_ptr<T>` has no default constructor and cannot be assigned
+  `nullptr`. `make_shared<T>(...)` produces a `shared_ptr<T>`.
+- Default construction and assignment from `nullptr` produce a null
+  `shared_nullptr<T>`.
 - Dereferencing it yields only a shared/const reference.
 - Fields cannot be assigned through it, a mutable reference cannot be extracted
   from it, and mutating methods cannot be called through it.
 - Stainless does not expose `Arc::get_mut`, copy-on-write operations such as
   `Arc::make_mut`, or an interior-mutability escape hatch.
-- Reassigning a mutable `shared_ptr<T>` binding to a new pointer is allowed.
+- Reassigning a mutable shared-handle binding is allowed.
   Reassignment replaces only that handle and decrements the old allocation's
   strong count; it neither changes the old pointee nor redirects other handles.
 - Copy construction, assignment, and pass-by-value implicitly duplicate the
-  handle and lower to an `Arc::clone` where a reference-count increment is
-  required.
+  non-null handle and lower to an `Arc::clone` where a reference-count
+  increment is required. Copying a null `shared_nullptr<T>` remains null.
 - `move(pointer)` remains available when the caller wants to transfer a handle
   without incrementing its reference count.
-- `lock(pointer)` returns a non-null `shared_ptr<T>` when the weak allocation
-  remains alive and a null `shared_ptr<T>` otherwise.
+- `lock(pointer)` returns a non-null `shared_nullptr<T>` when the weak
+  allocation remains alive and a null `shared_nullptr<T>` otherwise.
 
-#### Nullable shared-pointer refinement
+#### Nullable owner conversions and refinement
 
-Stainless tracks whether each `shared_ptr<T>` binding is definitely null,
-definitely non-null, or unknown. Member access and conversion to a `const T&`
-parameter require a definitely non-null binding:
+Conversions between unique-owner representations are always moving
+conversions:
 
 ```cpp
-shared_ptr<Config> config; // default-constructed null handle
+unique_ptr<Config> definite_unique =
+    make_unique<Config>(/* ... */);
+unique_nullptr<Config> maybe_unique =
+    unique_nullptr<Config>(move(definite_unique));
+
+if (maybe_unique) {
+    unique_ptr<Config> recovered =
+        unique_ptr<Config>(move(maybe_unique));
+}
+```
+
+`unique_nullptr<T>(move(pointer))` consumes a `unique_ptr<T>` and wraps its
+`Box<T>` in `Some`; a fresh `unique_ptr<T>` temporary may transfer directly.
+The reverse `unique_ptr<T>(move(pointer))` consumes a proven-non-null
+`unique_nullptr<T>` and extracts its `Box<T>`. Because unique owners cannot be
+copied, omitting `move` in either direction is a compile error. Recovering a
+`unique_ptr<T>` is also a compile error when the nullable source is not proven
+non-null.
+
+Conversions between the two shared-handle types use constructor syntax and do
+not participate in overload resolution:
+
+```cpp
+shared_ptr<Config> definite = make_shared<Config>(/* ... */);
+
+// Copy or move a non-null handle into the nullable representation.
+shared_nullptr<Config> maybe = shared_nullptr<Config>(definite);
+shared_nullptr<Config> moved_maybe =
+    shared_nullptr<Config>(move(definite));
+```
+
+Constructing `shared_nullptr<T>` from a named `shared_ptr<T>` clones its
+`Arc<T>`; construction from `move(pointer)` transfers the `Arc<T>` into
+`Some`. The source remains valid in the copying form and is invalidated in the
+moving form. A fresh `shared_ptr<T>` temporary transfers directly because it
+has no source binding that could remain usable.
+
+The reverse conversion requires the nullable source to be proven non-null:
+
+```cpp
+if (maybe) {
+    shared_ptr<Config> copied = shared_ptr<Config>(maybe);
+    shared_ptr<Config> moved = shared_ptr<Config>(move(maybe));
+}
+```
+
+The copying form lowers to `Arc::clone` of the contained handle. The moving
+form consumes the `Option<Arc<T>>` and extracts its `Arc<T>` without changing
+the strong count. Either form is a compile error when control-flow analysis
+cannot prove the source non-null. Conversion is explicit even in a
+non-overloaded call, preserving the rule that Stainless does not implicitly
+wrap or unwrap an optional representation.
+
+For pointee access, Stainless tracks whether each `unique_nullptr<T>` and
+`shared_nullptr<T>` binding is definitely null, definitely non-null, or
+unknown. Member access and conversion to a reference parameter require a
+definitely non-null binding:
+
+```cpp
+shared_nullptr<Config> config; // default-constructed null handle
 
 if (!config) {
-    config = make_shared<Config>(/* ... */);
+    config = shared_nullptr<Config>(make_shared<Config>(/* ... */));
 }
 
 i32 version = config.version; // accepted: non-null on every incoming path
 ```
 
+Only `unique_nullptr<T>` and `shared_nullptr<T>` support contextual boolean
+tests and comparisons or assignment involving `nullptr`. Applying a null check
+to `unique_ptr<T>` or `shared_ptr<T>` is rejected as a type error because those
+types are non-null by construction.
+
 The initial analysis is deliberately conservative:
 
-- `make_shared<T>(...)` establishes non-null and `nullptr` establishes null.
+- Construction from a corresponding non-null owner establishes non-null and
+  `nullptr` establishes null.
 - `if (pointer)`, `!pointer`, and comparisons with `nullptr` refine the
   corresponding control-flow branches.
 - A guard that exits the null branch establishes non-null afterward.
@@ -556,9 +930,15 @@ let __stainless_config_nonnull: &Config = match config.as_deref() {
 let version = __stainless_config_nonnull.version;
 ```
 
+The guarded `auto& value = require(owner) { ... }` form exposes this same
+refinement as a source-level name and performs the failing control flow in one
+declaration. Its operand is still subject to the same null-state analysis and
+borrow rules.
+
 The hidden binding is valid only until assignment, move, or a control-flow
 boundary invalidates the proof. A later non-null generation receives a new
-hidden binding. Handle operations such as implicit copying continue to use the
+hidden binding. Nullable unique-owner state remains in `Option<Box<T>>`;
+nullable shared-handle operations such as implicit copying continue to use the
 original `Option<Arc<T>>`.
 
 The compiler must not create an extra owned `Arc<T>` merely to represent a
@@ -569,8 +949,9 @@ The hidden `&T` changes neither ownership nor lifetime.
 #### Member access and owning-pointer operations
 
 Stainless does not have C++'s `->` member-access operator. The `.` operator
-automatically dereferences references, `unique_ptr<T>`, and `shared_ptr<T>` when
-resolving a field or member function on `T`:
+automatically dereferences references, `unique_ptr<T>`, `shared_ptr<T>`, and a
+proven-non-null `unique_nullptr<T>` or `shared_nullptr<T>` when resolving a
+field or member function on `T`:
 
 ```cpp
 unique_ptr<Config> unique = make_unique<Config>(/* ... */);
@@ -583,24 +964,25 @@ i32 version = shared.version;
 Automatic receiver dereferencing is a member-access rule, not a general
 implicit conversion used during overload selection. A mutable unique owner may
 provide mutable member access when borrowing permits it; a shared owner always
-provides const member access and must first be proven non-null. The same dot
-syntax calls an interface function through a proven-non-null owning interface
-pointer.
+provides const member access. A nullable owner must first be proven non-null.
+The same dot syntax calls an interface function through an owning interface
+pointer, with the same proof required for either nullable form.
 
-`unique_ptr<T>` and `shared_ptr<T>` do not expose their own member functions, so
-their operations cannot collide with members of `T`. Ownership operations use
-free functions:
+`unique_ptr<T>`, `unique_nullptr<T>`, `shared_ptr<T>`, and
+`shared_nullptr<T>` do not expose their own member functions, so their
+operations cannot collide with members of `T`. Ownership operations use free
+functions:
 
 - `move(pointer)` transfers an owning handle.
 - `drop(move(pointer))` consumes and releases a named handle early.
-- `downgrade(pointer)` creates a `weak_ptr<T>` from a proven-non-null
-  `shared_ptr<T>`.
+- `downgrade(pointer)` creates a `weak_ptr<T>` from a `shared_ptr<T>` or a
+  proven-non-null `shared_nullptr<T>`.
 - `lock(pointer)` attempts to promote a weak handle.
 
 No `get`, `release`, `reset`, pointer arithmetic, or raw-pointer escape is
-provided. `atomic_shared_ptr<T>` is a synchronized slot rather than a
-dereferenceable owning pointer, so its own `__load`, `__store`, and `__swap`
-operations continue to use dot syntax.
+provided. `atomic_ptr<T>` and `atomic_nullptr<T>` are synchronized slots rather
+than dereferenceable owning pointers, so their own `__load`, `__store`, and
+`__swap` operations continue to use dot syntax.
 
 #### Thread safety
 
@@ -608,35 +990,64 @@ Atomic reference counting makes the ownership control block thread-safe; it
 does not make concurrent mutation of one pointer binding safe. Stainless
 therefore applies all of the following rules:
 
-- A `shared_ptr<T>` may cross a thread boundary only when `T` satisfies the
-  equivalents of Rust's `Send` and `Sync` traits. `Send` permits ownership and
-  destruction on another thread; `Sync` permits concurrent shared references.
+- A `unique_ptr<T>` or `unique_nullptr<T>` may move to another thread when
+  `T` is `Send`. The source binding is invalidated, and the unique handle is
+  never shared between threads.
+- A `shared_ptr<T>` or `shared_nullptr<T>` may cross a thread boundary only
+  when `T` satisfies the equivalents of Rust's `Send` and `Sync` traits.
+  `Send` permits ownership and destruction on another thread; `Sync` permits
+  concurrent shared references.
 - These properties are structural for generated types: a struct or class is
   sendable and shareable only when all of its fields are. Stainless code cannot
   provide an unchecked manual implementation of either property.
-- A shared interface pointer crossing a thread boundary lowers to
+- A non-null shared interface pointer lowers to
+  `Arc<dyn Interface + Send + Sync>`; its nullable counterpart lowers to
   `Option<Arc<dyn Interface + Send + Sync>>`. Every concrete class stored in a
-  non-null handle must satisfy both bounds.
-- Passing a `shared_ptr<T>` to a thread copies the handle by value unless the
+  handle must satisfy both bounds.
+- Passing either shared-handle type to a thread copies it by value unless the
   caller explicitly uses `move(pointer)`. Atomic reference counts make
   concurrent copying and dropping of separate handles safe.
 - A thread may reassign its own local handle. The same mutable pointer binding
   cannot be concurrently accessed or reassigned by multiple threads.
-- An ordinary global `shared_ptr<T>` binding is immutable after initialization,
-  so threads may only read or copy its handle. An ordinary mutable global shared
-  pointer is rejected.
+- An ordinary global `shared_ptr<T>` or `shared_nullptr<T>` binding is immutable
+  after initialization, so threads may only read or copy its handle. An
+  ordinary mutable global shared pointer is rejected.
 
-Globally replaceable shared state uses `atomic_shared_ptr<T>`, not an ordinary
-`shared_ptr<T>`. It changes which immutable allocation a synchronized slot
-points to; it never mutates a pointee:
+Globally replaceable shared state uses a synchronized pointer slot, not an
+ordinary shared-handle binding. Both slot types change which immutable
+allocation the slot points to; neither mutates a pointee.
 
-- `__load()` returns a copied, potentially null `shared_ptr<T>` snapshot.
-- `__store(new_value)` replaces the slot's handle, including with null.
-- `__swap(new_value)` replaces the handle and returns the previous one.
-- Existing snapshots continue to refer to the old allocation.
+`atomic_ptr<T>` is non-null:
 
-The initial Rust lowering may use `RwLock<Option<Arc<T>>>`; a more specialized
-atomic implementation can replace it later without changing these semantics.
+- It is constructed from `shared_ptr<T>` and initially lowers to
+  `RwLock<Arc<T>>`.
+- `__load()` returns a copied `shared_ptr<T>` snapshot.
+- `__store(new_value)` accepts `shared_ptr<T>` and replaces the slot's handle.
+- `__swap(new_value)` accepts `shared_ptr<T>`, replaces the handle, and returns
+  the previous `shared_ptr<T>`.
+
+`atomic_nullptr<T>` is nullable:
+
+- Default construction creates a null slot. It may also be constructed from
+  `shared_nullptr<T>` and initially lowers to `RwLock<Option<Arc<T>>>`.
+- `__load()` returns a copied `shared_nullptr<T>` snapshot.
+- `__store(new_value)` accepts `shared_nullptr<T>` and replaces the slot's
+  handle, including with null.
+- `__swap(new_value)` accepts `shared_nullptr<T>`, replaces the handle, and
+  returns the previous `shared_nullptr<T>`.
+
+A value for one slot kind must be converted to the corresponding non-atomic
+handle type before being stored in the other kind. Existing snapshots continue
+to refer to the old allocation after either slot changes.
+
+Both slot types are non-copyable because copying a synchronization object would
+create an independent slot rather than another reference to the same binding.
+They may be explicitly moved when no reference to the slot is active.
+References to them follow ordinary lifetime rules even though synchronized
+operations are thread-safe.
+
+A more specialized atomic implementation may replace either initial `RwLock`
+lowering later without changing these source semantics.
 
 #### Namespace-scope variables
 
@@ -650,9 +1061,11 @@ Namespace-scope declarations must use one of the following safe forms:
 - `const T value = ...;` declares an immutable global. It may be accessed from
   multiple threads only when `T` is `Sync`.
 - `const shared_ptr<T> value = ...;` declares an immutable global handle.
-  The handle may be null; threads may inspect it or copy their own handles when
-  `T` is `Send + Sync`.
-- A synchronization-aware type such as `atomic_shared_ptr<T>` may be changed
+  It is always non-null, and threads may access or copy it when `T` is
+  `Send + Sync`.
+- `const shared_nullptr<T> value = ...;` declares an immutable nullable global
+  handle. Threads may inspect or copy it when `T` is `Send + Sync`.
+- A synchronization-aware `atomic_ptr<T>` or `atomic_nullptr<T>` may be changed
   through its `__load`, `__store`, and `__swap` operations.
 - `thread_local T value = ...;` gives each thread an independent instance.
 
@@ -674,12 +1087,14 @@ ban on mutable pointee access, unsafe code, owning raw pointers, and
 interior-mutability escape hatches, this provides the language's data-race
 guarantee.
 
-For classes, a `unique_ptr<Class>` or `shared_ptr<Class>` may coerce to the
+For classes, `unique_ptr<Class>`, `unique_nullptr<Class>`,
+`shared_ptr<Class>`, and `shared_nullptr<Class>` may coerce to the
 corresponding pointer to an implemented interface. These ownership-preserving
-interface coercions lower to `Box<dyn Interface>` or
-`Option<Arc<dyn Interface>>`; a null shared pointer remains null. Like
-data-base reference coercion, they apply only after a target type or function
-has been selected and do not make an overload candidate match.
+interface coercions lower to `Box<dyn Interface>`,
+`Option<Box<dyn Interface>>`, `Arc<dyn Interface>`, or
+`Option<Arc<dyn Interface>>`, respectively; a nullable null owner remains
+null. Like data-base reference coercion, they apply only after a target type or
+function has been selected and do not make an overload candidate match.
 
 For example:
 
@@ -700,7 +1115,8 @@ Standard ownership and container types have canonical declarations in the
 Stainless `std` namespace and are also re-exported by the built-in prelude.
 Both `std::vector<i32>` and unqualified `vector<i32>` name the same type without
 a user-written `using` statement. This initially includes `unique_ptr`,
-`shared_ptr`, `weak_ptr`, `optional`, `vector`, and `string`.
+`unique_nullptr`, `shared_ptr`, `shared_nullptr`, `weak_ptr`, `atomic_ptr`,
+`atomic_nullptr`, `optional`, `vector`, and `string`.
 
 A compact `stainless-runtime` Rust crate supplies the native implementations.
 The bundled Stainless declarations are the source-level API whitelist:
@@ -736,7 +1152,8 @@ by a bundled `native` declaration and has a stable ID, Stainless signature,
 receiver constness/mutability, ownership effects, generic constraints, and
 runtime entry point. Free functions such as `make_unique` are registered the
 same way; only operations that the type or borrow checker must understand,
-such as `move` and ownership/interface coercions, remain compiler intrinsics.
+such as `move`, guarded `require` bindings, nullable-owner representation
+conversion, and ownership/interface coercions, remain compiler intrinsics.
 
 Normal project source cannot declare a `native` binding. This prevents the
 runtime mechanism from becoming an accidental Rust FFI escape hatch. It is a

@@ -20,8 +20,55 @@ interface native sealed optional_api<T> {
     bool has_value() const;
 };
 
+// The compiler rejects pointer and synchronized pointer-slot types as T.
 struct native optional<T> : optional_api<T> {
+    optional();
     bool has_value() const;
+};
+
+interface native sealed string_api {
+    usize size() const;
+    bool empty() const;
+};
+
+struct native string : string_api {
+    string();
+    usize size() const;
+    bool empty() const;
+};
+
+// Storage is native. Cross-type owner construction is a compiler intrinsic
+// because it carries ownership and non-null proof requirements.
+struct native unique_ptr<T> {
+    unique_ptr() = delete;
+};
+
+struct native unique_nullptr<T> {
+    unique_nullptr();
+};
+
+struct native shared_ptr<T> {
+    shared_ptr() = delete;
+};
+
+struct native shared_nullptr<T> {
+    shared_nullptr();
+};
+
+// Atomic slots are compiler-known, non-copyable native types.
+struct native atomic_ptr<T> {
+    atomic_ptr(shared_ptr<T> value);
+    shared_ptr<T> __load() const;
+    void __store(shared_ptr<T> value);
+    shared_ptr<T> __swap(shared_ptr<T> value);
+};
+
+struct native atomic_nullptr<T> {
+    atomic_nullptr();
+    atomic_nullptr(shared_nullptr<T> value);
+    shared_nullptr<T> __load() const;
+    void __store(shared_nullptr<T> value);
+    shared_nullptr<T> __swap(shared_nullptr<T> value);
 };
 
 } // namespace std

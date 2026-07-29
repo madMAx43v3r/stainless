@@ -11,17 +11,26 @@ struct Config {
 const shared_ptr<Config> startup_config =
     make_shared<Config>(Config{1});
 
-atomic_shared_ptr<Config> current_config =
-    atomic_shared_ptr<Config>(startup_config);
+atomic_ptr<Config> required_config =
+    atomic_ptr<Config>(startup_config);
+
+atomic_nullptr<Config> current_config =
+    atomic_nullptr<Config>(
+        shared_nullptr<Config>(startup_config));
 
 thread_local i32 reads_on_this_thread = 0;
 
-i32 read_slot(const atomic_shared_ptr<Config>& slot) {
-    // Synchronized pointer slots are the sole pointer-handle type that may be
-    // passed by reference.
+i32 read_required(const atomic_ptr<Config>& slot) {
+    // Synchronized pointer slots are the sole pointer-handle types that may be
+    // passed by reference. This load is always non-null.
     shared_ptr<Config> snapshot = slot.__load();
+    return snapshot.version;
+}
 
-    if (!snapshot) {
+i32 read_slot(const atomic_nullptr<Config>& slot) {
+    // require evaluates __load once, retains its shared snapshot in a hidden
+    // owner, and binds snapshot as a non-null const Config&.
+    auto& snapshot = require(slot.__load()) {
         return -1;
     }
 
@@ -33,20 +42,24 @@ i32 read_current_version() {
     return read_slot(current_config);
 }
 
-void install(shared_ptr<Config> replacement) {
+void install(shared_nullptr<Config> replacement) {
     current_config.__store(move(replacement));
 }
 
-shared_ptr<Config> exchange(shared_ptr<Config> replacement) {
+shared_nullptr<Config> exchange(shared_nullptr<Config> replacement) {
     return current_config.__swap(move(replacement));
 }
 
-void worker(shared_ptr<Config> local) {
-    // Each thread owns its own handle. The pointee remains immutable.
-    if (!local) {
-        return;
-    }
+void install_required(shared_ptr<Config> replacement) {
+    required_config.__store(move(replacement));
+}
 
+shared_ptr<Config> exchange_required(shared_ptr<Config> replacement) {
+    return required_config.__swap(move(replacement));
+}
+
+void worker(shared_ptr<Config> local) {
+    // shared_ptr is non-null; each thread owns its own immutable shared handle.
     i32 version = local.version;
 }
 

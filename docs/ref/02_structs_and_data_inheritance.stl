@@ -31,18 +31,24 @@ f32 planar_length_squared(const Point2& point) {
     return point.length_squared();
 }
 
+f32 explicit_base_x(const Point3& point) {
+    // C++-style qualification selects a field in the data-base subobject.
+    return point.Point2::x;
+}
+
 f32 example() {
     Point3 point = Point3{Point2{3.0f32, 4.0f32}, 12.0f32};
 
     // Same-named functions are selected from the static receiver type.
     f32 spatial = point.length_squared();
 
-    // Binding the argument projects Point3 to its Point2 data base. References
-    // exist only as parameters, so no local reference declaration is needed.
+    // Binding the argument projects Point3 to its Point2 data base. Ordinary
+    // references exist only as parameters; require(...) is the separate,
+    // guarded local-reference form for nullable pointer pointees.
     f32 projected = planar_length_squared(point);
 
     // No virtual override occurs through the base reference parameter.
-    return spatial + projected;
+    return spatial + projected + explicit_base_x(point);
 }
 
 } // namespace samples

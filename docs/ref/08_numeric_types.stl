@@ -34,6 +34,11 @@ f32 suffixed_floating_literal() {
     return value;
 }
 
+u32 explicit_numeric_cast(i64 value) {
+    // Primitive casts use constructor syntax and Rust conversion semantics.
+    return u32(value);
+}
+
 usize element_count(const vector<i32>& values) {
     return values.size();
 }

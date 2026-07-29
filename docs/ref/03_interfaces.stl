@@ -23,6 +23,17 @@ void Buffer::push(i32 value) {
     values.push_back(value);
 }
 
+usize chained_buffer_example() {
+    Buffer buffer;
+
+    // A void member call supplies a compiler-only chain receiver. It does not
+    // return a reference that can be stored or otherwise escape.
+    buffer.push(10).push(20);
+
+    // auto escaped = buffer.push(30); // Invalid: chain receivers cannot escape.
+    return buffer.size();
+}
+
 interface Answer {
     i32 value() const;
 };
