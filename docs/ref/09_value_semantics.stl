@@ -1,0 +1,53 @@
+// Provisional Stainless syntax example.
+// Declarations never create uninitialized values. Structs copy memberwise,
+// while classes require explicit moves or explicit deep-clone behavior.
+
+namespace samples {
+
+struct Pair {
+    i32 left;
+    i32 right;
+};
+
+i32 struct_copy_example() {
+    Pair original = Pair{10, 20};
+
+    // Struct copy construction leaves original valid.
+    Pair copied = original;
+
+    Pair assigned = Pair{0, 0};
+    assigned = original;
+
+    return copied.left + assigned.right + original.left;
+}
+
+class Token {
+public:
+    unique_ptr<Token> clone() const;
+};
+
+unique_ptr<Token> Token::clone() const {
+    // This constructs a distinct class object.
+    return make_unique<Token>();
+}
+
+i32 class_move_example() {
+    Token original;
+
+    // Class values can move explicitly but can never copy.
+    Token relocated = move(original);
+
+    // Token copied = relocated; // Invalid: class copy.
+    // relocated = Token{};      // Invalid: class assignment.
+    // original.clone();         // Invalid: use after move.
+
+    unique_ptr<Token> owner = make_unique<Token>();
+    unique_ptr<Token> duplicate = owner.clone();
+    unique_ptr<Token> moved_owner = move(owner);
+
+    // Copying shared_ptr would alias the same object; Token::clone constructs
+    // a new object and returns a distinct unique owner.
+    return 0;
+}
+
+} // namespace samples
