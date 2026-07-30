@@ -1,6 +1,7 @@
 // Provisional Stainless syntax example.
 // This file stays within the first compiler-provided Vec and String binding
-// subset. These are the real Rust types, selected through the rust namespace.
+// subset and is compiled from generated Rust in the test suite. These are the
+// real Rust types, selected through the rust namespace.
 
 use rust::{String, Vec};
 

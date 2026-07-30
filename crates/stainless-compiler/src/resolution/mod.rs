@@ -68,6 +68,19 @@ pub struct ExpressionResolution {
     pub call: Option<ResolvedCall>,
 }
 
+/// A resolved local or range-loop binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BindingResolution {
+    /// Binding source range.
+    pub span: Span,
+    /// Source name.
+    pub name: String,
+    /// Resolved type.
+    pub ty: TypeRef,
+    /// Whether the binding permits mutation.
+    pub mutable: bool,
+}
+
 /// A resolved callable invocation, including implicit default construction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedCall {
@@ -141,6 +154,8 @@ pub struct SemanticModel {
     pub functions: Vec<FunctionSymbol>,
     /// Expression facts in traversal order.
     pub expressions: Vec<ExpressionResolution>,
+    /// Local and range-loop bindings in traversal order.
+    pub bindings: Vec<BindingResolution>,
     /// Explicit and implicit calls in traversal order.
     pub calls: Vec<ResolvedCall>,
 }
@@ -152,12 +167,32 @@ impl SemanticModel {
         self.functions.get(id.0)
     }
 
+    /// Finds the function symbol associated with a declaration or definition.
+    #[must_use]
+    pub fn function_at(&self, span: Span) -> Option<&FunctionSymbol> {
+        self.functions
+            .iter()
+            .find(|function| function.declarations.contains(&span))
+    }
+
     /// Finds the resolution for an exact expression span.
     #[must_use]
     pub fn expression(&self, span: Span) -> Option<&ExpressionResolution> {
         self.expressions
             .iter()
             .find(|expression| expression.span == span)
+    }
+
+    /// Finds a local or range-loop binding by its declaration span.
+    #[must_use]
+    pub fn binding(&self, span: Span) -> Option<&BindingResolution> {
+        self.bindings.iter().find(|binding| binding.span == span)
+    }
+
+    /// Finds an explicit or implicit call by its source span.
+    #[must_use]
+    pub fn call(&self, span: Span) -> Option<&ResolvedCall> {
+        self.calls.iter().find(|call| call.span == span)
     }
 }
 

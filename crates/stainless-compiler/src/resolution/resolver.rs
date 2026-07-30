@@ -12,8 +12,8 @@ use crate::interop::{
 use super::imports::ImportTable;
 use super::mangle;
 use super::{
-    CallTarget, ExpressionResolution, FunctionId, FunctionSymbol, Intrinsic, NativeCall,
-    ParameterSymbol, Resolution, ResolvedCall, ResolvedTraitRequirement, SemanticModel,
+    BindingResolution, CallTarget, ExpressionResolution, FunctionId, FunctionSymbol, Intrinsic,
+    NativeCall, ParameterSymbol, Resolution, ResolvedCall, ResolvedTraitRequirement, SemanticModel,
     ValueCategory,
 };
 
@@ -362,6 +362,12 @@ impl Resolver<'_> {
             },
             ty: resolved_type,
         };
+        self.model.bindings.push(BindingResolution {
+            span: local.span,
+            name: local.name.clone(),
+            ty: variable.ty.clone(),
+            mutable: variable.mutable,
+        });
         let scope = context
             .scopes
             .last_mut()
@@ -452,6 +458,12 @@ impl Resolver<'_> {
                 || (!binding_type.is_reference() && !range.ty.is_const),
             ty: binding_type,
         };
+        self.model.bindings.push(BindingResolution {
+            span: range.ty.span,
+            name: range.name.clone(),
+            ty: variable.ty.clone(),
+            mutable: variable.mutable,
+        });
         let scope = context
             .scopes
             .last_mut()

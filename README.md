@@ -5,9 +5,10 @@ Stainless is a new C++-like language that transpiles to Rust.
 > **Status:** early implementation. The language design remains provisional;
 > the Rust workspace now contains validated native bindings, a lossless lexer
 > and Rowan parser, typed CST views, compiler-owned AST lowering, structural
-> diagnostics, and an initial name/type/call resolver connected to the
-> `Vec`/`String` binding registry. Ownership dataflow, HIR, and Rust emission
-> have not started yet.
+> diagnostics, an initial name/type/call resolver, a typed Rust-shaped HIR, and
+> structured Rust emission for the supported function/control-flow and
+> `Vec`/`String` subset. Ownership dataflow and most declaration kinds have not
+> started yet.
 
 ## Project charter
 
@@ -72,10 +73,10 @@ implemented:
   and explicitly consumed C++-style range loops.
 
 `01_basics.stl`, `11_vec_and_string.stl`, and `13_range_for.stl` are currently
-parsed, lowered, and resolved without diagnostics in the test suite. Other
-samples remain forward-looking and must become explicit parser, diagnostic,
-and transpilation fixtures rather than being allowed to drift from the
-implementation.
+parsed, resolved, lowered to HIR, emitted as Rust, and compiled by `rustc` in
+the test suite. Other samples remain forward-looking and must become explicit
+parser, diagnostic, and transpilation fixtures rather than being allowed to
+drift from the implementation.
 
 ## Language boundaries
 
@@ -1939,7 +1940,7 @@ proposal should answer all of the following before implementation:
 source
   -> tokens (including comments and whitespace)
   -> lossless concrete syntax tree (CST)
-  -> compiler-owned AST (not yet name- or type-resolved)
+  -> compiler-owned AST (syntax-normalized but unresolved)
   -> imported Rust API and generated-wrapper metadata
   -> name, type, and ownership analysis
   -> small Rust-shaped high-level IR (HIR)
@@ -1955,7 +1956,7 @@ The later HIR must contain only validated Stainless concepts with defined Rust
 semantics. Transpilation must happen from that validated HIR, not directly from
 parser nodes.
 
-### Implemented front-end slice
+### Implemented compiler slice
 
 The `stainless-syntax` crate now exposes `lex(source)` and `parse(source)`.
 Lexing retains whitespace, line comments, block comments, invalid tokens, and
@@ -2012,12 +2013,29 @@ The initial `stainless_compiler::resolution` pass now provides:
 - `Vec<T>` range-element resolution for shared, mutable, copied, and explicitly
   consumed range loops.
 
+`stainless_compiler::transpile` is the first fail-closed backend API. If the
+front end reports a diagnostic, or HIR lowering encounters a construct without
+defined Rust semantics, it returns no Rust. For the accepted subset it now:
+
+- lowers resolved namespaces and free functions into a public, typed HIR;
+- makes reference borrows/dereferences, exact overload targets, primitive
+  casts, explicit moves, and implicit native default construction explicit;
+- lowers classic loops without breaking C++ `continue`/update ordering and
+  lowers shared, mutable, copied, and consuming `Vec<T>` range loops to the
+  corresponding Rust iterator form;
+- emits deterministic Rust with `proc-macro2` and `quote`, validates the
+  generated token tree by parsing it with `syn`, and formats it with
+  `prettyplease`;
+- compiles all three supported reference files as Rust libraries in integration
+  tests and executes a generated behavior fixture covering functions, borrows,
+  loops, `Vec`, `String`, and moves.
+
 This is still not full semantic validation. Struct/class/interface names,
 fields, member functions, checked exceptions, ownership pointers, cross-file
-modules, move/use-after-move dataflow, borrow lifetimes, returned-reference
-provenance, and native trait satisfaction remain unresolved. No program is yet
-transpiled, so accepting an AST shape does not imply that all ownership or type
-semantics are valid.
+modules, move/use-after-move dataflow, general borrow lifetimes,
+returned-reference provenance, and native trait satisfaction remain unresolved.
+Accepting an AST shape therefore still does not imply that all ownership or
+type semantics are valid.
 
 ## Cargo integration and compiler packaging
 
@@ -2082,8 +2100,9 @@ versions are rejected.
 
 ## Rust library survey
 
-Research snapshot: 2026-07-29. The first parser slice pins Logos 0.16.1 and
-Rowan 0.16.1 through the workspace lockfile; other versions remain undecided.
+Research snapshot: 2026-07-30. The first compiler slice pins Logos 0.16.1,
+Rowan 0.16.1, `proc-macro2` 1.0.107, `quote` 1.0.47, `syn` 2.0.119, and
+`prettyplease` 0.2.37 through the workspace lockfile.
 
 | Area | Candidate | Assessment |
 | --- | --- | --- |
@@ -2093,7 +2112,7 @@ Rowan 0.16.1 through the workspace lockfile; other versions remain undecided.
 | Lossless CST | [`rowan`](https://docs.rs/rowan/latest/rowan/) | **In use.** It provides immutable green trees, syntax nodes/tokens, text ranges, and typed-AST support while leaving the language-specific node model to us. It is a tree library, not a parser. |
 | CST schema/code generation | [`ungrammar`](https://docs.rs/ungrammar/latest/ungrammar/) | **Optional later.** Useful for declaring CST shapes and generating typed wrappers. It explicitly does not generate a parser, so it is not needed for the first slice. |
 | Diagnostics | [`miette`](https://docs.rs/miette/latest/miette/) | **Recommended at the public API/CLI boundary.** It supports structured diagnostics, source spans, labels, error codes, rich terminal output, and a narratable renderer. Internal compiler diagnostics should remain our own data types. |
-| Rust emission | [`proc-macro2`](https://docs.rs/proc-macro2/latest/proc_macro2/), [`quote`](https://docs.rs/quote/latest/quote/), [`syn`](https://docs.rs/syn/latest/syn/), and [`prettyplease`](https://docs.rs/prettyplease/latest/prettyplease/) | **Recommended when code generation starts.** Generate structured Rust tokens/AST, validate them with `syn`, and format with `prettyplease` without requiring an installed `rustfmt`. Avoid using string concatenation as the semantic code generator. |
+| Rust emission | [`proc-macro2`](https://docs.rs/proc-macro2/latest/proc_macro2/), [`quote`](https://docs.rs/quote/latest/quote/), [`syn`](https://docs.rs/syn/latest/syn/), and [`prettyplease`](https://docs.rs/prettyplease/latest/prettyplease/) | **In use.** HIR is emitted as structured tokens, reparsed with `syn` as a validity boundary, and formatted with `prettyplease` without requiring an installed `rustfmt`. String construction is limited to compiler-controlled identifiers and paths rather than semantic source generation. |
 | Incremental compilation | [`salsa`](https://docs.rs/salsa/latest/salsa/) | **Defer.** Potentially useful for an IDE or a mature multi-file compiler, but unnecessary complexity for the first end-to-end transpilation slice. |
 
 ### Alternatives not selected for the core compiler
@@ -2125,15 +2144,17 @@ recorded inline so implemented syntax is not confused with planned work:
    definitions, typed local bindings, blocks, calls, arithmetic, `return`,
    `if`/`else`, and classic/range `for` loops into a Rowan CST with recoverable
    error nodes.
-4. **In progress:** typed CST views, AST lowering, structural validation, and
-   the initial single-file name/type/call resolver are implemented. Ownership
-   analysis, resolved HIR construction, and broader declaration kinds remain.
-5. **In progress:** the initial `Vec` and `String` metadata is connected to
-   resolution but not code generation. Next, generate Rust for these resolved
-   calls, then add one explicit wrapper for a small external Cargo dependency
-   and prove that Cargo rejects a stale or incorrect binding.
-6. Emit and format Rust, compile representative generated files in integration
-   tests, and source-map rustc diagnostics back to Stainless.
+4. **In progress:** typed CST views, AST lowering, structural validation, the
+   initial single-file name/type/call resolver, and resolved HIR construction
+   are implemented for the function/control-flow subset. Ownership analysis
+   and broader declaration kinds remain.
+5. **In progress:** the initial `Vec` and `String` metadata is connected through
+   resolution and code generation. Next, add one explicit wrapper for a small
+   external Cargo dependency and prove that Cargo rejects a stale or incorrect
+   binding.
+6. **In progress:** structured Rust emission, formatting, and representative
+   generated-file compile/behavior tests are implemented. Source-mapping rustc
+   diagnostics back to Stainless remains.
 7. Compile every reference sample as it enters the supported milestone subset,
    and keep unsupported later-stage samples as explicit expected diagnostics
    rather than silently accepting partial semantics.

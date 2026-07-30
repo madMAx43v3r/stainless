@@ -1,7 +1,7 @@
 // Provisional Stainless syntax example.
 // C++-style range loops make borrowing, copying, and consuming explicit.
-// This file is an executable parser, AST-lowering, and name/type-resolution
-// fixture.
+// This file is an executable parser, resolution, HIR, Rust-emission, and
+// generated-code compilation fixture.
 
 use rust::Vec;
 

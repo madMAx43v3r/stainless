@@ -1,20 +1,24 @@
 use crate::ast::Span;
 
-/// The front-end stage that produced a diagnostic.
+/// The compiler stage that produced a diagnostic.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiagnosticPhase {
     /// Lexing or parsing.
     Syntax,
     /// Structural semantic validation of the lowered AST.
     Semantic,
+    /// Lowering from resolved syntax into the compiler's backend IR.
+    Hir,
+    /// Structured Rust generation or validation.
+    Codegen,
 }
 
-/// A source diagnostic produced by the compiler front end.
+/// A source diagnostic produced by the compiler.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Diagnostic {
     /// Stable diagnostic identifier.
     pub code: &'static str,
-    /// Front-end phase.
+    /// Compiler phase.
     pub phase: DiagnosticPhase,
     /// Human-readable explanation.
     pub message: String,
@@ -36,6 +40,24 @@ impl Diagnostic {
         Self {
             code,
             phase: DiagnosticPhase::Semantic,
+            message,
+            span,
+        }
+    }
+
+    pub(crate) fn hir(code: &'static str, message: String, span: Span) -> Self {
+        Self {
+            code,
+            phase: DiagnosticPhase::Hir,
+            message,
+            span,
+        }
+    }
+
+    pub(crate) fn codegen(code: &'static str, message: String, span: Span) -> Self {
+        Self {
+            code,
+            phase: DiagnosticPhase::Codegen,
             message,
             span,
         }

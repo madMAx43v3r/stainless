@@ -9,4 +9,8 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+prettyplease.workspace = true
+proc-macro2.workspace = true
+quote.workspace = true
 stainless-syntax = { path = "../stainless-syntax" }
+syn.workspace = true

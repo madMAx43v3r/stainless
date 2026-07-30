@@ -5,7 +5,10 @@
 //! newtypes.
 
 pub mod ast;
+mod codegen;
 mod diagnostic;
+pub mod hir;
+mod hir_lowering;
 pub mod interop;
 pub mod lowering;
 pub mod resolution;
@@ -67,4 +70,63 @@ pub struct Analysis {
     pub semantics: resolution::SemanticModel,
     /// Syntax, structural, name, and type diagnostics in source order.
     pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Complete result of one attempted Stainless-to-Rust translation.
+#[derive(Clone, Debug)]
+pub struct TranspileResult {
+    /// Analysis products plus any diagnostics added by backend stages.
+    pub analysis: Analysis,
+    /// Typed backend IR, absent when analysis or HIR lowering failed.
+    pub hir: Option<hir::Program>,
+    /// Formatted generated Rust, absent when any required stage failed.
+    pub rust: Option<String>,
+}
+
+/// Parses, resolves, lowers, and emits one Stainless source file.
+///
+/// Generation is fail-closed: a source diagnostic or unsupported backend form
+/// prevents Rust output instead of producing a partially trustworthy file.
+#[must_use]
+pub fn transpile(source: &str) -> TranspileResult {
+    let mut analysis = analyze(source);
+    if !analysis.diagnostics.is_empty() {
+        return TranspileResult {
+            analysis,
+            hir: None,
+            rust: None,
+        };
+    }
+
+    let hir = match hir_lowering::lower(&analysis.ast, &analysis.semantics) {
+        Ok(hir) => hir,
+        Err(mut diagnostics) => {
+            analysis.diagnostics.append(&mut diagnostics);
+            analysis
+                .diagnostics
+                .sort_by_key(|diagnostic| diagnostic.span);
+            return TranspileResult {
+                analysis,
+                hir: None,
+                rust: None,
+            };
+        }
+    };
+    match codegen::emit(&hir) {
+        Ok(rust) => TranspileResult {
+            analysis,
+            hir: Some(hir),
+            rust: Some(rust),
+        },
+        Err(message) => {
+            analysis
+                .diagnostics
+                .push(Diagnostic::codegen("GEN001", message, analysis.ast.span));
+            TranspileResult {
+                analysis,
+                hir: Some(hir),
+                rust: None,
+            }
+        }
+    }
 }

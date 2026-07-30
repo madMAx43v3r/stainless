@@ -9,7 +9,11 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 logos = "0.16.1"
+prettyplease = "0.2.37"
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
 rowan = "0.16.1"
+syn = { version = "2.0.119", features = ["full"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

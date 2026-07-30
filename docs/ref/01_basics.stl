@@ -1,6 +1,6 @@
 // Provisional Stainless syntax example.
-// This file is an executable parser, AST-lowering, and name/type-resolution
-// fixture. HIR lowering and Rust emission are not implemented yet.
+// This file is an executable parser, resolution, HIR, Rust-emission, and
+// generated-code compilation fixture.
 
 namespace samples {
 
