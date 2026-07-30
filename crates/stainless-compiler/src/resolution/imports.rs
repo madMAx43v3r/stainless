@@ -90,7 +90,7 @@ impl ImportTable {
                     self.collect_items(&child.items, namespace, diagnostics);
                     namespace.pop();
                 }
-                Item::Function(_) => {}
+                Item::Struct(_) | Item::Function(_) => {}
             }
         }
     }

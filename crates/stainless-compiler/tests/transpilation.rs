@@ -13,6 +13,77 @@ const BEHAVIOR_SOURCE: &str = r#"use rust::{String, Vec};
 
 namespace samples {
 
+struct Pair {
+    i32 left;
+    i32 right;
+};
+
+struct BaseValue {
+    i32 value;
+    i32 read() const;
+};
+
+i32 BaseValue::read() const {
+    return value;
+}
+
+struct DerivedValue : BaseValue {
+    i32 extra;
+    i32 read() const;
+};
+
+struct ChainValue {
+    i32 value;
+    void add(i32 delta);
+    i32 read() const;
+};
+
+void ChainValue::add(i32 delta) {
+    value += delta;
+}
+
+i32 ChainValue::read() const {
+    return value;
+}
+
+i32 fluent_member_calls() {
+    ChainValue value = ChainValue{1};
+    value.add(2).add(3);
+    return value.read();
+}
+
+i32 DerivedValue::read() const {
+    return value + extra;
+}
+
+i32 read_base(const BaseValue& value) {
+    return value.read();
+}
+
+i32 struct_inheritance() {
+    DerivedValue value = DerivedValue{BaseValue{4}, 5};
+    return value.read() * 10 + read_base(value) + value.BaseValue::value;
+}
+
+i32 struct_copy() {
+    Pair original = Pair{10, 20};
+    Pair copied = original;
+    Pair assigned = Pair{0, 0};
+    assigned = original;
+    return copied.left + assigned.right + original.left;
+}
+
+i32 struct_range_copy() {
+    Vec<Pair> values;
+    values.push(Pair{1, 2});
+    values.push(Pair{3, 4});
+    i32 total = 0;
+    for (auto value : values) {
+        total += value.left + value.right;
+    }
+    return total;
+}
+
 i32 sum_to(i32 limit) {
     i32 total = 0;
     for (i32 current = 0; current < limit; current += 1) {
@@ -117,6 +188,10 @@ fn transpiles_and_compiles_resolved_reference_programs() {
     for (name, source) in [
         ("basics", include_str!("../../../docs/ref/01_basics.stl")),
         (
+            "structs",
+            include_str!("../../../docs/ref/02_structs_and_data_inheritance.stl"),
+        ),
+        (
             "vec_and_string",
             include_str!("../../../docs/ref/11_vec_and_string.stl"),
         ),
@@ -157,6 +232,10 @@ fn generated_program_preserves_current_subset_behavior() {
             .clone()
     };
     let sum_to = find_name("sum_to");
+    let struct_copy = find_name("struct_copy");
+    let struct_inheritance = find_name("struct_inheritance");
+    let struct_range_copy = find_name("struct_range_copy");
+    let fluent_member_calls = find_name("fluent_member_calls");
     let sum_skipping_two = find_name("sum_skipping_two");
     let exact_overload = find_name("exact_overload");
     let suffixed_float = find_name("suffixed_float");
@@ -173,6 +252,10 @@ fn generated_program_preserves_current_subset_behavior() {
         r#"
 fn main() {{
     assert_eq!(__stainless_namespace_samples::{sum_to}(5), 10);
+    assert_eq!(__stainless_namespace_samples::{struct_copy}(), 40);
+    assert_eq!(__stainless_namespace_samples::{struct_inheritance}(), 98);
+    assert_eq!(__stainless_namespace_samples::{struct_range_copy}(), 10);
+    assert_eq!(__stainless_namespace_samples::{fluent_member_calls}(), 6);
     assert_eq!(__stainless_namespace_samples::{sum_skipping_two}(), 8);
     assert_eq!(__stainless_namespace_samples::{exact_overload}(), 31);
     assert_eq!(__stainless_namespace_samples::{suffixed_float}(), 3.0f32);

@@ -38,6 +38,8 @@ pub enum Item {
     Namespace(Namespace),
     /// An import declaration.
     Use(UseDeclaration),
+    /// A data-only struct definition.
+    Struct(Struct),
     /// A free or qualified function.
     Function(Function),
 }
@@ -49,6 +51,7 @@ impl Item {
         match self {
             Self::Namespace(item) => item.span,
             Self::Use(item) => item.span,
+            Self::Struct(item) => item.span,
             Self::Function(item) => item.span,
         }
     }
@@ -73,6 +76,32 @@ pub struct Namespace {
 pub struct UseDeclaration {
     /// Text between `use` and the terminating semicolon.
     pub path: String,
+    /// Complete declaration range.
+    pub span: Span,
+}
+
+/// A data-only struct with optional single data inheritance.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Struct {
+    /// Unqualified source name.
+    pub name: String,
+    /// Optional single data base.
+    pub base: Option<Path>,
+    /// Direct data fields in declaration order.
+    pub fields: Vec<Field>,
+    /// Member function declarations written inside the body.
+    pub functions: Vec<Function>,
+    /// Complete definition range.
+    pub span: Span,
+}
+
+/// One direct struct data field.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Field {
+    /// Declared field type.
+    pub ty: Type,
+    /// Source field name.
+    pub name: String,
     /// Complete declaration range.
     pub span: Span,
 }
@@ -342,12 +371,19 @@ pub enum ExpressionKind {
         /// Arguments in source order.
         arguments: Vec<Expression>,
     },
+    /// C++-style aggregate construction, such as `Point{1, 2}`.
+    Aggregate {
+        /// Constructed type path.
+        ty: Path,
+        /// Initializers in direct layout order.
+        initializers: Vec<Expression>,
+    },
     /// A dot member access.
     Field {
         /// Receiver.
         receiver: Box<Expression>,
-        /// Selected member name.
-        name: String,
+        /// Selected member, optionally qualified by a data base.
+        name: Path,
     },
     /// An indexing operation.
     Index {

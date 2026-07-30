@@ -50,6 +50,11 @@ pub enum TypeRef {
         /// Explicit generic arguments.
         arguments: Vec<TypeRef>,
     },
+    /// A Stainless data-only struct.
+    Struct {
+        /// Fully qualified Stainless path.
+        path: Vec<String>,
+    },
     /// A non-null borrow used as a parameter, local, or direct return.
     Reference {
         /// Whether the borrowed value may be mutated.

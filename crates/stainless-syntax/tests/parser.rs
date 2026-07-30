@@ -23,6 +23,27 @@ fn parses_the_range_for_reference_file_losslessly() {
 }
 
 #[test]
+fn parses_structs_members_inheritance_and_aggregates_losslessly() {
+    let source = include_str!("../../../docs/ref/02_structs_and_data_inheritance.stl");
+    let parsed = parse(source);
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(parsed.syntax().to_string(), source);
+    assert_eq!(
+        count_kind(&parsed.syntax(), SyntaxKind::StructDefinition),
+        2
+    );
+    assert_eq!(
+        count_kind(&parsed.syntax(), SyntaxKind::FieldDeclaration),
+        3
+    );
+    assert_eq!(
+        count_kind(&parsed.syntax(), SyntaxKind::AggregateExpression),
+        2
+    );
+}
+
+#[test]
 fn parses_initial_functions_control_flow_and_both_for_forms_losslessly() {
     let source = r"use rust::Vec;
 

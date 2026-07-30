@@ -14,6 +14,45 @@ pub use resolver::resolve;
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct FunctionId(pub usize);
 
+/// Stable index of a resolved Stainless struct.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct StructId(pub usize);
+
+/// One resolved direct data field.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FieldSymbol {
+    /// Source field name.
+    pub name: String,
+    /// Resolved field type.
+    pub ty: TypeRef,
+    /// Source range.
+    pub span: Span,
+}
+
+/// A resolved data-only struct.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StructSymbol {
+    /// Stable semantic ID.
+    pub id: StructId,
+    /// Fully qualified source path.
+    pub path: Vec<String>,
+    /// Optional single data base.
+    pub base: Option<StructId>,
+    /// Direct fields in aggregate initialization order.
+    pub fields: Vec<FieldSymbol>,
+    /// Definition source range.
+    pub span: Span,
+}
+
+/// The implicit receiver attached to a member function.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StructReceiver {
+    /// Static receiver struct.
+    pub structure: StructId,
+    /// Whether the member function may mutate its receiver.
+    pub mutable: bool,
+}
+
 /// A resolved function parameter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParameterSymbol {
@@ -36,12 +75,16 @@ pub struct FunctionSymbol {
     pub parameters: Vec<ParameterSymbol>,
     /// Resolved return type.
     pub return_type: TypeRef,
+    /// Implicit member receiver, absent for free functions.
+    pub receiver: Option<StructReceiver>,
     /// Deterministic generated Rust name.
     pub mangled_name: String,
     /// All matching declaration/definition ranges.
     pub declarations: Vec<Span>,
     /// Whether one declaration supplies a body.
     pub has_definition: bool,
+    /// Whether the member signature was declared inside its struct body.
+    pub has_member_declaration: bool,
 }
 
 /// Whether an expression denotes storage or a temporary value.
@@ -66,6 +109,16 @@ pub struct ExpressionResolution {
     pub category: ValueCategory,
     /// Call classification when this expression is a call.
     pub call: Option<ResolvedCall>,
+    /// Struct field selected by this expression, including implicit member
+    /// field names.
+    pub field: Option<ResolvedField>,
+}
+
+/// A field access after inherited-field lookup.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedField {
+    /// Rust representation fields traversed from the receiver.
+    pub access_path: Vec<String>,
 }
 
 /// A resolved local or range-loop binding.
@@ -145,11 +198,18 @@ pub enum Intrinsic {
         /// Destination primitive type.
         target: TypeRef,
     },
+    /// Aggregate construction of a user-defined struct.
+    StructAggregate {
+        /// Constructed struct.
+        structure: StructId,
+    },
 }
 
 /// Successfully retained semantic facts for one source file.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SemanticModel {
+    /// Resolved Stainless struct definitions.
+    pub structs: Vec<StructSymbol>,
     /// Resolved Stainless functions.
     pub functions: Vec<FunctionSymbol>,
     /// Expression facts in traversal order.
@@ -161,6 +221,17 @@ pub struct SemanticModel {
 }
 
 impl SemanticModel {
+    /// Finds a struct by its stable semantic ID.
+    #[must_use]
+    pub fn structure(&self, id: StructId) -> Option<&StructSymbol> {
+        self.structs.get(id.0)
+    }
+
+    /// Finds the struct declared at an exact source span.
+    #[must_use]
+    pub fn struct_at(&self, span: Span) -> Option<&StructSymbol> {
+        self.structs.iter().find(|structure| structure.span == span)
+    }
     /// Finds a function by its stable semantic ID.
     #[must_use]
     pub fn function(&self, id: FunctionId) -> Option<&FunctionSymbol> {

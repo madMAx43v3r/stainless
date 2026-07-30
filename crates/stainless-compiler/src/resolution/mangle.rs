@@ -23,6 +23,10 @@ fn encode_type(ty: &TypeRef, output: &mut String) {
         return;
     }
     match ty {
+        TypeRef::Struct { path } => {
+            output.push_str("s_");
+            encode_segments(path, output);
+        }
         TypeRef::Native { path, arguments } if arguments.is_empty() => {
             output.push_str("n_");
             encode_path(path, output);
@@ -51,8 +55,13 @@ fn encode_type(ty: &TypeRef, output: &mut String) {
 
 fn encode_path(path: &str, output: &mut String) {
     let segments = path.split("::").collect::<Vec<_>>();
+    encode_segments(&segments, output);
+}
+
+fn encode_segments<S: AsRef<str>>(segments: &[S], output: &mut String) {
     output.push_str(&segments.len().to_string());
     for segment in segments {
+        let segment = segment.as_ref();
         output.push('_');
         output.push_str(&segment.len().to_string());
         output.push('_');

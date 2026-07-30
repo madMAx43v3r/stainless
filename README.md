@@ -6,9 +6,10 @@ Stainless is a new C++-like language that transpiles to Rust.
 > the Rust workspace now contains validated native bindings, a lossless lexer
 > and Rowan parser, typed CST views, compiler-owned AST lowering, structural
 > diagnostics, an initial name/type/call resolver, a typed Rust-shaped HIR, and
-> structured Rust emission for the supported function/control-flow and
-> `Vec`/`String` subset. An initial move/borrow dataflow pass now validates that
-> subset; most declaration kinds have not started yet.
+> structured Rust emission for the supported function/control-flow,
+> data-only-struct, and `Vec`/`String` subset. An initial move/borrow dataflow
+> pass now validates that subset; classes, interfaces, and constructors have
+> not started yet.
 
 ## Project charter
 
@@ -72,11 +73,12 @@ implemented:
 - [`13_range_for.stl`](docs/ref/13_range_for.stl) — shared, mutable, copied,
   and explicitly consumed C++-style range loops.
 
-`01_basics.stl`, `11_vec_and_string.stl`, and `13_range_for.stl` are currently
-parsed, resolved, lowered to HIR, emitted as Rust, and compiled by `rustc` in
-the test suite. Other samples remain forward-looking and must become explicit
-parser, diagnostic, and transpilation fixtures rather than being allowed to
-drift from the implementation.
+`01_basics.stl`, `02_structs_and_data_inheritance.stl`,
+`11_vec_and_string.stl`, and `13_range_for.stl` are currently parsed, resolved,
+lowered to HIR, emitted as Rust, and compiled by `rustc` in the test suite.
+Other samples remain forward-looking and must become explicit parser,
+diagnostic, and transpilation fixtures rather than being allowed to drift from
+the implementation.
 
 ## Language boundaries
 
@@ -1973,12 +1975,16 @@ The current recursive-descent grammar handles:
 - namespace blocks and losslessly retained `use` declarations;
 - function declarations and definitions, qualified names, parameters,
   reference types, generic type arguments, `const`, and `throws` clauses;
+- data-only struct definitions, direct fields, one optional data base, member
+  declarations, qualified out-of-struct definitions, and aggregate
+  initialization;
 - blocks, initialized or default-constructed local declarations, `return`,
   `if`/`else`, `break`, `continue`, and empty statements;
 - classic `for (init; condition; update)` and range
   `for (binding : expression)` statements;
 - names and paths, literals, parenthesized expressions, calls, member access,
-  indexing, prefix/postfix operators, assignment, and precedence-aware binary
+  indexing, ordinary and explicitly base-qualified struct fields,
+  prefix/postfix operators, assignment, and precedence-aware binary
   expressions.
 
 `stainless_compiler::lowering::lower` converts the typed CST into a
@@ -1994,9 +2000,9 @@ implemented structural checks:
   functions.
 
 These are deliberately pre-resolution checks, not full type checking.
-Struct/class/interface declarations, constructors, exception statements,
-macros, aggregate initialization, and the remaining reference samples still
-need grammar productions.
+Class/interface declarations, constructors, exception statements, macros, and
+the remaining reference samples still need grammar productions. Access labels
+are parsed in structs, but access checking is not implemented yet.
 
 The initial `stainless_compiler::resolution` pass now provides:
 
@@ -2004,8 +2010,13 @@ The initial `stainless_compiler::resolution` pass now provides:
   implemented single-file subset;
 - primitive and native type resolution, local/parameter scopes, contextual
   integer literal types, and expression typing for the current operators;
+- user-defined struct names and layouts, direct and inherited field lookup,
+  static member lookup, exact declaration/definition matching, aggregate
+  construction, fluent `void` member returns, and
+  cycle/duplicate/reference-field diagnostics;
 - exact canonical-type overload selection with value/reference-only conflict
-  diagnostics and deterministic versioned Rust names;
+  diagnostics and deterministic versioned Rust names; the documented
+  derived-struct-to-base-reference projection is the sole struct conversion;
 - classification of Stainless calls, compiler intrinsics such as `move` and
   primitive casts, and registered native Rust calls;
 - concrete `rust::Vec<T>`/`rust::String` constructor, associated-function, and
@@ -2031,30 +2042,42 @@ resolution and before HIR construction. For the implemented subset it:
 - verifies that a direct reference return ultimately originates from the
   function's single reference parameter.
 
+Struct values participate in the implemented copy analysis as implicit
+memberwise copies. The backend realizes each copy with Rust `Clone`, so structs
+containing `String`, `Vec`, or another cloneable struct retain Stainless value
+semantics without pretending to implement Rust `Copy`.
+
 `stainless_compiler::transpile` is the first fail-closed backend API. If the
 front end reports a diagnostic, or HIR lowering encounters a construct without
 defined Rust semantics, it returns no Rust. For the accepted subset it now:
 
-- lowers resolved namespaces and free functions into a public, typed HIR;
+- lowers resolved namespaces, free functions, data-only structs, and statically
+  dispatched member functions into a public, typed HIR;
 - makes reference borrows/dereferences, exact overload targets, primitive
-  casts, explicit moves, and implicit native default construction explicit;
+  casts, explicit moves, struct copies, aggregate construction, inherited-field
+  paths, base-reference projections, fluent member receivers, and implicit
+  native default construction explicit;
 - lowers classic loops without breaking C++ `continue`/update ordering and
   lowers shared, mutable, copied, and consuming `Vec<T>` range loops to the
   corresponding Rust iterator form;
 - emits deterministic Rust with `proc-macro2` and `quote`, validates the
   generated token tree by parsing it with `syn`, and formats it with
   `prettyplease`;
-- compiles all three supported reference files as Rust libraries in integration
+- compiles all four supported reference files as Rust libraries in integration
   tests and executes a generated behavior fixture covering functions, borrows,
-  loops, `Vec`, `String`, and moves.
+  loops, structs, memberwise copying, data inheritance, `Vec`, `String`, and
+  moves.
 
-This is still not full semantic validation. Struct/class/interface names,
-fields, member functions, checked exceptions, ownership pointers, cross-file
-modules, ownership through fields and future pointer types, full path-sensitive
-loop-exit precision, general borrow lifetimes, member/native returned-reference
-provenance, and native trait satisfaction remain unresolved. Accepting an AST
-shape therefore still does not imply that all ownership or type semantics are
-valid.
+This is still not full semantic validation. User constructors and synthesized
+struct default constructors, classes, interfaces, access control, checked
+exceptions, ownership pointers, cross-file modules, ownership through fields
+and future pointer types, full path-sensitive loop-exit precision, general
+borrow lifetimes, member/native returned-reference provenance, and native trait
+satisfaction remain unresolved. Struct member functions currently lower to
+deterministically named Rust free functions with an explicit hidden receiver;
+this preserves static dispatch while overloaded Rust `impl` emission remains
+future work. Accepting an AST shape therefore still does not imply that all
+ownership or type semantics are valid.
 
 ## Cargo integration and compiler packaging
 
@@ -2160,13 +2183,14 @@ recorded inline so implemented syntax is not confused with planned work:
 2. **Implemented:** tokenize identifiers, literals, comments, punctuation, and
    keywords with byte spans and lossless trivia.
 3. **Implemented for the listed subset:** parse namespaces, imports, function
-   definitions, typed local bindings, blocks, calls, arithmetic, `return`,
-   `if`/`else`, and classic/range `for` loops into a Rowan CST with recoverable
-   error nodes.
+   definitions, data-only structs, fields, one data base, aggregates, typed
+   local bindings, blocks, calls, arithmetic, `return`, `if`/`else`, and
+   classic/range `for` loops into a Rowan CST with recoverable error nodes.
 4. **In progress:** typed CST views, AST lowering, structural validation, the
    initial single-file name/type/call resolver, move/borrow analysis, and
-   resolved HIR construction are implemented for the function/control-flow
-   subset. Broader declaration kinds and ownership through fields remain.
+   resolved HIR construction are implemented for the function/control-flow and
+   first struct subsets. Classes, interfaces, constructors, and ownership
+   through fields remain.
 5. **In progress:** the initial `Vec` and `String` metadata is connected through
    resolution and code generation. Next, add one explicit wrapper for a small
    external Cargo dependency and prove that Cargo rejects a stale or incorrect

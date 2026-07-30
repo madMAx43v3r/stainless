@@ -171,6 +171,13 @@ impl Analyzer<'_> {
         for item in items {
             match item {
                 Item::Namespace(namespace) => self.items(&namespace.items),
+                Item::Struct(structure) => {
+                    for function in &structure.functions {
+                        if function.body.is_some() {
+                            self.function(function);
+                        }
+                    }
+                }
                 Item::Function(function) if function.body.is_some() => self.function(function),
                 Item::Function(_) | Item::Use(_) => {}
             }
@@ -578,6 +585,12 @@ impl Analyzer<'_> {
                 None
             }
             ExpressionKind::Call { arguments, .. } => self.call(expression, arguments),
+            ExpressionKind::Aggregate { initializers, .. } => {
+                for initializer in initializers {
+                    self.expression(initializer, Usage::Read);
+                }
+                None
+            }
             ExpressionKind::Field { receiver, .. } => self.expression(receiver, usage),
             ExpressionKind::Index { receiver, index } => {
                 self.expression(receiver, usage);
@@ -661,12 +674,43 @@ impl Analyzer<'_> {
                 }
                 None
             }
+            CallTarget::Intrinsic(Intrinsic::StructAggregate { .. }) => {
+                for argument in arguments {
+                    self.expression(argument, Usage::Read);
+                }
+                None
+            }
             CallTarget::Stainless(id) => {
                 let function = self.semantics.function(*id)?.clone();
+                let mut receiver_loan = None;
+                let mut receiver_origin = None;
+                if let Some(receiver) = &function.receiver
+                    && let ExpressionKind::Call { callee, .. } = &expression.kind
+                    && let ExpressionKind::Field {
+                        receiver: syntax_receiver,
+                        ..
+                    } = &callee.kind
+                {
+                    let usage = if receiver.mutable {
+                        Usage::BorrowMutable
+                    } else {
+                        Usage::BorrowShared
+                    };
+                    let origin = self.expression(syntax_receiver, usage);
+                    receiver_origin = origin;
+                    receiver_loan =
+                        self.acquire_temporary_loan(origin, receiver.mutable, syntax_receiver.span);
+                }
                 let origins = self.call_arguments(
                     arguments,
                     function.parameters.iter().map(|parameter| &parameter.ty),
                 );
+                if let Some(loan) = receiver_loan {
+                    self.state.release(loan);
+                }
+                if function.receiver.is_some() && function.return_type.is_reference() {
+                    return receiver_origin;
+                }
                 return_borrow_parameter(&function)
                     .and_then(|index| origins.get(index).copied().flatten())
             }
@@ -1036,6 +1080,7 @@ fn is_copyable(ty: &TypeRef) -> bool {
             | TypeRef::Usize
             | TypeRef::F32
             | TypeRef::F64
+            | TypeRef::Struct { .. }
     )
 }
 
@@ -1058,6 +1103,13 @@ impl UseCollector {
         for item in items {
             match item {
                 Item::Namespace(namespace) => self.items(&namespace.items),
+                Item::Struct(structure) => {
+                    for function in &structure.functions {
+                        if function.body.is_some() {
+                            self.function(function);
+                        }
+                    }
+                }
                 Item::Function(function) if function.body.is_some() => self.function(function),
                 Item::Function(_) | Item::Use(_) => {}
             }
@@ -1179,6 +1231,11 @@ impl UseCollector {
                 }
                 for argument in arguments {
                     self.expression(argument);
+                }
+            }
+            ExpressionKind::Aggregate { initializers, .. } => {
+                for initializer in initializers {
+                    self.expression(initializer);
                 }
             }
             ExpressionKind::Field { receiver, .. } => self.expression(receiver),

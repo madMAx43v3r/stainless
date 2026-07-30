@@ -6,6 +6,8 @@ use crate::interop::Receiver;
 /// A source file after successful semantic resolution and backend lowering.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Program {
+    /// Data-only structs declared directly at crate scope.
+    pub structs: Vec<Struct>,
     /// Functions declared directly at crate scope.
     pub functions: Vec<Function>,
     /// Nested Stainless namespaces, emitted as Rust modules.
@@ -19,10 +21,32 @@ pub struct Module {
     pub source_name: String,
     /// Collision-resistant Rust identifier.
     pub rust_name: String,
+    /// Data-only structs declared directly in this namespace.
+    pub structs: Vec<Struct>,
     /// Functions declared directly in this namespace.
     pub functions: Vec<Function>,
     /// Nested namespaces.
     pub modules: Vec<Module>,
+}
+
+/// A Rust-representable data-only Stainless struct.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Struct {
+    /// Fully qualified Stainless path.
+    pub source_path: Vec<String>,
+    /// Rust type identifier.
+    pub rust_name: String,
+    /// Direct representation fields, including an optional base subobject.
+    pub fields: Vec<Field>,
+}
+
+/// One generated Rust struct field.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Field {
+    /// Rust field identifier.
+    pub rust_name: String,
+    /// Resolved field type.
+    pub ty: Type,
 }
 
 /// One resolved function definition.
@@ -30,6 +54,8 @@ pub struct Module {
 pub struct Function {
     /// Fully qualified Stainless name.
     pub source_path: Vec<String>,
+    /// Namespace modules containing the emitted free Rust function.
+    pub module_path: Vec<String>,
     /// Deterministically mangled Rust function name.
     pub rust_name: String,
     /// Function parameters.
@@ -68,6 +94,11 @@ pub enum Type {
         rust_path: &'static str,
         /// Concrete type arguments.
         arguments: Vec<Type>,
+    },
+    /// A user-defined Stainless struct.
+    User {
+        /// Fully qualified generated Rust path.
+        rust_path: String,
     },
     /// A borrowed value.
     Reference {
@@ -171,6 +202,8 @@ pub enum RangeMode {
     Mutable,
     /// `auto`, lowered through `iter().copied()`.
     Copy,
+    /// `auto` for a user struct, lowered through `iter().cloned()`.
+    Clone,
     /// `auto` over `move(range)`, lowered through `into_iter`.
     Move,
 }
@@ -225,6 +258,20 @@ pub enum Expression {
         operator: BinaryOperator,
         /// Right operand.
         right: Box<Expression>,
+    },
+    /// Access one direct or inherited representation field.
+    Field {
+        /// Base expression.
+        receiver: Box<Expression>,
+        /// Rust fields traversed in order.
+        access_path: Vec<String>,
+    },
+    /// Construct a user-defined aggregate.
+    Aggregate {
+        /// Constructed type.
+        ty: Type,
+        /// Rust field names paired with their values.
+        fields: Vec<(String, Expression)>,
     },
     /// A resolved Stainless free-function call.
     FunctionCall {

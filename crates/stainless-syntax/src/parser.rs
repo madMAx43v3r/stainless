@@ -95,8 +95,11 @@ impl Parser<'_> {
             match self.current() {
                 Some(SyntaxKind::NamespaceKw) => self.parse_namespace(),
                 Some(SyntaxKind::UseKw) => self.parse_use_declaration(),
+                Some(SyntaxKind::StructKw) => self.parse_struct_definition(),
                 Some(SyntaxKind::Identifier | SyntaxKind::ConstKw) => self.parse_function(),
-                Some(_) => self.recover_item("expected a namespace, use declaration, or function"),
+                Some(_) => {
+                    self.recover_item("expected a namespace, use declaration, struct, or function");
+                }
                 None => break,
             }
             if self.position == previous {
@@ -138,6 +141,67 @@ impl Parser<'_> {
             }
         }
         self.error("expected `;` after use declaration");
+        self.finish();
+    }
+
+    fn parse_struct_definition(&mut self) {
+        self.start(SyntaxKind::StructDefinition);
+        self.bump();
+        self.expect(SyntaxKind::Identifier, "expected a struct name");
+        if self.eat(SyntaxKind::Colon) {
+            self.parse_qualified_name("expected a data base struct");
+        }
+        self.expect(SyntaxKind::LBrace, "expected `{` after struct name");
+        while !self.at_end() && !self.at(SyntaxKind::RBrace) {
+            let previous = self.position;
+            if self.at_any(&[SyntaxKind::PublicKw, SyntaxKind::PrivateKw]) {
+                self.bump();
+                self.expect(SyntaxKind::Colon, "expected `:` after access specifier");
+            } else if self.at_any(&[SyntaxKind::Identifier, SyntaxKind::ConstKw]) {
+                if self.struct_member_is_function() {
+                    self.parse_function();
+                } else {
+                    self.parse_field_declaration();
+                }
+            } else {
+                self.recover_statement("expected a data field or member function declaration");
+            }
+            if self.position == previous {
+                self.recover_statement("parser could not make progress in struct");
+            }
+        }
+        self.expect(SyntaxKind::RBrace, "expected `}` to close struct");
+        self.expect(
+            SyntaxKind::Semicolon,
+            "expected `;` after struct definition",
+        );
+        self.finish();
+    }
+
+    fn struct_member_is_function(&self) -> bool {
+        let mut angle_depth = 0_u32;
+        let mut offset = 0;
+        while let Some(kind) = self.nth(offset) {
+            match kind {
+                SyntaxKind::Less => angle_depth += 1,
+                SyntaxKind::Greater => angle_depth = angle_depth.saturating_sub(1),
+                SyntaxKind::LParen if angle_depth == 0 => return true,
+                SyntaxKind::Semicolon | SyntaxKind::RBrace if angle_depth == 0 => return false,
+                _ => {}
+            }
+            offset += 1;
+        }
+        false
+    }
+
+    fn parse_field_declaration(&mut self) {
+        self.start(SyntaxKind::FieldDeclaration);
+        self.parse_type(false);
+        self.expect(SyntaxKind::Identifier, "expected a field name");
+        self.expect(
+            SyntaxKind::Semicolon,
+            "expected `;` after field declaration",
+        );
         self.finish();
     }
 
@@ -492,11 +556,20 @@ impl Parser<'_> {
                     self.parse_argument_list();
                     self.finish();
                 }
+                Some(SyntaxKind::LBrace) => {
+                    self.builder
+                        .start_node_at(checkpoint, SyntaxKind::AggregateExpression.into());
+                    self.parse_initializer_list();
+                    self.finish();
+                }
                 Some(SyntaxKind::Dot) => {
                     self.builder
                         .start_node_at(checkpoint, SyntaxKind::FieldExpression.into());
                     self.bump();
                     self.expect(SyntaxKind::Identifier, "expected a member name after `.`");
+                    while self.eat(SyntaxKind::ColonColon) {
+                        self.expect(SyntaxKind::Identifier, "expected a member name after `::`");
+                    }
                     self.finish();
                 }
                 Some(SyntaxKind::LBracket) => {
@@ -528,6 +601,22 @@ impl Parser<'_> {
             }
         }
         self.expect(SyntaxKind::RParen, "expected `)` after arguments");
+        self.finish();
+    }
+
+    fn parse_initializer_list(&mut self) {
+        self.start(SyntaxKind::InitializerList);
+        self.bump();
+        while !self.at_end() && !self.at(SyntaxKind::RBrace) {
+            self.parse_expression();
+            if !self.eat(SyntaxKind::Comma) {
+                break;
+            }
+        }
+        self.expect(
+            SyntaxKind::RBrace,
+            "expected `}` after aggregate initializer",
+        );
         self.finish();
     }
 

@@ -34,6 +34,19 @@ impl Validator {
         for item in items {
             match item {
                 Item::Namespace(namespace) => self.items(&namespace.items),
+                Item::Struct(structure) => {
+                    for function in &structure.functions {
+                        if function.body.is_some() {
+                            self.push(
+                                "SEM009",
+                                "member functions must be defined outside the struct body"
+                                    .to_owned(),
+                                function.span,
+                            );
+                        }
+                        self.function(function);
+                    }
+                }
                 Item::Function(function) => self.function(function),
                 Item::Use(_) => {}
             }

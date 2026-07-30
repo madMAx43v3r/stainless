@@ -59,6 +59,8 @@ macro_rules! ast_node {
 ast_node!(SourceFile, SourceFile);
 ast_node!(NamespaceDefinition, NamespaceDefinition);
 ast_node!(UseDeclaration, UseDeclaration);
+ast_node!(StructDefinition, StructDefinition);
+ast_node!(FieldDeclaration, FieldDeclaration);
 ast_node!(FunctionDefinition, FunctionDefinition);
 ast_node!(FunctionDeclaration, FunctionDeclaration);
 ast_node!(ParameterList, ParameterList);
@@ -86,6 +88,8 @@ ast_node!(PostfixExpression, PostfixExpression);
 ast_node!(BinaryExpression, BinaryExpression);
 ast_node!(CallExpression, CallExpression);
 ast_node!(ArgumentList, ArgumentList);
+ast_node!(AggregateExpression, AggregateExpression);
+ast_node!(InitializerList, InitializerList);
 ast_node!(FieldExpression, FieldExpression);
 ast_node!(IndexExpression, IndexExpression);
 ast_node!(ErrorNode, Error);
@@ -97,6 +101,8 @@ pub enum Item {
     Namespace(NamespaceDefinition),
     /// `use path;`.
     Use(UseDeclaration),
+    /// A data-only `struct`.
+    Struct(StructDefinition),
     /// A function with a body.
     FunctionDefinition(FunctionDefinition),
     /// A function declaration ending in `;`.
@@ -109,6 +115,7 @@ impl AstNode for Item {
             kind,
             SyntaxKind::NamespaceDefinition
                 | SyntaxKind::UseDeclaration
+                | SyntaxKind::StructDefinition
                 | SyntaxKind::FunctionDefinition
                 | SyntaxKind::FunctionDeclaration
         )
@@ -120,6 +127,7 @@ impl AstNode for Item {
                 NamespaceDefinition::cast(syntax).map(Self::Namespace)
             }
             SyntaxKind::UseDeclaration => UseDeclaration::cast(syntax).map(Self::Use),
+            SyntaxKind::StructDefinition => StructDefinition::cast(syntax).map(Self::Struct),
             SyntaxKind::FunctionDefinition => {
                 FunctionDefinition::cast(syntax).map(Self::FunctionDefinition)
             }
@@ -134,6 +142,7 @@ impl AstNode for Item {
         match self {
             Self::Namespace(node) => node.syntax(),
             Self::Use(node) => node.syntax(),
+            Self::Struct(node) => node.syntax(),
             Self::FunctionDefinition(node) => node.syntax(),
             Self::FunctionDeclaration(node) => node.syntax(),
         }
@@ -293,6 +302,7 @@ pub enum Expression {
     Postfix(PostfixExpression),
     Binary(BinaryExpression),
     Call(CallExpression),
+    Aggregate(AggregateExpression),
     Field(FieldExpression),
     Index(IndexExpression),
     Error(ErrorNode),
@@ -309,6 +319,7 @@ impl AstNode for Expression {
                 | SyntaxKind::PostfixExpression
                 | SyntaxKind::BinaryExpression
                 | SyntaxKind::CallExpression
+                | SyntaxKind::AggregateExpression
                 | SyntaxKind::FieldExpression
                 | SyntaxKind::IndexExpression
                 | SyntaxKind::Error
@@ -326,6 +337,9 @@ impl AstNode for Expression {
             SyntaxKind::PostfixExpression => PostfixExpression::cast(syntax).map(Self::Postfix),
             SyntaxKind::BinaryExpression => BinaryExpression::cast(syntax).map(Self::Binary),
             SyntaxKind::CallExpression => CallExpression::cast(syntax).map(Self::Call),
+            SyntaxKind::AggregateExpression => {
+                AggregateExpression::cast(syntax).map(Self::Aggregate)
+            }
             SyntaxKind::FieldExpression => FieldExpression::cast(syntax).map(Self::Field),
             SyntaxKind::IndexExpression => IndexExpression::cast(syntax).map(Self::Index),
             SyntaxKind::Error => ErrorNode::cast(syntax).map(Self::Error),
@@ -342,6 +356,7 @@ impl AstNode for Expression {
             Self::Postfix(node) => node.syntax(),
             Self::Binary(node) => node.syntax(),
             Self::Call(node) => node.syntax(),
+            Self::Aggregate(node) => node.syntax(),
             Self::Field(node) => node.syntax(),
             Self::Index(node) => node.syntax(),
             Self::Error(node) => node.syntax(),
@@ -365,6 +380,49 @@ impl NamespaceDefinition {
     #[must_use]
     pub fn items(&self) -> AstChildren<Item> {
         children(self.syntax())
+    }
+}
+
+impl StructDefinition {
+    #[must_use]
+    pub fn name_token(&self) -> Option<SyntaxToken> {
+        direct_tokens(self.syntax()).find(|token| token.kind() == SyntaxKind::Identifier)
+    }
+
+    pub fn base_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        let mut after_colon = false;
+        direct_tokens(self.syntax()).filter(move |token| {
+            if token.kind() == SyntaxKind::Colon {
+                after_colon = true;
+                return false;
+            }
+            after_colon
+                && matches!(
+                    token.kind(),
+                    SyntaxKind::Identifier | SyntaxKind::ColonColon
+                )
+        })
+    }
+
+    #[must_use]
+    pub fn fields(&self) -> AstChildren<FieldDeclaration> {
+        children(self.syntax())
+    }
+
+    pub fn functions(&self) -> impl Iterator<Item = Function> + '_ {
+        self.syntax().children().filter_map(Function::cast)
+    }
+}
+
+impl FieldDeclaration {
+    #[must_use]
+    pub fn ty(&self) -> Option<TypeReference> {
+        child(self.syntax())
+    }
+
+    #[must_use]
+    pub fn name_token(&self) -> Option<SyntaxToken> {
+        token(self.syntax(), SyntaxKind::Identifier)
     }
 }
 
@@ -746,15 +804,37 @@ impl ArgumentList {
     }
 }
 
+impl AggregateExpression {
+    #[must_use]
+    pub fn ty(&self) -> Option<Expression> {
+        expression_children(self.syntax()).next()
+    }
+
+    #[must_use]
+    pub fn initializer_list(&self) -> Option<InitializerList> {
+        child(self.syntax())
+    }
+}
+
+impl InitializerList {
+    pub fn initializers(&self) -> impl Iterator<Item = Expression> + '_ {
+        expression_children(self.syntax())
+    }
+}
+
 impl FieldExpression {
     #[must_use]
     pub fn receiver(&self) -> Option<Expression> {
         expression_children(self.syntax()).next()
     }
 
-    #[must_use]
-    pub fn name_token(&self) -> Option<SyntaxToken> {
-        token(self.syntax(), SyntaxKind::Identifier)
+    pub fn name_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        direct_tokens(self.syntax()).filter(|token| {
+            matches!(
+                token.kind(),
+                SyntaxKind::Identifier | SyntaxKind::ColonColon
+            )
+        })
     }
 }
 

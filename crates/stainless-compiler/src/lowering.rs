@@ -33,6 +33,38 @@ fn lower_item(item: cst::Item) -> Item {
             path: lower_use_path(&declaration),
             span: span(&declaration),
         }),
+        cst::Item::Struct(definition) => {
+            let definition_span = span(&definition);
+            Item::Struct(ast::Struct {
+                name: definition
+                    .name_token()
+                    .map_or_else(missing_name, |token| token.text().to_owned()),
+                base: {
+                    let path = path_from_tokens(definition.base_tokens());
+                    (!path.segments.is_empty()).then_some(path)
+                },
+                fields: definition
+                    .fields()
+                    .map(|field| {
+                        let field_span = span(&field);
+                        ast::Field {
+                            ty: field
+                                .ty()
+                                .map_or_else(|| error_type(field_span), |ty| lower_type(&ty)),
+                            name: field
+                                .name_token()
+                                .map_or_else(missing_name, |token| token.text().to_owned()),
+                            span: field_span,
+                        }
+                    })
+                    .collect(),
+                functions: definition
+                    .functions()
+                    .map(|function| lower_function(&function))
+                    .collect(),
+                span: definition_span,
+            })
+        }
         cst::Item::FunctionDefinition(function) => {
             Item::Function(lower_function(&cst::Function::Definition(function)))
         }
@@ -243,15 +275,27 @@ fn lower_expression(expression: cst::Expression) -> Expression {
                     .collect(),
             }
         }
+        cst::Expression::Aggregate(aggregate) => {
+            let Some(cst::Expression::Name(name)) = aggregate.ty() else {
+                return error_expression(expression_span);
+            };
+            ExpressionKind::Aggregate {
+                ty: path_from_tokens(name.path_tokens()),
+                initializers: aggregate
+                    .initializer_list()
+                    .into_iter()
+                    .flat_map(|list| list.initializers().collect::<Vec<_>>())
+                    .map(lower_expression)
+                    .collect(),
+            }
+        }
         cst::Expression::Field(field) => {
             let Some(receiver) = field.receiver() else {
                 return error_expression(expression_span);
             };
             ExpressionKind::Field {
                 receiver: Box::new(lower_expression(receiver)),
-                name: field
-                    .name_token()
-                    .map_or_else(missing_name, |token| token.text().to_owned()),
+                name: path_from_tokens(field.name_tokens()),
             }
         }
         cst::Expression::Index(index) => {

@@ -12,9 +12,9 @@ use crate::interop::{
 use super::imports::ImportTable;
 use super::mangle;
 use super::{
-    BindingResolution, CallTarget, ExpressionResolution, FunctionId, FunctionSymbol, Intrinsic,
-    NativeCall, ParameterSymbol, Resolution, ResolvedCall, ResolvedTraitRequirement, SemanticModel,
-    ValueCategory,
+    BindingResolution, CallTarget, ExpressionResolution, FieldSymbol, FunctionId, FunctionSymbol,
+    Intrinsic, NativeCall, ParameterSymbol, Resolution, ResolvedCall, ResolvedField,
+    ResolvedTraitRequirement, SemanticModel, StructId, StructReceiver, StructSymbol, ValueCategory,
 };
 
 /// Resolves names and types using an explicit native binding registry.
@@ -29,8 +29,14 @@ pub fn resolve(source: &SourceFile, bindings: &NativeBindings) -> Resolution {
         model: SemanticModel::default(),
         function_sets: BTreeMap::new(),
         function_by_span: BTreeMap::new(),
+        struct_by_path: BTreeMap::new(),
+        struct_by_span: BTreeMap::new(),
     };
+    resolver.collect_struct_names(&source.items, &mut Vec::new());
+    resolver.resolve_struct_definitions(&source.items, &mut Vec::new());
+    resolver.validate_struct_cycles();
     resolver.collect_signatures(&source.items, &mut Vec::new());
+    resolver.validate_member_declarations();
     resolver.resolve_bodies(&source.items, &mut Vec::new());
     resolver
         .diagnostics
@@ -48,6 +54,8 @@ struct Resolver<'bindings> {
     model: SemanticModel,
     function_sets: BTreeMap<Vec<String>, Vec<FunctionId>>,
     function_by_span: BTreeMap<Span, FunctionId>,
+    struct_by_path: BTreeMap<Vec<String>, StructId>,
+    struct_by_span: BTreeMap<Span, StructId>,
 }
 
 #[derive(Clone, Debug)]
@@ -60,6 +68,7 @@ struct FunctionContext {
     namespace: Vec<String>,
     return_type: TypeRef,
     scopes: Vec<BTreeMap<String, Variable>>,
+    receiver: Option<StructReceiver>,
 }
 
 #[derive(Clone, Debug)]
@@ -89,6 +98,128 @@ struct ConcreteNativeCandidate {
 }
 
 impl Resolver<'_> {
+    fn collect_struct_names(&mut self, items: &[Item], namespace: &mut Vec<String>) {
+        for item in items {
+            match item {
+                Item::Namespace(child) => {
+                    namespace.push(child.name.clone());
+                    self.collect_struct_names(&child.items, namespace);
+                    namespace.pop();
+                }
+                Item::Struct(structure) => {
+                    let mut path = namespace.clone();
+                    path.push(structure.name.clone());
+                    if self.struct_by_path.contains_key(&path) {
+                        self.push(
+                            "RES039",
+                            format!("duplicate struct definition `{}`", display_path(&path)),
+                            structure.span,
+                        );
+                        continue;
+                    }
+                    let id = StructId(self.model.structs.len());
+                    self.model.structs.push(StructSymbol {
+                        id,
+                        path: path.clone(),
+                        base: None,
+                        fields: Vec::new(),
+                        span: structure.span,
+                    });
+                    self.struct_by_path.insert(path, id);
+                    self.struct_by_span.insert(structure.span, id);
+                }
+                Item::Use(_) | Item::Function(_) => {}
+            }
+        }
+    }
+
+    fn resolve_struct_definitions(&mut self, items: &[Item], namespace: &mut Vec<String>) {
+        for item in items {
+            match item {
+                Item::Namespace(child) => {
+                    namespace.push(child.name.clone());
+                    self.resolve_struct_definitions(&child.items, namespace);
+                    namespace.pop();
+                }
+                Item::Struct(structure) => {
+                    let Some(id) = self.struct_by_span.get(&structure.span).copied() else {
+                        continue;
+                    };
+                    let base = structure.base.as_ref().and_then(|base| {
+                        let found = self.lookup_struct_path(&base.segments, namespace);
+                        if found.is_none() {
+                            self.push(
+                                "RES040",
+                                format!("unresolved data base struct `{}`", base.display()),
+                                structure.span,
+                            );
+                        }
+                        found
+                    });
+                    if base == Some(id) {
+                        self.push(
+                            "RES041",
+                            "a struct cannot inherit from itself".to_owned(),
+                            structure.span,
+                        );
+                    }
+                    let mut names = BTreeSet::new();
+                    let fields = structure
+                        .fields
+                        .iter()
+                        .map(|field| {
+                            if !names.insert(field.name.clone()) {
+                                self.push(
+                                    "RES042",
+                                    format!("duplicate field `{}`", field.name),
+                                    field.span,
+                                );
+                            }
+                            let ty = self.resolve_type(&field.ty, namespace, false);
+                            if ty.contains_reference() {
+                                self.push(
+                                    "RES043",
+                                    "references are not allowed as data fields".to_owned(),
+                                    field.ty.span,
+                                );
+                            }
+                            FieldSymbol {
+                                name: field.name.clone(),
+                                ty,
+                                span: field.span,
+                            }
+                        })
+                        .collect();
+                    let symbol = &mut self.model.structs[id.0];
+                    symbol.base = base.filter(|base| *base != id);
+                    symbol.fields = fields;
+                }
+                Item::Use(_) | Item::Function(_) => {}
+            }
+        }
+    }
+
+    fn validate_struct_cycles(&mut self) {
+        for structure in &self.model.structs.clone() {
+            let mut seen = BTreeSet::new();
+            let mut current = Some(structure.id);
+            while let Some(id) = current {
+                if !seen.insert(id) {
+                    self.push(
+                        "RES044",
+                        format!(
+                            "data inheritance cycle involving `{}`",
+                            display_path(&structure.path)
+                        ),
+                        structure.span,
+                    );
+                    break;
+                }
+                current = self.model.structs[id.0].base;
+            }
+        }
+    }
+
     fn collect_signatures(&mut self, items: &[Item], namespace: &mut Vec<String>) {
         for item in items {
             match item {
@@ -97,14 +228,41 @@ impl Resolver<'_> {
                     self.collect_signatures(&child.items, namespace);
                     namespace.pop();
                 }
-                Item::Function(function) => self.collect_function(function, namespace),
+                Item::Struct(structure) => {
+                    let owner = self.struct_by_span.get(&structure.span).copied();
+                    for function in &structure.functions {
+                        self.collect_function(function, namespace, owner);
+                    }
+                }
+                Item::Function(function) => self.collect_function(function, namespace, None),
                 Item::Use(_) => {}
             }
         }
     }
 
-    fn collect_function(&mut self, function: &ast::Function, namespace: &[String]) {
-        let path = qualify_declaration_path(namespace, &function.name.segments);
+    #[allow(clippy::too_many_lines)]
+    fn collect_function(
+        &mut self,
+        function: &ast::Function,
+        namespace: &[String],
+        declared_owner: Option<StructId>,
+    ) {
+        let path = if let Some(owner) = declared_owner {
+            let mut path = self.model.structs[owner.0].path.clone();
+            path.extend(function.name.segments.iter().cloned());
+            path
+        } else {
+            qualify_declaration_path(namespace, &function.name.segments)
+        };
+        let owner = declared_owner.or_else(|| {
+            (path.len() >= 2)
+                .then(|| self.struct_by_path.get(&path[..path.len() - 1]).copied())
+                .flatten()
+        });
+        let receiver = owner.map(|structure| StructReceiver {
+            structure,
+            mutable: !function.is_const,
+        });
         let parameters = function
             .parameters
             .iter()
@@ -114,7 +272,17 @@ impl Resolver<'_> {
                 span: parameter.span,
             })
             .collect::<Vec<_>>();
-        let return_type = self.resolve_type(&function.return_type, namespace, false);
+        let mut return_type = self.resolve_type(&function.return_type, namespace, false);
+        if return_type == TypeRef::Void
+            && let Some(receiver) = &receiver
+        {
+            return_type = TypeRef::Reference {
+                mutable: receiver.mutable,
+                target: Box::new(TypeRef::Struct {
+                    path: self.model.structs[receiver.structure.0].path.clone(),
+                }),
+            };
+        }
         let signature = parameters
             .iter()
             .map(|parameter| canonical(&parameter.ty))
@@ -139,6 +307,7 @@ impl Resolver<'_> {
                 .eq(parameters.iter().map(|parameter| &parameter.ty));
             let different_return_type = existing.return_type != return_type;
             let duplicate_definition = existing.has_definition && function.body.is_some();
+            let different_receiver = existing.receiver != receiver;
             if same_passing_modes {
                 if different_return_type {
                     self.push(
@@ -157,6 +326,16 @@ impl Resolver<'_> {
                         function.span,
                     );
                 }
+                if different_receiver {
+                    self.push(
+                        "RES045",
+                        format!(
+                            "declarations of `{}` disagree on member `const` qualification",
+                            display_path(&path)
+                        ),
+                        function.span,
+                    );
+                }
             } else {
                 self.push(
                     "RES003",
@@ -171,6 +350,7 @@ impl Resolver<'_> {
             let symbol = &mut self.model.functions[id.0];
             symbol.declarations.push(function.span);
             symbol.has_definition |= function.body.is_some();
+            symbol.has_member_declaration |= declared_owner.is_some();
             self.function_by_span.insert(function.span, id);
             return;
         }
@@ -188,9 +368,11 @@ impl Resolver<'_> {
             path: path.clone(),
             parameters,
             return_type,
+            receiver,
             mangled_name,
             declarations: vec![function.span],
             has_definition: function.body.is_some(),
+            has_member_declaration: declared_owner.is_some(),
         });
         self.function_sets.entry(path).or_default().push(id);
         self.function_by_span.insert(function.span, id);
@@ -204,12 +386,34 @@ impl Resolver<'_> {
                     self.resolve_bodies(&child.items, namespace);
                     namespace.pop();
                 }
+                Item::Struct(structure) => {
+                    for function in &structure.functions {
+                        if function.body.is_some() {
+                            self.resolve_function_body(function, namespace);
+                        }
+                    }
+                }
                 Item::Function(function) => {
                     if function.body.is_some() {
                         self.resolve_function_body(function, namespace);
                     }
                 }
                 Item::Use(_) => {}
+            }
+        }
+    }
+
+    fn validate_member_declarations(&mut self) {
+        for function in self.model.functions.clone() {
+            if function.receiver.is_some() && !function.has_member_declaration {
+                self.push(
+                    "RES051",
+                    format!(
+                        "member `{}` must be declared inside its struct body",
+                        display_path(&function.path)
+                    ),
+                    function.declarations[0],
+                );
             }
         }
     }
@@ -236,6 +440,7 @@ impl Resolver<'_> {
             namespace: namespace.to_vec(),
             return_type: symbol.return_type,
             scopes: vec![initial_scope],
+            receiver: symbol.receiver,
         };
         if let Some(body) = &function.body {
             self.resolve_block(body, &mut context, false);
@@ -477,23 +682,27 @@ impl Resolver<'_> {
         expected: Option<&TypeRef>,
         context: &mut FunctionContext,
     ) -> ExpressionInfo {
-        let (info, call) = match &expression.kind {
-            ExpressionKind::Name(path) => (
-                self.resolve_value_name(path, expression.span, context),
-                None,
-            ),
+        let (info, call, field) = match &expression.kind {
+            ExpressionKind::Name(path) => {
+                let (info, field) = self.resolve_value_name(path, expression.span, context);
+                (info, None, field)
+            }
             ExpressionKind::Literal(literal) => (
                 ExpressionInfo {
                     ty: literal_type(literal.kind, &literal.text, expected),
                     category: ValueCategory::Temporary,
                 },
                 None,
+                None,
             ),
-            ExpressionKind::Parenthesized(inner) => {
-                (self.resolve_expression(inner, expected, context), None)
-            }
+            ExpressionKind::Parenthesized(inner) => (
+                self.resolve_expression(inner, expected, context),
+                None,
+                None,
+            ),
             ExpressionKind::Prefix { operator, operand } => (
                 self.resolve_prefix(*operator, operand, expected, context),
+                None,
                 None,
             ),
             ExpressionKind::Postfix { operand, .. } => {
@@ -505,6 +714,7 @@ impl Resolver<'_> {
                         category: ValueCategory::Temporary,
                     },
                     None,
+                    None,
                 )
             }
             ExpressionKind::Binary {
@@ -514,18 +724,22 @@ impl Resolver<'_> {
             } => (
                 self.resolve_binary(left, *operator, right, expected, context),
                 None,
+                None,
             ),
             ExpressionKind::Call { callee, arguments } => {
-                self.resolve_call(callee, arguments, expected, expression.span, context)
+                let (info, call) =
+                    self.resolve_call(callee, arguments, expected, expression.span, context);
+                (info, call, None)
+            }
+            ExpressionKind::Aggregate { ty, initializers } => {
+                let (info, call) =
+                    self.resolve_struct_aggregate(ty, initializers, expression.span, context);
+                (info, call, None)
             }
             ExpressionKind::Field { receiver, name } => {
-                self.resolve_expression(receiver, None, context);
-                self.push(
-                    "RES010",
-                    format!("field access `{name}` is not implemented in the current type subset"),
-                    expression.span,
-                );
-                (error_info(), None)
+                let (info, field) =
+                    self.resolve_struct_field(receiver, name, expression.span, context);
+                (info, None, field)
             }
             ExpressionKind::Index { receiver, index } => {
                 self.resolve_expression(receiver, None, context);
@@ -535,11 +749,11 @@ impl Resolver<'_> {
                     "indexing is not exposed by the initial Vec/String bindings".to_owned(),
                     expression.span,
                 );
-                (error_info(), None)
+                (error_info(), None, None)
             }
-            ExpressionKind::Error => (error_info(), None),
+            ExpressionKind::Error => (error_info(), None, None),
         };
-        self.record_expression(expression.span, info.clone(), call);
+        self.record_expression(expression.span, info.clone(), call, field);
         info
     }
 
@@ -548,20 +762,38 @@ impl Resolver<'_> {
         path: &ast::Path,
         span: Span,
         context: &FunctionContext,
-    ) -> ExpressionInfo {
+    ) -> (ExpressionInfo, Option<ResolvedField>) {
         if path.segments.len() == 1 {
             let name = &path.segments[0];
             for scope in context.scopes.iter().rev() {
                 if let Some(variable) = scope.get(name) {
-                    return ExpressionInfo {
-                        ty: variable.ty.clone(),
-                        category: if variable.mutable {
+                    return (
+                        ExpressionInfo {
+                            ty: variable.ty.clone(),
+                            category: if variable.mutable {
+                                ValueCategory::MutablePlace
+                            } else {
+                                ValueCategory::SharedPlace
+                            },
+                        },
+                        None,
+                    );
+                }
+            }
+            if let Some(receiver) = &context.receiver
+                && let Some((ty, access_path)) = self.lookup_struct_field(receiver.structure, path)
+            {
+                return (
+                    ExpressionInfo {
+                        ty,
+                        category: if receiver.mutable {
                             ValueCategory::MutablePlace
                         } else {
                             ValueCategory::SharedPlace
                         },
-                    };
-                }
+                    },
+                    Some(ResolvedField { access_path }),
+                );
             }
         }
         self.push(
@@ -569,7 +801,114 @@ impl Resolver<'_> {
             format!("unresolved value name `{}`", path.display()),
             span,
         );
-        error_info()
+        (error_info(), None)
+    }
+
+    fn resolve_struct_aggregate(
+        &mut self,
+        path: &ast::Path,
+        initializers: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        let Some(id) = self.lookup_struct_path(&path.segments, &context.namespace) else {
+            for initializer in initializers {
+                self.resolve_expression(initializer, None, context);
+            }
+            self.push(
+                "RES046",
+                format!("unresolved aggregate type `{}`", path.display()),
+                span,
+            );
+            return (error_info(), None);
+        };
+        let structure = self.model.structs[id.0].clone();
+        let mut expected = Vec::new();
+        if let Some(base) = structure.base {
+            expected.push(TypeRef::Struct {
+                path: self.model.structs[base.0].path.clone(),
+            });
+        }
+        expected.extend(structure.fields.iter().map(|field| field.ty.clone()));
+        if initializers.len() != expected.len() {
+            self.push(
+                "RES047",
+                format!(
+                    "aggregate `{}` requires {} initializer(s), found {}",
+                    display_path(&structure.path),
+                    expected.len(),
+                    initializers.len()
+                ),
+                span,
+            );
+        }
+        for (index, initializer) in initializers.iter().enumerate() {
+            let expected_type = expected.get(index);
+            let actual =
+                self.resolve_expression(initializer, expected_type.map(canonical_ref), context);
+            if let Some(expected_type) = expected_type {
+                self.validate_binding(expected_type, &actual, initializer.span, "initializer");
+            }
+        }
+        let return_type = TypeRef::Struct {
+            path: structure.path,
+        };
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::StructAggregate { structure: id }),
+            return_type: return_type.clone(),
+        };
+        (temporary(return_type), Some(call))
+    }
+
+    fn resolve_struct_field(
+        &mut self,
+        receiver: &Expression,
+        name: &ast::Path,
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedField>) {
+        let receiver_info = self.resolve_expression(receiver, None, context);
+        let TypeRef::Struct { path } = canonical(&receiver_info.ty) else {
+            if canonical(&receiver_info.ty) != TypeRef::Error {
+                self.push(
+                    "RES010",
+                    format!(
+                        "type `{}` has no data field `{}`",
+                        display_type(&receiver_info.ty),
+                        name.display()
+                    ),
+                    span,
+                );
+            }
+            return (error_info(), None);
+        };
+        let Some(structure) = self.struct_by_path.get(&path).copied() else {
+            return (error_info(), None);
+        };
+        let Some((ty, access_path)) = self.lookup_struct_field(structure, name) else {
+            self.push(
+                "RES010",
+                format!(
+                    "struct `{}` has no data field `{}`",
+                    display_path(&path),
+                    name.display()
+                ),
+                span,
+            );
+            return (error_info(), None);
+        };
+        (
+            ExpressionInfo {
+                ty,
+                category: match receiver_info.category {
+                    ValueCategory::MutablePlace => ValueCategory::MutablePlace,
+                    ValueCategory::Temporary => ValueCategory::Temporary,
+                    ValueCategory::SharedPlace => ValueCategory::SharedPlace,
+                },
+            },
+            Some(ResolvedField { access_path }),
+        )
     }
 
     fn resolve_prefix(
@@ -681,7 +1020,7 @@ impl Resolver<'_> {
                 self.resolve_move(arguments, span, context)
             }
             ExpressionKind::Field { receiver, name } => {
-                self.resolve_native_method(receiver, name, arguments, span, context)
+                self.resolve_method_call(receiver, name, arguments, span, context)
             }
             ExpressionKind::Name(path) => {
                 if let Some(target) = primitive_type(&path.segments) {
@@ -748,6 +1087,184 @@ impl Resolver<'_> {
                 (error_info(), None)
             }
         }
+    }
+
+    fn resolve_method_call(
+        &mut self,
+        receiver: &Expression,
+        name: &ast::Path,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        let receiver_info = self.resolve_expression(receiver, None, context);
+        match canonical(&receiver_info.ty) {
+            TypeRef::Struct { path } => {
+                let Some(structure) = self.struct_by_path.get(&path).copied() else {
+                    return (error_info(), None);
+                };
+                self.resolve_struct_method(
+                    structure,
+                    &receiver_info,
+                    receiver.span,
+                    name,
+                    arguments,
+                    span,
+                    context,
+                )
+            }
+            TypeRef::Native {
+                path,
+                arguments: type_arguments,
+            } if name.segments.len() == 1 => {
+                let instance = NativeInstance {
+                    type_path: path,
+                    arguments: type_arguments,
+                };
+                self.resolve_native_callable(
+                    &instance,
+                    CallStyle::Method,
+                    &name.segments[0],
+                    arguments,
+                    span,
+                    Some((&receiver_info, receiver.span)),
+                    context,
+                )
+            }
+            ty => {
+                for argument in arguments {
+                    self.resolve_expression(argument, None, context);
+                }
+                if ty != TypeRef::Error {
+                    self.push(
+                        "RES020",
+                        format!(
+                            "type `{}` has no method `{}`",
+                            display_type(&ty),
+                            name.display()
+                        ),
+                        span,
+                    );
+                }
+                (error_info(), None)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn resolve_struct_method(
+        &mut self,
+        structure: StructId,
+        receiver: &ExpressionInfo,
+        receiver_span: Span,
+        name: &ast::Path,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        if name.segments.len() != 1 {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES048",
+                format!(
+                    "qualified member call `{}` is not supported",
+                    name.display()
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+        let mut path = self.model.structs[structure.0].path.clone();
+        path.push(name.segments[0].clone());
+        let candidates = self.function_sets.get(&path).cloned().unwrap_or_default();
+        let candidates = candidates
+            .into_iter()
+            .filter(|id| self.model.functions[id.0].parameters.len() == arguments.len())
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES049",
+                format!(
+                    "struct `{}` has no member `{}` accepting {} argument(s)",
+                    display_path(&self.model.structs[structure.0].path),
+                    name.display(),
+                    arguments.len()
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+        let contextual = (candidates.len() == 1).then(|| {
+            self.model.functions[candidates[0].0]
+                .parameters
+                .iter()
+                .map(|parameter| canonical(&parameter.ty))
+                .collect::<Vec<_>>()
+        });
+        let actual = self.resolve_arguments(arguments, contextual.as_deref(), context);
+        let exact = candidates
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.model.functions[id.0]
+                    .parameters
+                    .iter()
+                    .map(|parameter| canonical(&parameter.ty))
+                    .eq(actual.iter().map(|argument| canonical(&argument.ty)))
+            })
+            .collect::<Vec<_>>();
+        if exact.len() != 1 {
+            self.push(
+                "RES019",
+                format!(
+                    "no exact member overload of `{}` matches ({})",
+                    name.display(),
+                    display_argument_types(&actual)
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+        let id = exact[0];
+        let symbol = self.model.functions[id.0].clone();
+        if !symbol.has_definition {
+            self.push(
+                "RES052",
+                format!(
+                    "member `{}` has no out-of-struct definition",
+                    display_path(&symbol.path)
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+        let member = symbol
+            .receiver
+            .as_ref()
+            .expect("member candidate has a receiver");
+        if member.mutable && receiver.category != ValueCategory::MutablePlace {
+            self.push(
+                "RES024",
+                format!("method `{}` requires a mutable receiver", name.display()),
+                receiver_span,
+            );
+        }
+        for ((parameter, argument), syntax) in symbol.parameters.iter().zip(&actual).zip(arguments)
+        {
+            self.validate_binding(&parameter.ty, argument, syntax.span, "argument");
+        }
+        let return_type = symbol.return_type;
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Stainless(id),
+            return_type: return_type.clone(),
+        };
+        (info_for_return_type(return_type), Some(call))
     }
 
     fn resolve_move(
@@ -826,6 +1343,7 @@ impl Resolver<'_> {
         (temporary(target), Some(call))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn resolve_stainless_call(
         &mut self,
         path: &ast::Path,
@@ -884,17 +1402,35 @@ impl Resolver<'_> {
                     .eq(actual.iter().map(|argument| canonical(&argument.ty)))
             })
             .collect::<Vec<_>>();
-        if exact.len() != 1 {
-            let displayed_candidates = if exact.is_empty() {
+        let compatible = if exact.is_empty() {
+            arity_candidates
+                .iter()
+                .copied()
+                .filter(|id| {
+                    self.model.functions[id.0]
+                        .parameters
+                        .iter()
+                        .zip(&actual)
+                        .all(|(parameter, argument)| {
+                            canonical(&parameter.ty) == canonical(&argument.ty)
+                                || self.is_derived_reference_binding(&parameter.ty, &argument.ty)
+                        })
+                })
+                .collect::<Vec<_>>()
+        } else {
+            exact
+        };
+        if compatible.len() != 1 {
+            let displayed_candidates = if compatible.is_empty() {
                 &arity_candidates
             } else {
-                &exact
+                &compatible
             }
             .iter()
             .map(|id| display_function_signature(&self.model.functions[id.0]))
             .collect::<Vec<_>>()
             .join("; ");
-            let message = if exact.is_empty() {
+            let message = if compatible.is_empty() {
                 format!(
                     "no exact overload of `{}` matches ({}); candidates: {displayed_candidates}",
                     path.display(),
@@ -911,7 +1447,7 @@ impl Resolver<'_> {
             return (error_info(), None);
         }
 
-        let id = exact[0];
+        let id = compatible[0];
         let symbol = self.model.functions[id.0].clone();
         for ((parameter, argument), expression) in
             symbol.parameters.iter().zip(&actual).zip(arguments)
@@ -925,51 +1461,6 @@ impl Resolver<'_> {
             return_type: return_type.clone(),
         };
         (info_for_return_type(return_type), Some(call))
-    }
-
-    fn resolve_native_method(
-        &mut self,
-        receiver: &Expression,
-        name: &str,
-        arguments: &[Expression],
-        span: Span,
-        context: &mut FunctionContext,
-    ) -> (ExpressionInfo, Option<ResolvedCall>) {
-        let receiver_info = self.resolve_expression(receiver, None, context);
-        let receiver_type = canonical(&receiver_info.ty);
-        let TypeRef::Native {
-            path,
-            arguments: type_arguments,
-        } = receiver_type
-        else {
-            for argument in arguments {
-                self.resolve_expression(argument, None, context);
-            }
-            if receiver_type != TypeRef::Error {
-                self.push(
-                    "RES020",
-                    format!(
-                        "type `{}` has no native method `{name}`",
-                        display_type(&receiver_type)
-                    ),
-                    span,
-                );
-            }
-            return (error_info(), None);
-        };
-        let instance = NativeInstance {
-            type_path: path,
-            arguments: type_arguments,
-        };
-        self.resolve_native_callable(
-            &instance,
-            CallStyle::Method,
-            name,
-            arguments,
-            span,
-            Some((&receiver_info, receiver.span)),
-            context,
-        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1182,7 +1673,9 @@ impl Resolver<'_> {
         span: Span,
         description: &str,
     ) {
-        self.require_exact(expected, &actual.ty, span, description);
+        if !self.is_derived_reference_binding(expected, &actual.ty) {
+            self.require_exact(expected, &actual.ty, span, description);
+        }
         match expected {
             TypeRef::Reference { mutable: true, .. }
                 if actual.category != ValueCategory::MutablePlace =>
@@ -1196,6 +1689,38 @@ impl Resolver<'_> {
             TypeRef::Reference { .. } => {}
             _ => self.validate_value_use(expected, actual, span, description),
         }
+    }
+
+    fn is_derived_reference_binding(&self, expected: &TypeRef, actual: &TypeRef) -> bool {
+        let TypeRef::Reference {
+            target: expected_target,
+            ..
+        } = expected
+        else {
+            return false;
+        };
+        let TypeRef::Struct {
+            path: expected_path,
+        } = canonical_ref(expected_target)
+        else {
+            return false;
+        };
+        let TypeRef::Struct { path: actual_path } = canonical_ref(actual) else {
+            return false;
+        };
+        if expected_path == actual_path {
+            return true;
+        }
+        let Some(mut current) = self.struct_by_path.get(actual_path).copied() else {
+            return false;
+        };
+        while let Some(base) = self.model.structs[current.0].base {
+            if self.model.structs[base.0].path == *expected_path {
+                return true;
+            }
+            current = base;
+        }
+        false
     }
 
     fn validate_value_use(
@@ -1271,6 +1796,30 @@ impl Resolver<'_> {
 
     fn resolve_default_construction(&mut self, ty: &TypeRef, span: Span) {
         let canonical_type = canonical(ty);
+        if let TypeRef::Struct { path } = &canonical_type {
+            let Some(id) = self.struct_by_path.get(path).copied() else {
+                return;
+            };
+            let structure = &self.model.structs[id.0];
+            let initializer_count = usize::from(structure.base.is_some()) + structure.fields.len();
+            if initializer_count != 0 {
+                self.push(
+                    "RES030",
+                    format!(
+                        "struct `{}` has no implicit default constructor because it has data fields",
+                        display_path(path)
+                    ),
+                    span,
+                );
+                return;
+            }
+            self.model.calls.push(ResolvedCall {
+                span,
+                target: CallTarget::Intrinsic(Intrinsic::StructAggregate { structure: id }),
+                return_type: canonical_type,
+            });
+            return;
+        }
         let TypeRef::Native { path, arguments } = canonical_type else {
             if canonical_type != TypeRef::Error {
                 self.push(
@@ -1408,26 +1957,43 @@ impl Resolver<'_> {
                         .iter()
                         .map(|argument| self.resolve_type(argument, namespace, false))
                         .collect::<Vec<_>>();
-                    let Some(path) = self.native_path(segments, namespace, true, ty.span) else {
-                        return TypeRef::Error;
-                    };
-                    let expected_arity = self.bindings.type_by_path(path).map_or_else(
-                        || native_container_arity(path),
-                        |binding| Some(binding.type_parameters.len()),
-                    );
-                    if expected_arity == Some(arguments.len()) {
-                        TypeRef::Native { path, arguments }
+                    if let Some(id) = self.lookup_struct_path(segments, namespace) {
+                        if !arguments.is_empty() {
+                            self.push(
+                                "RES050",
+                                format!(
+                                    "struct `{}` cannot have type arguments",
+                                    named.path.display()
+                                ),
+                                ty.span,
+                            );
+                        }
+                        TypeRef::Struct {
+                            path: self.model.structs[id.0].path.clone(),
+                        }
                     } else {
-                        self.push(
-                            "RES034",
-                            format!(
-                                "native type `{path}` expects {} type argument(s), found {}",
-                                expected_arity.unwrap_or(0),
-                                arguments.len()
-                            ),
-                            ty.span,
+                        let Some(path) = self.native_path(segments, namespace, true, ty.span)
+                        else {
+                            return TypeRef::Error;
+                        };
+                        let expected_arity = self.bindings.type_by_path(path).map_or_else(
+                            || native_container_arity(path),
+                            |binding| Some(binding.type_parameters.len()),
                         );
-                        TypeRef::Error
+                        if expected_arity == Some(arguments.len()) {
+                            TypeRef::Native { path, arguments }
+                        } else {
+                            self.push(
+                                "RES034",
+                                format!(
+                                    "native type `{path}` expects {} type argument(s), found {}",
+                                    expected_arity.unwrap_or(0),
+                                    arguments.len()
+                                ),
+                                ty.span,
+                            );
+                            TypeRef::Error
+                        }
                     }
                 }
             }
@@ -1490,6 +2056,100 @@ impl Resolver<'_> {
         None
     }
 
+    fn lookup_struct_path(&self, segments: &[String], namespace: &[String]) -> Option<StructId> {
+        let mut candidates = Vec::new();
+        if segments.first().is_some_and(|segment| segment == "crate") {
+            candidates.push(segments[1..].to_vec());
+        } else if segments.len() > 1 {
+            let mut relative = namespace.to_vec();
+            relative.extend(segments.iter().cloned());
+            candidates.push(relative);
+            candidates.push(segments.to_vec());
+        } else if let Some(name) = segments.first() {
+            candidates.extend(self.imports.candidates(namespace, name));
+            for depth in (0..=namespace.len()).rev() {
+                let mut candidate = namespace[..depth].to_vec();
+                candidate.push(name.clone());
+                candidates.push(candidate);
+            }
+        }
+        candidates.sort();
+        candidates.dedup();
+        let found = candidates
+            .into_iter()
+            .filter_map(|candidate| self.struct_by_path.get(&candidate).copied())
+            .collect::<BTreeSet<_>>();
+        if found.len() == 1 {
+            found.into_iter().next()
+        } else {
+            None
+        }
+    }
+
+    fn lookup_struct_field(
+        &self,
+        structure: StructId,
+        requested: &ast::Path,
+    ) -> Option<(TypeRef, Vec<String>)> {
+        let (field_name, qualification) = requested.segments.split_last()?;
+        if qualification.is_empty() {
+            let mut matches = Vec::new();
+            let mut access_path = Vec::new();
+            let mut current = Some(structure);
+            while let Some(id) = current {
+                let symbol = &self.model.structs[id.0];
+                if let Some(field) = symbol.fields.iter().find(|field| field.name == *field_name) {
+                    let mut field_path = access_path.clone();
+                    field_path.push(field.name.clone());
+                    matches.push((field.ty.clone(), field_path));
+                }
+                let Some(base) = symbol.base else {
+                    break;
+                };
+                access_path.push(base_field_name(&self.model.structs[base.0]));
+                current = Some(base);
+            }
+            return (matches.len() == 1).then(|| matches.remove(0));
+        }
+        let target = { self.find_base_by_suffix(structure, qualification)? };
+        let mut access_path = self.base_projection_path(structure, target)?;
+        let mut current = Some(target);
+        while let Some(id) = current {
+            let symbol = &self.model.structs[id.0];
+            if let Some(field) = symbol.fields.iter().find(|field| field.name == *field_name) {
+                access_path.push(field.name.clone());
+                return Some((field.ty.clone(), access_path));
+            }
+            let base = symbol.base?;
+            access_path.push(base_field_name(&self.model.structs[base.0]));
+            current = Some(base);
+        }
+        None
+    }
+
+    fn find_base_by_suffix(&self, structure: StructId, suffix: &[String]) -> Option<StructId> {
+        let mut current = Some(structure);
+        while let Some(id) = current {
+            let path = &self.model.structs[id.0].path;
+            if path.ends_with(suffix) {
+                return Some(id);
+            }
+            current = self.model.structs[id.0].base;
+        }
+        None
+    }
+
+    fn base_projection_path(&self, derived: StructId, base: StructId) -> Option<Vec<String>> {
+        let mut path = Vec::new();
+        let mut current = derived;
+        while current != base {
+            let next = self.model.structs[current.0].base?;
+            path.push(base_field_name(&self.model.structs[next.0]));
+            current = next;
+        }
+        Some(path)
+    }
+
     fn function_candidates(&self, path: &ast::Path, namespace: &[String]) -> Vec<FunctionId> {
         let mut paths = Vec::new();
         if path
@@ -1540,7 +2200,13 @@ impl Resolver<'_> {
         }
     }
 
-    fn record_expression(&mut self, span: Span, info: ExpressionInfo, call: Option<ResolvedCall>) {
+    fn record_expression(
+        &mut self,
+        span: Span,
+        info: ExpressionInfo,
+        call: Option<ResolvedCall>,
+        field: Option<ResolvedField>,
+    ) {
         if let Some(call) = &call {
             self.model.calls.push(call.clone());
         }
@@ -1549,6 +2215,7 @@ impl Resolver<'_> {
             ty: info.ty,
             category: info.category,
             call,
+            field,
         });
     }
 
@@ -1601,6 +2268,7 @@ fn substitute(ty: &TypeRef, substitutions: &BTreeMap<&'static str, TypeRef>) -> 
                 .map(|argument| substitute(argument, substitutions))
                 .collect(),
         },
+        TypeRef::Struct { .. } => ty.clone(),
         TypeRef::Reference { mutable, target } => TypeRef::Reference {
             mutable: *mutable,
             target: Box::new(substitute(target, substitutions)),
@@ -1759,6 +2427,7 @@ fn is_copyable(ty: &TypeRef) -> bool {
             | TypeRef::Usize
             | TypeRef::F32
             | TypeRef::F64
+            | TypeRef::Struct { .. }
             | TypeRef::Reference { .. }
     )
 }
@@ -1837,6 +2506,7 @@ fn display_type(ty: &TypeRef) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        TypeRef::Struct { path } => display_path(path),
         TypeRef::Reference { mutable, target } => {
             if *mutable {
                 format!("{}&", display_type(target))
@@ -1845,6 +2515,13 @@ fn display_type(ty: &TypeRef) -> String {
             }
         }
     }
+}
+
+fn base_field_name(structure: &StructSymbol) -> String {
+    format!(
+        "__stainless_base_{}",
+        structure.path.last().map_or("missing", String::as_str)
+    )
 }
 
 fn display_path(path: &[String]) -> String {

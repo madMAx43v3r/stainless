@@ -20,6 +20,11 @@ struct Emitter {
 
 impl Emitter {
     fn program(&mut self, program: &hir::Program) -> Result<TokenStream, String> {
+        let structs = program
+            .structs
+            .iter()
+            .map(Self::structure)
+            .collect::<Result<Vec<_>, _>>()?;
         let functions = program
             .functions
             .iter()
@@ -31,6 +36,7 @@ impl Emitter {
             .map(|module| self.module(module))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(quote! {
+            #(#structs)*
             #(#functions)*
             #(#modules)*
         })
@@ -38,6 +44,11 @@ impl Emitter {
 
     fn module(&mut self, module: &hir::Module) -> Result<TokenStream, String> {
         let name = identifier(&module.rust_name)?;
+        let structs = module
+            .structs
+            .iter()
+            .map(Self::structure)
+            .collect::<Result<Vec<_>, _>>()?;
         let functions = module
             .functions
             .iter()
@@ -51,8 +62,29 @@ impl Emitter {
         Ok(quote! {
             #[allow(non_snake_case)]
             pub mod #name {
+                #(#structs)*
                 #(#functions)*
                 #(#modules)*
+            }
+        })
+    }
+
+    fn structure(structure: &hir::Struct) -> Result<TokenStream, String> {
+        let name = identifier(&structure.rust_name)?;
+        let fields = structure
+            .fields
+            .iter()
+            .map(|field| {
+                let name = identifier(&field.rust_name)?;
+                let ty = type_tokens(&field.ty, None)?;
+                Ok(quote!(pub #name: #ty))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(quote! {
+            #[derive(Clone)]
+            #[allow(non_snake_case)]
+            pub struct #name {
+                #(#fields),*
             }
         })
     }
@@ -170,6 +202,7 @@ impl Emitter {
                     hir::RangeMode::Shared => quote!((#iterable).iter()),
                     hir::RangeMode::Mutable => quote!((#iterable).iter_mut()),
                     hir::RangeMode::Copy => quote!((#iterable).iter().copied()),
+                    hir::RangeMode::Clone => quote!((#iterable).iter().cloned()),
                     hir::RangeMode::Move => quote!((#iterable).into_iter()),
                 };
                 let body = self.block(body)?;
@@ -256,6 +289,7 @@ impl Emitter {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn expression(&mut self, expression: &hir::Expression) -> Result<TokenStream, String> {
         match expression {
             hir::Expression::Name(name) => {
@@ -328,6 +362,29 @@ impl Emitter {
                 let right = self.expression(right)?;
                 let operator = binary_operator(*operator);
                 Ok(quote!((#left #operator #right)))
+            }
+            hir::Expression::Field {
+                receiver,
+                access_path,
+            } => {
+                let mut receiver = self.expression(receiver)?;
+                for field in access_path {
+                    let field = identifier(field)?;
+                    receiver = quote!((#receiver).#field);
+                }
+                Ok(receiver)
+            }
+            hir::Expression::Aggregate { ty, fields } => {
+                let ty = type_tokens(ty, None)?;
+                let fields = fields
+                    .iter()
+                    .map(|(name, value)| {
+                        let name = identifier(name)?;
+                        let value = self.expression(value)?;
+                        Ok(quote!(#name: #value))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(quote!(#ty { #(#fields),* }))
             }
             hir::Expression::FunctionCall { .. }
             | hir::Expression::AssociatedCall { .. }
@@ -436,6 +493,10 @@ fn type_tokens(ty: &hir::Type, lifetime: Option<&syn::Lifetime>) -> Result<Token
             } else {
                 Ok(quote!(#path < #(#arguments),* >))
             }
+        }
+        hir::Type::User { rust_path } => {
+            let path = path(rust_path)?;
+            Ok(quote!(#path))
         }
         hir::Type::Reference { mutable, target } => {
             let target = type_tokens(target, None)?;
