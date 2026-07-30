@@ -107,3 +107,117 @@ void conflicting(Counter& counter) {
         analysis.diagnostics
     );
 }
+
+#[test]
+fn resolves_exact_constructor_overloads_and_synthesized_defaults() {
+    let source = r"use rust::Vec;
+
+struct Value {
+    i32 number;
+    Value(i32 number);
+    Value(u32 number);
+};
+
+Value::Value(i32 number) : number(number) {}
+Value::Value(u32 number) : number(i32(number)) {}
+
+struct Collection {
+    Vec<i32> values;
+};
+
+i32 build() {
+    Value signed_value = Value(1);
+    Value unsigned_value = Value(2u32);
+    Value copied_value = Value(signed_value);
+    Collection collection;
+    return copied_value.number + unsigned_value.number + i32(collection.values.len());
+}
+";
+    let analysis = analyze(source);
+
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:?}",
+        analysis.diagnostics
+    );
+    assert_eq!(analysis.semantics.constructors.len(), 3);
+    assert_eq!(
+        analysis
+            .semantics
+            .constructors
+            .iter()
+            .filter(|constructor| constructor.synthesized)
+            .count(),
+        1
+    );
+    assert!(
+        analysis
+            .semantics
+            .constructors
+            .iter()
+            .all(|constructor| !constructor.is_deleted)
+    );
+}
+
+#[test]
+fn diagnoses_deleted_and_undefined_default_constructors_when_selected() {
+    let source = r"struct PrimitiveField {
+    i32 value;
+};
+
+struct ExplicitlyDeleted {
+    ExplicitlyDeleted() = delete;
+};
+
+struct Undefined {
+    Undefined();
+};
+
+void invalid() {
+    PrimitiveField primitive;
+    ExplicitlyDeleted deleted;
+    Undefined undefined;
+}
+";
+    let analysis = analyze(source);
+    let codes = analysis
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+
+    assert_eq!(codes.iter().filter(|code| **code == "RES066").count(), 2);
+    assert!(codes.contains(&"RES067"), "{:?}", analysis.diagnostics);
+}
+
+#[test]
+fn diagnoses_invalid_constructor_signatures_and_initializer_lists() {
+    let source = r"struct Value {
+    i32 number;
+    Value(i32 number);
+    Value(const i32& number);
+};
+
+Value::Value(i32 number)
+    : number(number), number(number), missing(number) {
+}
+
+struct MissingInitializer {
+    i32 number;
+    MissingInitializer();
+};
+
+MissingInitializer::MissingInitializer() {
+}
+";
+    let analysis = analyze(source);
+    let codes = analysis
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+
+    for expected in ["RES055", "RES061", "RES062", "RES065"] {
+        assert!(codes.contains(&expected), "{:?}", analysis.diagnostics);
+    }
+}

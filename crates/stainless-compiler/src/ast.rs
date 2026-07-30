@@ -40,6 +40,8 @@ pub enum Item {
     Use(UseDeclaration),
     /// A data-only struct definition.
     Struct(Struct),
+    /// A qualified constructor definition.
+    Constructor(Constructor),
     /// A free or qualified function.
     Function(Function),
 }
@@ -52,6 +54,7 @@ impl Item {
             Self::Namespace(item) => item.span,
             Self::Use(item) => item.span,
             Self::Struct(item) => item.span,
+            Self::Constructor(item) => item.span,
             Self::Function(item) => item.span,
         }
     }
@@ -91,7 +94,39 @@ pub struct Struct {
     pub fields: Vec<Field>,
     /// Member function declarations written inside the body.
     pub functions: Vec<Function>,
+    /// Constructor declarations written inside the body.
+    pub constructors: Vec<Constructor>,
     /// Complete definition range.
+    pub span: Span,
+}
+
+/// A struct constructor declaration, definition, or deletion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Constructor {
+    /// Unqualified declaration name or qualified definition path.
+    pub name: Path,
+    /// Parameters in declaration order.
+    pub parameters: Vec<Parameter>,
+    /// Checked exception types.
+    pub throws: Vec<Type>,
+    /// C++-style base and field initializer list.
+    pub initializers: Vec<ConstructorInitializer>,
+    /// Body, absent for an in-struct declaration.
+    pub body: Option<Block>,
+    /// Whether this declaration uses `= delete`.
+    pub is_deleted: bool,
+    /// Complete declaration or definition range.
+    pub span: Span,
+}
+
+/// One `target(arguments...)` constructor initializer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConstructorInitializer {
+    /// Direct field or data-base name.
+    pub target: Path,
+    /// Construction arguments.
+    pub arguments: Vec<Expression>,
+    /// Complete initializer range.
     pub span: Span,
 }
 

@@ -48,7 +48,9 @@ usize native_calls(const String& suffix) {
         .iter()
         .filter_map(|call| match &call.target {
             CallTarget::Native(native) => Some(native),
-            CallTarget::Stainless(_) | CallTarget::Intrinsic(_) => None,
+            CallTarget::Stainless(_) | CallTarget::Constructor(_) | CallTarget::Intrinsic(_) => {
+                None
+            }
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -150,7 +152,7 @@ i32 example() {
         .iter()
         .filter_map(|call| match call.target {
             CallTarget::Stainless(id) => Some(id),
-            CallTarget::Native(_) | CallTarget::Intrinsic(_) => None,
+            CallTarget::Constructor(_) | CallTarget::Native(_) | CallTarget::Intrinsic(_) => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(selected_ids, [overloads[0].id, overloads[1].id]);
@@ -192,7 +194,9 @@ String identity(String value) {
         .iter()
         .filter_map(|call| match &call.target {
             CallTarget::Native(native) => Some(native),
-            CallTarget::Stainless(_) | CallTarget::Intrinsic(_) => None,
+            CallTarget::Stainless(_) | CallTarget::Constructor(_) | CallTarget::Intrinsic(_) => {
+                None
+            }
         })
         .collect::<Vec<_>>();
     assert_eq!(native_calls.len(), 2);

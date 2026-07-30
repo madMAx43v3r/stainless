@@ -62,15 +62,73 @@ fn lower_item(item: cst::Item) -> Item {
                     .functions()
                     .map(|function| lower_function(&function))
                     .collect(),
+                constructors: definition
+                    .constructors()
+                    .map(|constructor| lower_constructor(&constructor))
+                    .collect(),
                 span: definition_span,
             })
         }
+        cst::Item::ConstructorDefinition(constructor) => Item::Constructor(lower_constructor(
+            &cst::Constructor::Definition(constructor),
+        )),
+        cst::Item::ConstructorDeclaration(constructor) => Item::Constructor(lower_constructor(
+            &cst::Constructor::Declaration(constructor),
+        )),
         cst::Item::FunctionDefinition(function) => {
             Item::Function(lower_function(&cst::Function::Definition(function)))
         }
         cst::Item::FunctionDeclaration(function) => {
             Item::Function(lower_function(&cst::Function::Declaration(function)))
         }
+    }
+}
+
+fn lower_constructor(constructor: &cst::Constructor) -> ast::Constructor {
+    let constructor_span = span(constructor);
+    ast::Constructor {
+        name: path_from_tokens(constructor.name_tokens()),
+        parameters: constructor
+            .parameter_list()
+            .into_iter()
+            .flat_map(|list| list.parameters())
+            .map(|parameter| {
+                let parameter_span = span(&parameter);
+                ast::Parameter {
+                    ty: parameter
+                        .ty()
+                        .map_or_else(|| error_type(parameter_span), |ty| lower_type(&ty)),
+                    name: parameter
+                        .name_token()
+                        .map_or_else(missing_name, |token| token.text().to_owned()),
+                    span: parameter_span,
+                }
+            })
+            .collect(),
+        throws: constructor
+            .throws_clause()
+            .into_iter()
+            .flat_map(|clause| clause.types())
+            .map(|ty| lower_type(&ty))
+            .collect(),
+        initializers: constructor
+            .initializer_list()
+            .into_iter()
+            .flat_map(|list| list.initializers())
+            .map(|initializer| ast::ConstructorInitializer {
+                target: path_from_tokens(initializer.name_tokens()),
+                arguments: initializer
+                    .argument_list()
+                    .into_iter()
+                    .flat_map(|arguments| arguments.arguments().collect::<Vec<_>>())
+                    .map(lower_expression)
+                    .collect(),
+                span: span(&initializer),
+            })
+            .collect(),
+        body: constructor.body().map(|body| lower_block(&body)),
+        is_deleted: constructor.is_deleted(),
+        span: constructor_span,
     }
 }
 

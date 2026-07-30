@@ -96,6 +96,9 @@ impl Parser<'_> {
                 Some(SyntaxKind::NamespaceKw) => self.parse_namespace(),
                 Some(SyntaxKind::UseKw) => self.parse_use_declaration(),
                 Some(SyntaxKind::StructKw) => self.parse_struct_definition(),
+                Some(SyntaxKind::Identifier) if self.looks_like_constructor() => {
+                    self.parse_constructor();
+                }
                 Some(SyntaxKind::Identifier | SyntaxKind::ConstKw) => self.parse_function(),
                 Some(_) => {
                     self.recover_item("expected a namespace, use declaration, struct, or function");
@@ -158,7 +161,9 @@ impl Parser<'_> {
                 self.bump();
                 self.expect(SyntaxKind::Colon, "expected `:` after access specifier");
             } else if self.at_any(&[SyntaxKind::Identifier, SyntaxKind::ConstKw]) {
-                if self.struct_member_is_function() {
+                if self.looks_like_constructor() {
+                    self.parse_constructor();
+                } else if self.struct_member_is_function() {
                     self.parse_function();
                 } else {
                     self.parse_field_declaration();
@@ -203,6 +208,88 @@ impl Parser<'_> {
             "expected `;` after field declaration",
         );
         self.finish();
+    }
+
+    fn parse_constructor(&mut self) {
+        self.start(self.constructor_node_kind());
+        self.parse_qualified_name("expected a constructor name");
+        self.parse_parameter_list();
+        if self.at(SyntaxKind::ThrowsKw) {
+            self.parse_throws_clause();
+        }
+        if self.at(SyntaxKind::Colon) {
+            self.parse_constructor_initializer_list();
+        }
+        if self.at(SyntaxKind::LBrace) {
+            self.parse_block();
+        } else if self.eat(SyntaxKind::Eq) {
+            if self.at(SyntaxKind::Identifier) {
+                if self.current_text() != Some("delete") {
+                    self.error("expected `delete` after `=`");
+                }
+                self.bump();
+            } else {
+                self.error("expected `delete` after `=`");
+            }
+            self.expect(
+                SyntaxKind::Semicolon,
+                "expected `;` after deleted constructor",
+            );
+        } else {
+            self.expect(
+                SyntaxKind::Semicolon,
+                "expected a constructor body, `= delete;`, or `;`",
+            );
+        }
+        self.finish();
+    }
+
+    fn constructor_node_kind(&self) -> SyntaxKind {
+        let mut paren_depth = 0_u32;
+        let mut offset = 0;
+        while let Some(kind) = self.nth(offset) {
+            match kind {
+                SyntaxKind::LParen => paren_depth += 1,
+                SyntaxKind::RParen => paren_depth = paren_depth.saturating_sub(1),
+                SyntaxKind::LBrace if paren_depth == 0 => {
+                    return SyntaxKind::ConstructorDefinition;
+                }
+                SyntaxKind::Semicolon if paren_depth == 0 => {
+                    return SyntaxKind::ConstructorDeclaration;
+                }
+                _ => {}
+            }
+            offset += 1;
+        }
+        SyntaxKind::ConstructorDefinition
+    }
+
+    fn parse_constructor_initializer_list(&mut self) {
+        self.start(SyntaxKind::ConstructorInitializerList);
+        self.bump();
+        loop {
+            self.start(SyntaxKind::ConstructorInitializer);
+            self.parse_qualified_name("expected a base or field initializer name");
+            self.parse_argument_list();
+            self.finish();
+            if !self.eat(SyntaxKind::Comma) {
+                break;
+            }
+        }
+        self.finish();
+    }
+
+    fn looks_like_constructor(&self) -> bool {
+        if self.nth(0) != Some(SyntaxKind::Identifier) {
+            return false;
+        }
+        let mut offset = 1;
+        while self.nth(offset) == Some(SyntaxKind::ColonColon)
+            && self.nth(offset + 1) == Some(SyntaxKind::Identifier)
+        {
+            offset += 2;
+        }
+        self.nth(offset) == Some(SyntaxKind::LParen)
     }
 
     fn parse_function(&mut self) {
@@ -737,6 +824,13 @@ impl Parser<'_> {
 
     fn current(&self) -> Option<SyntaxKind> {
         self.nth(0)
+    }
+
+    fn current_text(&self) -> Option<&str> {
+        let token = self.tokens.get(self.significant_position())?;
+        let start = usize::from(token.range.start());
+        let end = usize::from(token.range.end());
+        Some(&self.source[start..end])
     }
 
     fn nth(&self, significant_offset: usize) -> Option<SyntaxKind> {

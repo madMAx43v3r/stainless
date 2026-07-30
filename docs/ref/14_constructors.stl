@@ -1,0 +1,52 @@
+// Provisional Stainless syntax example.
+// Constructors are declared inside a struct and defined outside it. Base and
+// field initializer lists use the familiar C++ spelling.
+
+use rust::{String, Vec};
+
+namespace samples {
+
+struct Dimensions {
+    i32 width;
+    i32 height;
+
+    Dimensions(i32 width, i32 height);
+};
+
+Dimensions::Dimensions(i32 width, i32 height)
+    : width(width), height(height) {
+}
+
+struct NamedDimensions : Dimensions {
+    String name;
+
+    NamedDimensions(i32 width, i32 height, const String& name);
+};
+
+NamedDimensions::NamedDimensions(
+    i32 width,
+    i32 height,
+    const String& name)
+    : Dimensions(width, height), name(name) {
+}
+
+struct StringList {
+    Vec<String> values;
+};
+
+struct NoDefault {
+    NoDefault() = delete;
+};
+
+i32 constructor_example() {
+    NamedDimensions dimensions = NamedDimensions(3, 4, "preview");
+
+    // StringList receives a synthesized default constructor because Vec can
+    // be default-constructed.
+    StringList names;
+    names.values.push("first");
+
+    return dimensions.width + dimensions.height + i32(names.values.len());
+}
+
+} // namespace samples

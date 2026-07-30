@@ -44,6 +44,47 @@ fn parses_structs_members_inheritance_and_aggregates_losslessly() {
 }
 
 #[test]
+fn parses_constructor_declarations_definitions_deletions_and_initializers() {
+    let source = r"struct Base {
+    Base(i32 value);
+    Base() = delete;
+    i32 value;
+};
+
+Base::Base(i32 value) : value(value) {
+}
+
+struct Derived : Base {
+    Derived(i32 value);
+};
+
+Derived::Derived(i32 value) : Base(value) {
+}
+";
+    let parsed = parse(source);
+    let root = parsed.syntax();
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(root.to_string(), source);
+    assert_eq!(count_kind(&root, SyntaxKind::ConstructorDeclaration), 3);
+    assert_eq!(count_kind(&root, SyntaxKind::ConstructorDefinition), 2);
+    assert_eq!(count_kind(&root, SyntaxKind::ConstructorInitializerList), 2);
+    assert_eq!(count_kind(&root, SyntaxKind::ConstructorInitializer), 2);
+}
+
+#[test]
+fn deleted_constructor_requires_the_contextual_delete_spelling() {
+    let parsed = parse("struct Value { Value() = unavailable; };\n");
+
+    assert!(
+        parsed
+            .errors()
+            .iter()
+            .any(|error| error.message.contains("expected `delete`"))
+    );
+}
+
+#[test]
 fn parses_initial_functions_control_flow_and_both_for_forms_losslessly() {
     let source = r"use rust::Vec;
 

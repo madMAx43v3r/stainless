@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 
 use rowan::SyntaxNodeChildren;
 
-use crate::{StainlessLanguage, SyntaxKind, SyntaxNode, SyntaxToken};
+use crate::{StainlessLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 
 /// A typed wrapper around one concrete-syntax node.
 pub trait AstNode: Clone {
@@ -61,6 +61,10 @@ ast_node!(NamespaceDefinition, NamespaceDefinition);
 ast_node!(UseDeclaration, UseDeclaration);
 ast_node!(StructDefinition, StructDefinition);
 ast_node!(FieldDeclaration, FieldDeclaration);
+ast_node!(ConstructorDefinition, ConstructorDefinition);
+ast_node!(ConstructorDeclaration, ConstructorDeclaration);
+ast_node!(ConstructorInitializerList, ConstructorInitializerList);
+ast_node!(ConstructorInitializer, ConstructorInitializer);
 ast_node!(FunctionDefinition, FunctionDefinition);
 ast_node!(FunctionDeclaration, FunctionDeclaration);
 ast_node!(ParameterList, ParameterList);
@@ -103,6 +107,10 @@ pub enum Item {
     Use(UseDeclaration),
     /// A data-only `struct`.
     Struct(StructDefinition),
+    /// A constructor with a body.
+    ConstructorDefinition(ConstructorDefinition),
+    /// A constructor declaration or deletion.
+    ConstructorDeclaration(ConstructorDeclaration),
     /// A function with a body.
     FunctionDefinition(FunctionDefinition),
     /// A function declaration ending in `;`.
@@ -116,6 +124,8 @@ impl AstNode for Item {
             SyntaxKind::NamespaceDefinition
                 | SyntaxKind::UseDeclaration
                 | SyntaxKind::StructDefinition
+                | SyntaxKind::ConstructorDefinition
+                | SyntaxKind::ConstructorDeclaration
                 | SyntaxKind::FunctionDefinition
                 | SyntaxKind::FunctionDeclaration
         )
@@ -128,6 +138,12 @@ impl AstNode for Item {
             }
             SyntaxKind::UseDeclaration => UseDeclaration::cast(syntax).map(Self::Use),
             SyntaxKind::StructDefinition => StructDefinition::cast(syntax).map(Self::Struct),
+            SyntaxKind::ConstructorDefinition => {
+                ConstructorDefinition::cast(syntax).map(Self::ConstructorDefinition)
+            }
+            SyntaxKind::ConstructorDeclaration => {
+                ConstructorDeclaration::cast(syntax).map(Self::ConstructorDeclaration)
+            }
             SyntaxKind::FunctionDefinition => {
                 FunctionDefinition::cast(syntax).map(Self::FunctionDefinition)
             }
@@ -143,6 +159,8 @@ impl AstNode for Item {
             Self::Namespace(node) => node.syntax(),
             Self::Use(node) => node.syntax(),
             Self::Struct(node) => node.syntax(),
+            Self::ConstructorDefinition(node) => node.syntax(),
+            Self::ConstructorDeclaration(node) => node.syntax(),
             Self::FunctionDefinition(node) => node.syntax(),
             Self::FunctionDeclaration(node) => node.syntax(),
         }
@@ -412,6 +430,10 @@ impl StructDefinition {
     pub fn functions(&self) -> impl Iterator<Item = Function> + '_ {
         self.syntax().children().filter_map(Function::cast)
     }
+
+    pub fn constructors(&self) -> impl Iterator<Item = Constructor> + '_ {
+        self.syntax().children().filter_map(Constructor::cast)
+    }
 }
 
 impl FieldDeclaration {
@@ -423,6 +445,163 @@ impl FieldDeclaration {
     #[must_use]
     pub fn name_token(&self) -> Option<SyntaxToken> {
         token(self.syntax(), SyntaxKind::Identifier)
+    }
+}
+
+/// A constructor definition, declaration, or deletion.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum Constructor {
+    Definition(ConstructorDefinition),
+    Declaration(ConstructorDeclaration),
+}
+
+impl AstNode for Constructor {
+    fn can_cast(kind: SyntaxKind) -> bool {
+        matches!(
+            kind,
+            SyntaxKind::ConstructorDefinition | SyntaxKind::ConstructorDeclaration
+        )
+    }
+
+    fn cast(syntax: SyntaxNode) -> Option<Self> {
+        match syntax.kind() {
+            SyntaxKind::ConstructorDefinition => {
+                ConstructorDefinition::cast(syntax).map(Self::Definition)
+            }
+            SyntaxKind::ConstructorDeclaration => {
+                ConstructorDeclaration::cast(syntax).map(Self::Declaration)
+            }
+            _ => None,
+        }
+    }
+
+    fn syntax(&self) -> &SyntaxNode {
+        match self {
+            Self::Definition(node) => node.syntax(),
+            Self::Declaration(node) => node.syntax(),
+        }
+    }
+}
+
+macro_rules! constructor_accessors {
+    ($name:ident) => {
+        impl $name {
+            pub fn name_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+                self.syntax()
+                    .descendants_with_tokens()
+                    .filter_map(SyntaxElement::into_token)
+                    .take_while(|token| token.kind() != SyntaxKind::LParen)
+                    .filter(|token| {
+                        matches!(
+                            token.kind(),
+                            SyntaxKind::Identifier | SyntaxKind::ColonColon
+                        )
+                    })
+            }
+
+            #[must_use]
+            pub fn parameter_list(&self) -> Option<ParameterList> {
+                child(self.syntax())
+            }
+
+            #[must_use]
+            pub fn throws_clause(&self) -> Option<ThrowsClause> {
+                child(self.syntax())
+            }
+        }
+    };
+}
+
+constructor_accessors!(ConstructorDefinition);
+constructor_accessors!(ConstructorDeclaration);
+
+impl ConstructorDefinition {
+    #[must_use]
+    pub fn initializer_list(&self) -> Option<ConstructorInitializerList> {
+        child(self.syntax())
+    }
+
+    #[must_use]
+    pub fn body(&self) -> Option<Block> {
+        child(self.syntax())
+    }
+}
+
+impl ConstructorDeclaration {
+    #[must_use]
+    pub fn is_deleted(&self) -> bool {
+        direct_tokens(self.syntax())
+            .any(|token| token.kind() == SyntaxKind::Identifier && token.text() == "delete")
+    }
+}
+
+impl Constructor {
+    #[must_use]
+    pub fn name_tokens(&self) -> Box<dyn Iterator<Item = SyntaxToken> + '_> {
+        match self {
+            Self::Definition(node) => Box::new(node.name_tokens()),
+            Self::Declaration(node) => Box::new(node.name_tokens()),
+        }
+    }
+
+    #[must_use]
+    pub fn parameter_list(&self) -> Option<ParameterList> {
+        match self {
+            Self::Definition(node) => node.parameter_list(),
+            Self::Declaration(node) => node.parameter_list(),
+        }
+    }
+
+    #[must_use]
+    pub fn throws_clause(&self) -> Option<ThrowsClause> {
+        match self {
+            Self::Definition(node) => node.throws_clause(),
+            Self::Declaration(node) => node.throws_clause(),
+        }
+    }
+
+    #[must_use]
+    pub fn initializer_list(&self) -> Option<ConstructorInitializerList> {
+        match self {
+            Self::Definition(node) => node.initializer_list(),
+            Self::Declaration(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn body(&self) -> Option<Block> {
+        match self {
+            Self::Definition(node) => node.body(),
+            Self::Declaration(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn is_deleted(&self) -> bool {
+        matches!(self, Self::Declaration(node) if node.is_deleted())
+    }
+}
+
+impl ConstructorInitializerList {
+    #[must_use]
+    pub fn initializers(&self) -> AstChildren<ConstructorInitializer> {
+        children(self.syntax())
+    }
+}
+
+impl ConstructorInitializer {
+    pub fn name_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        direct_tokens(self.syntax()).filter(|token| {
+            matches!(
+                token.kind(),
+                SyntaxKind::Identifier | SyntaxKind::ColonColon
+            )
+        })
+    }
+
+    #[must_use]
+    pub fn argument_list(&self) -> Option<ArgumentList> {
+        child(self.syntax())
     }
 }
 

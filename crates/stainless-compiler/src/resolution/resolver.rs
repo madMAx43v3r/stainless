@@ -12,9 +12,10 @@ use crate::interop::{
 use super::imports::ImportTable;
 use super::mangle;
 use super::{
-    BindingResolution, CallTarget, ExpressionResolution, FieldSymbol, FunctionId, FunctionSymbol,
-    Intrinsic, NativeCall, ParameterSymbol, Resolution, ResolvedCall, ResolvedField,
-    ResolvedTraitRequirement, SemanticModel, StructId, StructReceiver, StructSymbol, ValueCategory,
+    BindingResolution, CallTarget, ConstructorFieldInitialization, ConstructorId,
+    ConstructorSymbol, ExpressionResolution, FieldSymbol, FunctionId, FunctionSymbol, Intrinsic,
+    NativeCall, ParameterSymbol, Resolution, ResolvedCall, ResolvedField, ResolvedTraitRequirement,
+    SemanticModel, StructId, StructReceiver, StructSymbol, ValueCategory,
 };
 
 /// Resolves names and types using an explicit native binding registry.
@@ -31,11 +32,14 @@ pub fn resolve(source: &SourceFile, bindings: &NativeBindings) -> Resolution {
         function_by_span: BTreeMap::new(),
         struct_by_path: BTreeMap::new(),
         struct_by_span: BTreeMap::new(),
+        constructor_sets: BTreeMap::new(),
+        constructor_by_span: BTreeMap::new(),
     };
     resolver.collect_struct_names(&source.items, &mut Vec::new());
     resolver.resolve_struct_definitions(&source.items, &mut Vec::new());
     resolver.validate_struct_cycles();
     resolver.collect_signatures(&source.items, &mut Vec::new());
+    resolver.synthesize_default_constructors();
     resolver.validate_member_declarations();
     resolver.resolve_bodies(&source.items, &mut Vec::new());
     resolver
@@ -56,6 +60,8 @@ struct Resolver<'bindings> {
     function_by_span: BTreeMap<Span, FunctionId>,
     struct_by_path: BTreeMap<Vec<String>, StructId>,
     struct_by_span: BTreeMap<Span, StructId>,
+    constructor_sets: BTreeMap<StructId, Vec<ConstructorId>>,
+    constructor_by_span: BTreeMap<Span, ConstructorId>,
 }
 
 #[derive(Clone, Debug)]
@@ -128,7 +134,7 @@ impl Resolver<'_> {
                     self.struct_by_path.insert(path, id);
                     self.struct_by_span.insert(structure.span, id);
                 }
-                Item::Use(_) | Item::Function(_) => {}
+                Item::Use(_) | Item::Constructor(_) | Item::Function(_) => {}
             }
         }
     }
@@ -194,7 +200,7 @@ impl Resolver<'_> {
                     symbol.base = base.filter(|base| *base != id);
                     symbol.fields = fields;
                 }
-                Item::Use(_) | Item::Function(_) => {}
+                Item::Use(_) | Item::Constructor(_) | Item::Function(_) => {}
             }
         }
     }
@@ -230,13 +236,275 @@ impl Resolver<'_> {
                 }
                 Item::Struct(structure) => {
                     let owner = self.struct_by_span.get(&structure.span).copied();
+                    if let Some(owner) = owner {
+                        for constructor in &structure.constructors {
+                            self.collect_constructor(constructor, namespace, Some(owner));
+                        }
+                    }
                     for function in &structure.functions {
                         self.collect_function(function, namespace, owner);
                     }
                 }
+                Item::Constructor(constructor) => {
+                    self.collect_constructor(constructor, namespace, None);
+                }
                 Item::Function(function) => self.collect_function(function, namespace, None),
                 Item::Use(_) => {}
             }
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn collect_constructor(
+        &mut self,
+        constructor: &ast::Constructor,
+        namespace: &[String],
+        declared_owner: Option<StructId>,
+    ) {
+        let (owner, path) = if let Some(owner) = declared_owner {
+            let mut path = self.model.structs[owner.0].path.clone();
+            path.push(
+                constructor
+                    .name
+                    .segments
+                    .last()
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+            (Some(owner), path)
+        } else {
+            let path = qualify_declaration_path(namespace, &constructor.name.segments);
+            let owner = (path.len() >= 2)
+                .then(|| self.struct_by_path.get(&path[..path.len() - 1]).copied())
+                .flatten();
+            (owner, path)
+        };
+        let Some(owner) = owner else {
+            self.push(
+                "RES053",
+                format!(
+                    "constructor `{}` does not name a known struct",
+                    constructor.name.display()
+                ),
+                constructor.span,
+            );
+            return;
+        };
+        let structure_path = self.model.structs[owner.0].path.clone();
+        if path.last() != structure_path.last() {
+            self.push(
+                "RES054",
+                format!(
+                    "constructor name must be `{}`",
+                    structure_path.last().map_or("<missing>", String::as_str)
+                ),
+                constructor.span,
+            );
+        }
+        let type_namespace = &structure_path[..structure_path.len().saturating_sub(1)];
+        for thrown in &constructor.throws {
+            self.resolve_type(thrown, type_namespace, false);
+        }
+        let parameters = constructor
+            .parameters
+            .iter()
+            .map(|parameter| ParameterSymbol {
+                name: parameter.name.clone(),
+                ty: self.resolve_type(&parameter.ty, type_namespace, false),
+                span: parameter.span,
+            })
+            .collect::<Vec<_>>();
+        let signature = parameters
+            .iter()
+            .map(|parameter| canonical(&parameter.ty))
+            .collect::<Vec<_>>();
+        let existing = self
+            .constructor_sets
+            .get(&owner)
+            .into_iter()
+            .flatten()
+            .copied()
+            .find(|id| {
+                self.model.constructors[id.0]
+                    .parameters
+                    .iter()
+                    .map(|parameter| canonical(&parameter.ty))
+                    .eq(signature.iter().cloned())
+            });
+        if let Some(id) = existing {
+            let same_modes = self.model.constructors[id.0]
+                .parameters
+                .iter()
+                .map(|parameter| &parameter.ty)
+                .eq(parameters.iter().map(|parameter| &parameter.ty));
+            let has_definition = self.model.constructors[id.0].has_definition;
+            let is_deleted = self.model.constructors[id.0].is_deleted;
+            if !same_modes {
+                self.push(
+                    "RES055",
+                    "constructors cannot differ only by value/reference passing mode".to_owned(),
+                    constructor.span,
+                );
+            }
+            if has_definition && constructor.body.is_some() {
+                self.push(
+                    "RES056",
+                    "duplicate constructor definition".to_owned(),
+                    constructor.span,
+                );
+            }
+            if (is_deleted && constructor.body.is_some())
+                || (constructor.is_deleted && has_definition)
+            {
+                self.push(
+                    "RES057",
+                    "a deleted constructor cannot have a definition".to_owned(),
+                    constructor.span,
+                );
+            }
+            let symbol = &mut self.model.constructors[id.0];
+            symbol.declarations.push(constructor.span);
+            symbol.has_definition |= constructor.body.is_some();
+            symbol.has_member_declaration |= declared_owner.is_some();
+            symbol.is_deleted |= constructor.is_deleted;
+            self.constructor_by_span.insert(constructor.span, id);
+            return;
+        }
+        let id = ConstructorId(self.model.constructors.len());
+        let mangled_name = mangle::function_name(
+            &path,
+            &parameters
+                .iter()
+                .map(|parameter| parameter.ty.clone())
+                .collect::<Vec<_>>(),
+        );
+        self.model.constructors.push(ConstructorSymbol {
+            id,
+            structure: owner,
+            parameters,
+            mangled_name,
+            declarations: vec![constructor.span],
+            has_definition: constructor.body.is_some(),
+            has_member_declaration: declared_owner.is_some(),
+            is_deleted: constructor.is_deleted,
+            synthesized: false,
+            initializations: Vec::new(),
+        });
+        self.constructor_sets.entry(owner).or_default().push(id);
+        self.constructor_by_span.insert(constructor.span, id);
+    }
+
+    fn synthesize_default_constructors(&mut self) {
+        for structure in self.model.structs.clone() {
+            if self
+                .constructor_sets
+                .get(&structure.id)
+                .is_some_and(|constructors| !constructors.is_empty())
+            {
+                continue;
+            }
+            let id = ConstructorId(self.model.constructors.len());
+            let mut path = structure.path.clone();
+            path.push(
+                structure
+                    .path
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| "<missing>".to_owned()),
+            );
+            self.model.constructors.push(ConstructorSymbol {
+                id,
+                structure: structure.id,
+                parameters: Vec::new(),
+                mangled_name: mangle::function_name(&path, &[]),
+                declarations: vec![structure.span],
+                has_definition: true,
+                has_member_declaration: true,
+                is_deleted: false,
+                synthesized: true,
+                initializations: Vec::new(),
+            });
+            self.constructor_sets
+                .entry(structure.id)
+                .or_default()
+                .push(id);
+        }
+        for id in 0..self.model.structs.len() {
+            let structure = StructId(id);
+            let available = self.struct_has_default_constructor(structure, &mut BTreeSet::new());
+            if let Some(constructor) = self
+                .constructor_sets
+                .get(&structure)
+                .into_iter()
+                .flatten()
+                .find(|id| self.model.constructors[id.0].synthesized)
+                .copied()
+            {
+                self.model.constructors[constructor.0].is_deleted = !available;
+            }
+        }
+    }
+
+    fn struct_has_default_constructor(
+        &self,
+        structure: StructId,
+        visiting: &mut BTreeSet<StructId>,
+    ) -> bool {
+        if !visiting.insert(structure) {
+            return false;
+        }
+        let constructors = self
+            .constructor_sets
+            .get(&structure)
+            .cloned()
+            .unwrap_or_default();
+        if constructors.iter().any(|id| {
+            let constructor = &self.model.constructors[id.0];
+            !constructor.synthesized
+                && constructor.parameters.is_empty()
+                && !constructor.is_deleted
+                && constructor.has_definition
+        }) {
+            visiting.remove(&structure);
+            return true;
+        }
+        let synthesized = constructors
+            .iter()
+            .any(|id| self.model.constructors[id.0].synthesized);
+        if !synthesized {
+            visiting.remove(&structure);
+            return false;
+        }
+        let symbol = &self.model.structs[structure.0];
+        let available = symbol
+            .base
+            .is_none_or(|base| self.struct_has_default_constructor(base, visiting))
+            && symbol
+                .fields
+                .iter()
+                .all(|field| self.type_has_default_constructor(&field.ty, visiting));
+        visiting.remove(&structure);
+        available
+    }
+
+    fn type_has_default_constructor(
+        &self,
+        ty: &TypeRef,
+        visiting: &mut BTreeSet<StructId>,
+    ) -> bool {
+        match canonical_ref(ty) {
+            TypeRef::Native { path, .. } => {
+                self.bindings.type_by_path(path).is_some_and(|binding| {
+                    binding.callables.iter().any(|callable| {
+                        callable.style == CallStyle::Constructor && callable.parameters.is_empty()
+                    })
+                })
+            }
+            TypeRef::Struct { path } => self
+                .struct_by_path
+                .get(path)
+                .is_some_and(|id| self.struct_has_default_constructor(*id, visiting)),
+            _ => false,
         }
     }
 
@@ -387,10 +655,20 @@ impl Resolver<'_> {
                     namespace.pop();
                 }
                 Item::Struct(structure) => {
+                    for constructor in &structure.constructors {
+                        if constructor.body.is_some() {
+                            self.resolve_constructor_body(constructor, namespace);
+                        }
+                    }
                     for function in &structure.functions {
                         if function.body.is_some() {
                             self.resolve_function_body(function, namespace);
                         }
+                    }
+                }
+                Item::Constructor(constructor) => {
+                    if constructor.body.is_some() {
+                        self.resolve_constructor_body(constructor, namespace);
                     }
                 }
                 Item::Function(function) => {
@@ -401,9 +679,21 @@ impl Resolver<'_> {
                 Item::Use(_) => {}
             }
         }
+        if namespace.is_empty() {
+            self.resolve_synthesized_constructors();
+        }
     }
 
     fn validate_member_declarations(&mut self) {
+        for constructor in self.model.constructors.clone() {
+            if !constructor.synthesized && !constructor.has_member_declaration {
+                self.push(
+                    "RES058",
+                    "constructor must be declared inside its struct body".to_owned(),
+                    constructor.declarations[0],
+                );
+            }
+        }
         for function in self.model.functions.clone() {
             if function.receiver.is_some() && !function.has_member_declaration {
                 self.push(
@@ -414,6 +704,329 @@ impl Resolver<'_> {
                     ),
                     function.declarations[0],
                 );
+            }
+        }
+    }
+
+    fn resolve_constructor_body(&mut self, constructor: &ast::Constructor, _namespace: &[String]) {
+        let Some(id) = self.constructor_by_span.get(&constructor.span).copied() else {
+            return;
+        };
+        let symbol = self.model.constructors[id.0].clone();
+        let structure = self.model.structs[symbol.structure.0].clone();
+        let constructor_namespace =
+            structure.path[..structure.path.len().saturating_sub(1)].to_vec();
+        if !constructor.throws.is_empty() {
+            return;
+        }
+        let mut scope = BTreeMap::new();
+        for (syntax, parameter) in constructor.parameters.iter().zip(&symbol.parameters) {
+            scope.insert(
+                syntax.name.clone(),
+                Variable {
+                    ty: parameter.ty.clone(),
+                    mutable: parameter_mutability(syntax, &parameter.ty),
+                },
+            );
+        }
+        let mut initialization_context = FunctionContext {
+            namespace: constructor_namespace.clone(),
+            return_type: TypeRef::Void,
+            scopes: vec![scope.clone()],
+            receiver: None,
+        };
+        let slots = self.constructor_slots(symbol.structure);
+        let mut explicit = BTreeMap::<usize, &ast::ConstructorInitializer>::new();
+        for initializer in &constructor.initializers {
+            let Some(slot) =
+                self.constructor_initializer_slot(symbol.structure, &initializer.target)
+            else {
+                for argument in &initializer.arguments {
+                    self.resolve_expression(argument, None, &mut initialization_context);
+                }
+                self.push(
+                    "RES061",
+                    format!(
+                        "`{}` is not a direct field or data base of this constructor",
+                        initializer.target.display()
+                    ),
+                    initializer.span,
+                );
+                continue;
+            };
+            if explicit.insert(slot, initializer).is_some() {
+                self.push(
+                    "RES062",
+                    format!(
+                        "constructor initializes `{}` more than once",
+                        initializer.target.display()
+                    ),
+                    initializer.span,
+                );
+            }
+        }
+        let mut initializations = Vec::new();
+        for (index, (rust_name, ty)) in slots.into_iter().enumerate() {
+            let (source, call) = if let Some(initializer) = explicit.get(&index) {
+                (
+                    Some(initializer.span),
+                    self.resolve_slot_construction(
+                        &ty,
+                        &initializer.arguments,
+                        initializer.span,
+                        &mut initialization_context,
+                    ),
+                )
+            } else {
+                (
+                    None,
+                    self.resolve_default_call(&ty, constructor.span, &mut initialization_context),
+                )
+            };
+            if let Some(call) = call {
+                self.model.calls.push(call.clone());
+                initializations.push(ConstructorFieldInitialization {
+                    rust_name,
+                    ty,
+                    source,
+                    call,
+                });
+            }
+        }
+        self.model.constructors[id.0].initializations = initializations;
+
+        let mut context = FunctionContext {
+            namespace: constructor_namespace,
+            return_type: TypeRef::Void,
+            scopes: vec![scope],
+            receiver: Some(StructReceiver {
+                structure: symbol.structure,
+                mutable: true,
+            }),
+        };
+        if let Some(body) = &constructor.body {
+            self.resolve_block(body, &mut context, false);
+        }
+    }
+
+    fn resolve_synthesized_constructors(&mut self) {
+        let constructors = self
+            .model
+            .constructors
+            .iter()
+            .filter(|constructor| constructor.synthesized && !constructor.is_deleted)
+            .map(|constructor| constructor.id)
+            .collect::<Vec<_>>();
+        for id in constructors {
+            let symbol = self.model.constructors[id.0].clone();
+            let structure = self.model.structs[symbol.structure.0].clone();
+            let mut context = FunctionContext {
+                namespace: structure.path[..structure.path.len().saturating_sub(1)].to_vec(),
+                return_type: TypeRef::Void,
+                scopes: vec![BTreeMap::new()],
+                receiver: None,
+            };
+            let mut initializations = Vec::new();
+            for (rust_name, ty) in self.constructor_slots(symbol.structure) {
+                if let Some(call) = self.resolve_default_call(&ty, structure.span, &mut context) {
+                    self.model.calls.push(call.clone());
+                    initializations.push(ConstructorFieldInitialization {
+                        rust_name,
+                        ty,
+                        source: None,
+                        call,
+                    });
+                }
+            }
+            self.model.constructors[id.0].initializations = initializations;
+        }
+    }
+
+    fn constructor_slots(&self, structure: StructId) -> Vec<(String, TypeRef)> {
+        let symbol = &self.model.structs[structure.0];
+        let mut slots = Vec::new();
+        if let Some(base) = symbol.base {
+            let base = &self.model.structs[base.0];
+            slots.push((
+                base_field_name(base),
+                TypeRef::Struct {
+                    path: base.path.clone(),
+                },
+            ));
+        }
+        slots.extend(
+            symbol
+                .fields
+                .iter()
+                .map(|field| (field.name.clone(), field.ty.clone())),
+        );
+        slots
+    }
+
+    fn constructor_initializer_slot(
+        &self,
+        structure: StructId,
+        target: &ast::Path,
+    ) -> Option<usize> {
+        let symbol = &self.model.structs[structure.0];
+        if let Some(base) = symbol.base {
+            let base_path = &self.model.structs[base.0].path;
+            if base_path.ends_with(&target.segments) {
+                return Some(0);
+            }
+        }
+        if target.segments.len() != 1 {
+            return None;
+        }
+        let offset = usize::from(symbol.base.is_some());
+        symbol
+            .fields
+            .iter()
+            .position(|field| field.name == target.segments[0])
+            .map(|index| offset + index)
+    }
+
+    fn resolve_slot_construction(
+        &mut self,
+        target: &TypeRef,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> Option<ResolvedCall> {
+        match canonical_ref(target) {
+            TypeRef::Struct { path } => {
+                let structure = self.struct_by_path.get(path).copied()?;
+                let has_arity = self
+                    .constructor_sets
+                    .get(&structure)
+                    .into_iter()
+                    .flatten()
+                    .any(|id| self.model.constructors[id.0].parameters.len() == arguments.len());
+                if !has_arity && arguments.len() == 1 {
+                    return self.resolve_direct_initialization(
+                        target,
+                        &arguments[0],
+                        span,
+                        context,
+                    );
+                }
+                self.resolve_user_constructor(structure, arguments, span, context)
+                    .1
+            }
+            TypeRef::Native {
+                path,
+                arguments: type_arguments,
+            } => {
+                let instance = NativeInstance {
+                    type_path: path,
+                    arguments: type_arguments.clone(),
+                };
+                let (_, call) = self.resolve_native_callable(
+                    &instance,
+                    CallStyle::Constructor,
+                    instance_short_name(path),
+                    arguments,
+                    span,
+                    None,
+                    context,
+                );
+                call
+            }
+            TypeRef::Reference { .. } | TypeRef::Void | TypeRef::Error | TypeRef::Parameter(_) => {
+                for argument in arguments {
+                    self.resolve_expression(argument, None, context);
+                }
+                self.push(
+                    "RES063",
+                    format!("type `{}` cannot be constructed here", display_type(target)),
+                    span,
+                );
+                None
+            }
+            _ if arguments.len() == 1 => {
+                self.resolve_direct_initialization(target, &arguments[0], span, context)
+            }
+            _ => {
+                for argument in arguments {
+                    self.resolve_expression(argument, None, context);
+                }
+                self.push(
+                    "RES064",
+                    format!(
+                        "primitive `{}` requires exactly one initializer",
+                        display_type(target)
+                    ),
+                    span,
+                );
+                None
+            }
+        }
+    }
+
+    fn resolve_direct_initialization(
+        &mut self,
+        target: &TypeRef,
+        argument: &Expression,
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> Option<ResolvedCall> {
+        let expected = canonical(target);
+        let actual = self.resolve_expression(argument, Some(&expected), context);
+        self.validate_binding(target, &actual, argument.span, "constructor initializer");
+        if canonical(&actual.ty) == expected {
+            Some(ResolvedCall {
+                span,
+                target: CallTarget::Intrinsic(Intrinsic::ValueInitialization {
+                    target: target.clone(),
+                }),
+                return_type: target.clone(),
+            })
+        } else {
+            None
+        }
+    }
+
+    fn resolve_default_call(
+        &mut self,
+        target: &TypeRef,
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> Option<ResolvedCall> {
+        match canonical_ref(target) {
+            TypeRef::Struct { path } => {
+                let structure = self.struct_by_path.get(path).copied()?;
+                self.resolve_user_constructor(structure, &[], span, context)
+                    .1
+            }
+            TypeRef::Native {
+                path,
+                arguments: type_arguments,
+            } => {
+                let instance = NativeInstance {
+                    type_path: path,
+                    arguments: type_arguments.clone(),
+                };
+                let (_, call) = self.resolve_native_callable(
+                    &instance,
+                    CallStyle::Constructor,
+                    instance_short_name(path),
+                    &[],
+                    span,
+                    None,
+                    context,
+                );
+                call
+            }
+            _ => {
+                self.push(
+                    "RES065",
+                    format!(
+                        "field of type `{}` requires an explicit constructor initializer",
+                        display_type(target)
+                    ),
+                    span,
+                );
+                None
             }
         }
     }
@@ -555,7 +1168,7 @@ impl Resolver<'_> {
             }
         } else {
             let ty = declared.unwrap_or(TypeRef::Error);
-            self.resolve_default_construction(&ty, local.span);
+            self.resolve_default_construction(&ty, local.span, context);
             ty
         };
 
@@ -1026,6 +1639,10 @@ impl Resolver<'_> {
                 if let Some(target) = primitive_type(&path.segments) {
                     return self.resolve_primitive_cast(target, arguments, span, context);
                 }
+                if let Some(structure) = self.lookup_struct_path(&path.segments, &context.namespace)
+                {
+                    return self.resolve_user_constructor(structure, arguments, span, context);
+                }
                 match self.lookup_native_instance(path, expected, context, span) {
                     NativeInstanceLookup::Resolved(instance) => {
                         let source_name = instance_short_name(instance.type_path);
@@ -1341,6 +1958,188 @@ impl Resolver<'_> {
             return_type: target.clone(),
         };
         (temporary(target), Some(call))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn resolve_user_constructor(
+        &mut self,
+        structure: StructId,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        let structure_symbol = self.model.structs[structure.0].clone();
+        let candidates = self
+            .constructor_sets
+            .get(&structure)
+            .cloned()
+            .unwrap_or_default();
+        let arity_candidates = candidates
+            .into_iter()
+            .filter(|id| self.model.constructors[id.0].parameters.len() == arguments.len())
+            .collect::<Vec<_>>();
+        if arity_candidates.is_empty() {
+            if arguments.len() == 1 {
+                let target = TypeRef::Struct {
+                    path: structure_symbol.path,
+                };
+                let call =
+                    self.resolve_direct_initialization(&target, &arguments[0], span, context);
+                return match call {
+                    Some(call) => (temporary(target), Some(call)),
+                    None => (error_info(), None),
+                };
+            }
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES059",
+                format!(
+                    "no constructor of `{}` accepts {} argument(s)",
+                    display_path(&structure_symbol.path),
+                    arguments.len()
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+
+        let contextual_parameters = (arity_candidates.len() == 1).then(|| {
+            self.model.constructors[arity_candidates[0].0]
+                .parameters
+                .iter()
+                .map(|parameter| canonical(&parameter.ty))
+                .collect::<Vec<_>>()
+        });
+        let actual = self.resolve_arguments(arguments, contextual_parameters.as_deref(), context);
+        let exact = arity_candidates
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.model.constructors[id.0]
+                    .parameters
+                    .iter()
+                    .map(|parameter| canonical(&parameter.ty))
+                    .eq(actual.iter().map(|argument| canonical(&argument.ty)))
+            })
+            .collect::<Vec<_>>();
+        let compatible = if exact.is_empty() {
+            arity_candidates
+                .iter()
+                .copied()
+                .filter(|id| {
+                    self.model.constructors[id.0]
+                        .parameters
+                        .iter()
+                        .zip(&actual)
+                        .all(|(parameter, argument)| {
+                            self.is_derived_reference_binding(&parameter.ty, &argument.ty)
+                        })
+                })
+                .collect::<Vec<_>>()
+        } else {
+            exact
+        };
+        if compatible.is_empty()
+            && arguments.len() == 1
+            && actual.first().is_some_and(|argument| {
+                canonical(&argument.ty)
+                    == TypeRef::Struct {
+                        path: structure_symbol.path.clone(),
+                    }
+            })
+        {
+            let target = TypeRef::Struct {
+                path: structure_symbol.path,
+            };
+            self.validate_binding(
+                &target,
+                &actual[0],
+                arguments[0].span,
+                "copy-constructor argument",
+            );
+            let call = ResolvedCall {
+                span,
+                target: CallTarget::Intrinsic(Intrinsic::ValueInitialization {
+                    target: target.clone(),
+                }),
+                return_type: target.clone(),
+            };
+            return (temporary(target), Some(call));
+        }
+        if compatible.len() != 1 {
+            let displayed_candidates = if compatible.is_empty() {
+                &arity_candidates
+            } else {
+                &compatible
+            }
+            .iter()
+            .map(|id| {
+                display_constructor_signature(&self.model.constructors[id.0], &structure_symbol)
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+            let message = if compatible.is_empty() {
+                format!(
+                    "no exact constructor of `{}` matches ({}); candidates: {displayed_candidates}",
+                    display_path(&structure_symbol.path),
+                    display_argument_types(&actual)
+                )
+            } else {
+                format!(
+                    "constructor call for `{}` is ambiguous for ({}); candidates: {displayed_candidates}",
+                    display_path(&structure_symbol.path),
+                    display_argument_types(&actual)
+                )
+            };
+            self.push("RES060", message, span);
+            return (error_info(), None);
+        }
+
+        let id = compatible[0];
+        let symbol = self.model.constructors[id.0].clone();
+        for ((parameter, argument), expression) in
+            symbol.parameters.iter().zip(&actual).zip(arguments)
+        {
+            self.validate_binding(
+                &parameter.ty,
+                argument,
+                expression.span,
+                "constructor argument",
+            );
+        }
+        if symbol.is_deleted {
+            self.push(
+                "RES066",
+                format!(
+                    "selected constructor of `{}` is deleted",
+                    display_path(&structure_symbol.path)
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+        if !symbol.has_definition {
+            self.push(
+                "RES067",
+                format!(
+                    "selected constructor of `{}` has no out-of-struct definition",
+                    display_path(&structure_symbol.path)
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+        let return_type = TypeRef::Struct {
+            path: structure_symbol.path,
+        };
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Constructor(id),
+            return_type: return_type.clone(),
+        };
+        (temporary(return_type), Some(call))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1794,87 +2593,15 @@ impl Resolver<'_> {
         }
     }
 
-    fn resolve_default_construction(&mut self, ty: &TypeRef, span: Span) {
-        let canonical_type = canonical(ty);
-        if let TypeRef::Struct { path } = &canonical_type {
-            let Some(id) = self.struct_by_path.get(path).copied() else {
-                return;
-            };
-            let structure = &self.model.structs[id.0];
-            let initializer_count = usize::from(structure.base.is_some()) + structure.fields.len();
-            if initializer_count != 0 {
-                self.push(
-                    "RES030",
-                    format!(
-                        "struct `{}` has no implicit default constructor because it has data fields",
-                        display_path(path)
-                    ),
-                    span,
-                );
-                return;
-            }
-            self.model.calls.push(ResolvedCall {
-                span,
-                target: CallTarget::Intrinsic(Intrinsic::StructAggregate { structure: id }),
-                return_type: canonical_type,
-            });
-            return;
+    fn resolve_default_construction(
+        &mut self,
+        ty: &TypeRef,
+        span: Span,
+        context: &mut FunctionContext,
+    ) {
+        if let Some(call) = self.resolve_default_call(ty, span, context) {
+            self.model.calls.push(call);
         }
-        let TypeRef::Native { path, arguments } = canonical_type else {
-            if canonical_type != TypeRef::Error {
-                self.push(
-                    "RES030",
-                    format!(
-                        "type `{}` has no implicit default constructor",
-                        display_type(&canonical_type)
-                    ),
-                    span,
-                );
-            }
-            return;
-        };
-        let instance = NativeInstance {
-            type_path: path,
-            arguments,
-        };
-        let Some(binding) = self.bindings.type_by_path(path) else {
-            self.push(
-                "RES030",
-                format!("type `{path}` has no registered default constructor"),
-                span,
-            );
-            return;
-        };
-        let Some(callable) = binding.callables.iter().find(|callable| {
-            callable.style == CallStyle::Constructor && callable.parameters.is_empty()
-        }) else {
-            self.push(
-                "RES030",
-                format!(
-                    "type `{}` has no registered default constructor",
-                    display_native_instance(&instance)
-                ),
-                span,
-            );
-            return;
-        };
-        let candidate = instantiate_callable(binding, &instance.arguments, callable);
-        let call = ResolvedCall {
-            span,
-            target: CallTarget::Native(NativeCall {
-                type_path: path,
-                style: CallStyle::Constructor,
-                source_name: callable.source_name,
-                receiver: None,
-                parameter_types: Vec::new(),
-                adaptations: Vec::new(),
-                return_type: candidate.return_type.clone(),
-                lowering: callable.lowering.clone(),
-                requirements: candidate.requirements,
-            }),
-            return_type: candidate.return_type,
-        };
-        self.model.calls.push(call);
     }
 
     fn lookup_native_instance(
@@ -2541,6 +3268,22 @@ fn display_function_signature(function: &FunctionSymbol) -> String {
         "{}({})",
         display_path(&function.path),
         function
+            .parameters
+            .iter()
+            .map(|parameter| display_type(&parameter.ty))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn display_constructor_signature(
+    constructor: &crate::resolution::ConstructorSymbol,
+    structure: &StructSymbol,
+) -> String {
+    format!(
+        "{}({})",
+        display_path(&structure.path),
+        constructor
             .parameters
             .iter()
             .map(|parameter| display_type(&parameter.ty))

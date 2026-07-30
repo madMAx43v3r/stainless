@@ -16,9 +16,20 @@ pub(crate) fn lower(
         diagnostics: Vec::new(),
         current_return_type: None,
         current_fluent_receiver: false,
+        current_constructor: false,
     };
     let lowered_structs = lowerer.lower_structs(&source.items);
-    let lowered_functions = lowerer.lower_functions(&source.items);
+    let mut lowered_functions = lowerer.lower_functions(&source.items);
+    lowered_functions.extend(lowerer.lower_constructors(&source.items));
+    for constructor in semantics
+        .constructors
+        .iter()
+        .filter(|constructor| constructor.synthesized && !constructor.is_deleted)
+    {
+        if let Some(constructor) = lowerer.lower_constructor_symbol(constructor, None) {
+            lowered_functions.push(constructor);
+        }
+    }
     let mut program = hir::Program {
         structs: Vec::new(),
         functions: Vec::new(),
@@ -55,6 +66,7 @@ struct Lowerer<'a> {
     diagnostics: Vec<Diagnostic>,
     current_return_type: Option<TypeRef>,
     current_fluent_receiver: bool,
+    current_constructor: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -114,7 +126,7 @@ impl Lowerer<'_> {
                         fields,
                     });
                 }
-                Item::Use(_) | Item::Function(_) => {}
+                Item::Use(_) | Item::Constructor(_) | Item::Function(_) => {}
             }
         }
         structs
@@ -139,10 +151,179 @@ impl Lowerer<'_> {
                         }
                     }
                 }
-                Item::Use(_) => {}
+                Item::Use(_) | Item::Constructor(_) => {}
             }
         }
         functions
+    }
+
+    fn lower_constructors(&mut self, items: &[Item]) -> Vec<hir::Function> {
+        let mut constructors = Vec::new();
+        for item in items {
+            match item {
+                Item::Constructor(constructor) if constructor.body.is_some() => {
+                    let Some(symbol) = self.semantics.constructor_at(constructor.span).cloned()
+                    else {
+                        self.push(
+                            "HIR016",
+                            "resolved constructor symbol is missing".to_owned(),
+                            constructor.span,
+                        );
+                        continue;
+                    };
+                    if let Some(lowered) = self.lower_constructor_symbol(&symbol, Some(constructor))
+                    {
+                        constructors.push(lowered);
+                    }
+                }
+                Item::Namespace(namespace) => {
+                    constructors.extend(self.lower_constructors(&namespace.items));
+                }
+                Item::Struct(structure) => {
+                    for constructor in &structure.constructors {
+                        if constructor.body.is_some()
+                            && let Some(symbol) =
+                                self.semantics.constructor_at(constructor.span).cloned()
+                            && let Some(lowered) =
+                                self.lower_constructor_symbol(&symbol, Some(constructor))
+                        {
+                            constructors.push(lowered);
+                        }
+                    }
+                }
+                Item::Constructor(_) | Item::Use(_) | Item::Function(_) => {}
+            }
+        }
+        constructors
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn lower_constructor_symbol(
+        &mut self,
+        symbol: &crate::resolution::ConstructorSymbol,
+        syntax: Option<&ast::Constructor>,
+    ) -> Option<hir::Function> {
+        let structure = self.semantics.structure(symbol.structure)?.clone();
+        let span = syntax.map_or(structure.span, |constructor| constructor.span);
+        if syntax.is_some_and(|constructor| !constructor.throws.is_empty()) {
+            self.push(
+                "HIR001",
+                "checked-exception lowering is not implemented yet".to_owned(),
+                span,
+            );
+            return None;
+        }
+        let parameters = match syntax {
+            Some(syntax) => {
+                if syntax.parameters.len() != symbol.parameters.len() {
+                    self.push(
+                        "HIR016",
+                        "resolved constructor parameters do not match the syntax tree".to_owned(),
+                        span,
+                    );
+                    return None;
+                }
+                syntax
+                    .parameters
+                    .iter()
+                    .zip(&symbol.parameters)
+                    .map(|(syntax, resolved)| {
+                        Some(hir::Parameter {
+                            source_name: syntax.name.clone(),
+                            rust_name: binding_name(&syntax.name),
+                            ty: self.lower_type(&resolved.ty, syntax.ty.span)?,
+                            mutable: !resolved.ty.is_reference() && !syntax.ty.is_const,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?
+            }
+            None => Vec::new(),
+        };
+        let struct_type = TypeRef::Struct {
+            path: structure.path.clone(),
+        };
+        let fields = symbol
+            .initializations
+            .iter()
+            .map(|initialization| {
+                let arguments = match initialization.source {
+                    Some(source) => syntax?
+                        .initializers
+                        .iter()
+                        .find(|initializer| initializer.span == source)?
+                        .arguments
+                        .as_slice(),
+                    None => &[],
+                };
+                Some((
+                    initialization.rust_name.clone(),
+                    self.lower_resolved_call(&initialization.call, None, arguments)?,
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let lowered_type = self.lower_type(&struct_type, span)?;
+        let mut statements = vec![
+            hir::Statement::Let {
+                name: "__stainless_constructed".to_owned(),
+                ty: lowered_type.clone(),
+                mutable: true,
+                initializer: hir::Expression::Aggregate {
+                    ty: lowered_type.clone(),
+                    fields,
+                },
+            },
+            hir::Statement::Let {
+                name: "__stainless_self".to_owned(),
+                ty: hir::Type::Reference {
+                    mutable: true,
+                    target: Box::new(lowered_type.clone()),
+                },
+                mutable: false,
+                initializer: hir::Expression::Borrow {
+                    mutable: true,
+                    expression: Box::new(hir::Expression::Name(
+                        "__stainless_constructed".to_owned(),
+                    )),
+                },
+            },
+        ];
+
+        let previous_return_type = self.current_return_type.replace(struct_type);
+        let previous_fluent_receiver = self.current_fluent_receiver;
+        let previous_constructor = self.current_constructor;
+        self.current_fluent_receiver = false;
+        self.current_constructor = true;
+        let lowered_body = match syntax.and_then(|constructor| constructor.body.as_ref()) {
+            Some(body) => self.lower_block(body)?,
+            None => hir::Block {
+                statements: Vec::new(),
+            },
+        };
+        self.current_return_type = previous_return_type;
+        self.current_fluent_receiver = previous_fluent_receiver;
+        self.current_constructor = previous_constructor;
+        statements.extend(lowered_body.statements);
+        statements.push(hir::Statement::Return(Some(hir::Expression::Name(
+            "__stainless_constructed".to_owned(),
+        ))));
+
+        let mut source_path = structure.path.clone();
+        source_path.push(
+            structure
+                .path
+                .last()
+                .cloned()
+                .unwrap_or_else(|| "<missing>".to_owned()),
+        );
+        Some(hir::Function {
+            source_path,
+            module_path: structure.path[..structure.path.len().saturating_sub(1)].to_vec(),
+            rust_name: symbol.mangled_name.clone(),
+            parameters,
+            return_type: lowered_type,
+            body: hir::Block { statements },
+            span,
+        })
     }
 
     fn lower_function(&mut self, function: &ast::Function) -> Option<hir::Function> {
@@ -268,6 +449,9 @@ impl Lowerer<'_> {
                             return None;
                         };
                         Some(self.lower_bound_expression(value, &return_type)?)
+                    }
+                    None if self.current_constructor => {
+                        Some(hir::Expression::Name("__stainless_constructed".to_owned()))
                     }
                     None if self.current_fluent_receiver => {
                         Some(hir::Expression::Name("__stainless_self".to_owned()))
@@ -725,6 +909,32 @@ impl Lowerer<'_> {
                     arguments: lowered_arguments,
                 })
             }
+            CallTarget::Constructor(id) => {
+                let Some(constructor) = self.semantics.constructor(*id) else {
+                    self.push(
+                        "HIR016",
+                        "resolved constructor call points to a missing constructor".to_owned(),
+                        call.span,
+                    );
+                    return None;
+                };
+                let structure = self.semantics.structure(constructor.structure)?;
+                let lowered_arguments = arguments
+                    .iter()
+                    .zip(&constructor.parameters)
+                    .map(|(argument, parameter)| {
+                        self.lower_bound_expression(argument, &parameter.ty)
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(hir::Expression::FunctionCall {
+                    modules: structure.path[..structure.path.len().saturating_sub(1)]
+                        .iter()
+                        .map(|name| module_name(name))
+                        .collect(),
+                    function: constructor.mangled_name.clone(),
+                    arguments: lowered_arguments,
+                })
+            }
             CallTarget::Native(native) => {
                 self.lower_native_call(native, callee, arguments, call.span)
             }
@@ -740,6 +950,10 @@ impl Lowerer<'_> {
                     expression: Box::new(self.lower_expression(expression, ExpressionMode::Value)?),
                     target: self.lower_type(target, call.span)?,
                 })
+            }
+            CallTarget::Intrinsic(Intrinsic::ValueInitialization { target }) => {
+                let expression = arguments.first()?;
+                self.lower_bound_expression(expression, target)
             }
             CallTarget::Intrinsic(Intrinsic::StructAggregate { structure }) => {
                 let symbol = self.semantics.structure(*structure)?;

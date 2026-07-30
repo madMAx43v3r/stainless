@@ -199,6 +199,10 @@ fn transpiles_and_compiles_resolved_reference_programs() {
             "range_for",
             include_str!("../../../docs/ref/13_range_for.stl"),
         ),
+        (
+            "constructors",
+            include_str!("../../../docs/ref/14_constructors.stl"),
+        ),
     ] {
         let result = transpile(source);
         assert!(
@@ -287,6 +291,77 @@ fn main() {{
         String::from_utf8_lossy(&output.stderr)
     );
     remove_temporary_parent(&binary);
+}
+
+#[test]
+fn constructors_initialize_bases_fields_and_synthesized_defaults() {
+    let source = r#"use rust::{String, Vec};
+
+namespace samples {
+
+struct Base {
+    i32 value;
+    Base(i32 value);
+};
+
+Base::Base(i32 value) : value(value) {
+}
+
+struct Derived : Base {
+    String label;
+    Derived(i32 initial_value, const String& label);
+};
+
+Derived::Derived(i32 initial_value, const String& label)
+    : Base(initial_value), label(label) {
+    value += 1;
+}
+
+struct Defaults {
+    Vec<i32> values;
+};
+
+i32 constructor_result() {
+    Derived value = Derived(7, "abc");
+    Defaults defaults;
+    defaults.values.push(5);
+    return value.value + i32(value.label.len()) + i32(defaults.values.len());
+}
+
+}
+"#;
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:?}",
+        result.analysis.diagnostics
+    );
+    let function = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "constructor_result"])
+        .expect("constructor_result symbol")
+        .mangled_name
+        .clone();
+    let mut rust = result.rust.expect("constructors should emit Rust");
+    write!(
+        rust,
+        "\nfn main() {{ assert_eq!(__stainless_namespace_samples::{function}(), 12); }}\n"
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("constructors", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .expect("generated constructor program should run");
+    assert!(
+        output.status.success(),
+        "status: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

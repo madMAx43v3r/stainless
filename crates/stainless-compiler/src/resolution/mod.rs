@@ -18,6 +18,10 @@ pub struct FunctionId(pub usize);
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StructId(pub usize);
 
+/// Stable index of a resolved Stainless constructor.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ConstructorId(pub usize);
+
 /// One resolved direct data field.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FieldSymbol {
@@ -51,6 +55,45 @@ pub struct StructReceiver {
     pub structure: StructId,
     /// Whether the member function may mutate its receiver.
     pub mutable: bool,
+}
+
+/// A resolved user-defined or synthesized struct constructor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ConstructorSymbol {
+    /// Stable semantic ID.
+    pub id: ConstructorId,
+    /// Constructed struct.
+    pub structure: StructId,
+    /// Resolved parameters.
+    pub parameters: Vec<ParameterSymbol>,
+    /// Deterministic generated Rust function name.
+    pub mangled_name: String,
+    /// All matching declaration/definition ranges.
+    pub declarations: Vec<Span>,
+    /// Whether an out-of-struct body exists or the constructor is synthesized.
+    pub has_definition: bool,
+    /// Whether the signature appeared inside the struct body.
+    pub has_member_declaration: bool,
+    /// Whether construction is explicitly or implicitly deleted.
+    pub is_deleted: bool,
+    /// Whether the compiler synthesized this default constructor.
+    pub synthesized: bool,
+    /// Base and direct-field construction in representation order.
+    pub initializations: Vec<ConstructorFieldInitialization>,
+}
+
+/// One resolved base or field initialization performed by a constructor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConstructorFieldInitialization {
+    /// Generated Rust representation field.
+    pub rust_name: String,
+    /// Field type.
+    pub ty: TypeRef,
+    /// Explicit initializer span, absent for implicit default construction.
+    pub source: Option<Span>,
+    /// Selected construction operation.
+    pub call: ResolvedCall,
 }
 
 /// A resolved function parameter.
@@ -150,6 +193,8 @@ pub struct ResolvedCall {
 pub enum CallTarget {
     /// A Stainless-defined free function.
     Stainless(FunctionId),
+    /// A user-defined or synthesized struct constructor.
+    Constructor(ConstructorId),
     /// A compiler-described native Rust callable.
     Native(NativeCall),
     /// A compiler language operation.
@@ -203,6 +248,11 @@ pub enum Intrinsic {
         /// Constructed struct.
         structure: StructId,
     },
+    /// Direct initialization from one exact value.
+    ValueInitialization {
+        /// Constructed value type.
+        target: TypeRef,
+    },
 }
 
 /// Successfully retained semantic facts for one source file.
@@ -210,6 +260,8 @@ pub enum Intrinsic {
 pub struct SemanticModel {
     /// Resolved Stainless struct definitions.
     pub structs: Vec<StructSymbol>,
+    /// Resolved user-defined and synthesized constructors.
+    pub constructors: Vec<ConstructorSymbol>,
     /// Resolved Stainless functions.
     pub functions: Vec<FunctionSymbol>,
     /// Expression facts in traversal order.
@@ -225,6 +277,20 @@ impl SemanticModel {
     #[must_use]
     pub fn structure(&self, id: StructId) -> Option<&StructSymbol> {
         self.structs.get(id.0)
+    }
+
+    /// Finds a constructor by stable semantic ID.
+    #[must_use]
+    pub fn constructor(&self, id: ConstructorId) -> Option<&ConstructorSymbol> {
+        self.constructors.get(id.0)
+    }
+
+    /// Finds the constructor associated with a declaration or definition.
+    #[must_use]
+    pub fn constructor_at(&self, span: Span) -> Option<&ConstructorSymbol> {
+        self.constructors
+            .iter()
+            .find(|constructor| constructor.declarations.contains(&span))
     }
 
     /// Finds the struct declared at an exact source span.

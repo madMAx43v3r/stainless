@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use crate::Diagnostic;
 use crate::ast::{
-    Block, ForClause, ForInitializer, Function, Item, LocalDeclaration, SourceFile, Statement,
-    StatementKind,
+    Block, Constructor, ForClause, ForInitializer, Function, Item, LocalDeclaration, Parameter,
+    SourceFile, Statement, StatementKind,
 };
 
 /// Validates structural rules over a lowered source file.
@@ -35,6 +35,16 @@ impl Validator {
             match item {
                 Item::Namespace(namespace) => self.items(&namespace.items),
                 Item::Struct(structure) => {
+                    for constructor in &structure.constructors {
+                        if constructor.body.is_some() {
+                            self.push(
+                                "SEM010",
+                                "constructors must be defined outside the struct body".to_owned(),
+                                constructor.span,
+                            );
+                        }
+                        self.constructor(constructor);
+                    }
                     for function in &structure.functions {
                         if function.body.is_some() {
                             self.push(
@@ -47,6 +57,7 @@ impl Validator {
                         self.function(function);
                     }
                 }
+                Item::Constructor(constructor) => self.constructor(constructor),
                 Item::Function(function) => self.function(function),
                 Item::Use(_) => {}
             }
@@ -54,8 +65,23 @@ impl Validator {
     }
 
     fn function(&mut self, function: &Function) {
+        self.parameters(&function.parameters);
+
+        if let Some(body) = &function.body {
+            self.block(body, 0, function.return_type.is_void());
+        }
+    }
+
+    fn constructor(&mut self, constructor: &Constructor) {
+        self.parameters(&constructor.parameters);
+        if let Some(body) = &constructor.body {
+            self.block(body, 0, true);
+        }
+    }
+
+    fn parameters(&mut self, parameters: &[Parameter]) {
         let mut parameter_names = BTreeMap::new();
-        for parameter in &function.parameters {
+        for parameter in parameters {
             if parameter.name == "<missing>" {
                 continue;
             }
@@ -69,10 +95,6 @@ impl Validator {
                     parameter.span,
                 );
             }
-        }
-
-        if let Some(body) = &function.body {
-            self.block(body, 0, function.return_type.is_void());
         }
     }
 

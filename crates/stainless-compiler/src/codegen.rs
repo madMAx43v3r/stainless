@@ -117,7 +117,7 @@ impl Emitter {
         let body = self.block(&function.body)?;
         let generics = explicit_lifetime.then(|| quote!(<'__stainless_borrow>));
         Ok(quote! {
-            #[allow(non_snake_case, unused_mut, unused_parens)]
+            #[allow(non_snake_case, unused_mut, unused_parens, unused_variables)]
             pub fn #name #generics (#(#parameters),*) -> #return_type #body
         })
     }

@@ -172,16 +172,53 @@ impl Analyzer<'_> {
             match item {
                 Item::Namespace(namespace) => self.items(&namespace.items),
                 Item::Struct(structure) => {
+                    for constructor in &structure.constructors {
+                        if constructor.body.is_some() {
+                            self.constructor(constructor);
+                        }
+                    }
                     for function in &structure.functions {
                         if function.body.is_some() {
                             self.function(function);
                         }
                     }
                 }
+                Item::Constructor(constructor) if constructor.body.is_some() => {
+                    self.constructor(constructor);
+                }
                 Item::Function(function) if function.body.is_some() => self.function(function),
-                Item::Function(_) | Item::Use(_) => {}
+                Item::Constructor(_) | Item::Function(_) | Item::Use(_) => {}
             }
         }
+    }
+
+    fn constructor(&mut self, constructor: &ast::Constructor) {
+        let Some(symbol) = self.semantics.constructor_at(constructor.span).cloned() else {
+            return;
+        };
+        self.state = FlowState::default();
+        self.state.push_scope();
+        for (syntax, resolved) in constructor.parameters.iter().zip(&symbol.parameters) {
+            self.state.declare(
+                syntax.name.clone(),
+                resolved.ty.clone(),
+                None,
+                syntax.span,
+                self.last_uses.get(&syntax.span).copied(),
+                self.loop_depth,
+            );
+        }
+        for initializer in &constructor.initializers {
+            for argument in &initializer.arguments {
+                self.expression(argument, Usage::Read);
+            }
+        }
+        self.return_borrow = None;
+        self.returns_reference = false;
+        if let Some(body) = &constructor.body {
+            self.block(body, false);
+        }
+        self.state.pop_scope();
     }
 
     fn function(&mut self, function: &ast::Function) {
@@ -648,6 +685,7 @@ impl Analyzer<'_> {
         self.expression(expression, Usage::Mutate);
     }
 
+    #[allow(clippy::too_many_lines)]
     fn call(
         &mut self,
         expression: &ast::Expression,
@@ -668,7 +706,9 @@ impl Analyzer<'_> {
                 }
                 None
             }
-            CallTarget::Intrinsic(Intrinsic::PrimitiveCast { .. }) => {
+            CallTarget::Intrinsic(
+                Intrinsic::PrimitiveCast { .. } | Intrinsic::ValueInitialization { .. },
+            ) => {
                 if let Some(argument) = arguments.first() {
                     self.expression(argument, Usage::Read);
                 }
@@ -713,6 +753,14 @@ impl Analyzer<'_> {
                 }
                 return_borrow_parameter(&function)
                     .and_then(|index| origins.get(index).copied().flatten())
+            }
+            CallTarget::Constructor(id) => {
+                let constructor = self.semantics.constructor(*id)?.clone();
+                self.call_arguments(
+                    arguments,
+                    constructor.parameters.iter().map(|parameter| &parameter.ty),
+                );
+                None
             }
             CallTarget::Native(native) => {
                 let mut receiver_loan = None;
@@ -1104,16 +1152,40 @@ impl UseCollector {
             match item {
                 Item::Namespace(namespace) => self.items(&namespace.items),
                 Item::Struct(structure) => {
+                    for constructor in &structure.constructors {
+                        if constructor.body.is_some() {
+                            self.constructor(constructor);
+                        }
+                    }
                     for function in &structure.functions {
                         if function.body.is_some() {
                             self.function(function);
                         }
                     }
                 }
+                Item::Constructor(constructor) if constructor.body.is_some() => {
+                    self.constructor(constructor);
+                }
                 Item::Function(function) if function.body.is_some() => self.function(function),
-                Item::Function(_) | Item::Use(_) => {}
+                Item::Constructor(_) | Item::Function(_) | Item::Use(_) => {}
             }
         }
+    }
+
+    fn constructor(&mut self, constructor: &ast::Constructor) {
+        self.push_scope();
+        for parameter in &constructor.parameters {
+            self.declare(&parameter.name, parameter.span);
+        }
+        for initializer in &constructor.initializers {
+            for argument in &initializer.arguments {
+                self.expression(argument);
+            }
+        }
+        if let Some(body) = &constructor.body {
+            self.block(body, false);
+        }
+        self.scopes.pop();
     }
 
     fn function(&mut self, function: &ast::Function) {
