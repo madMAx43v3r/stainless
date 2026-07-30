@@ -811,6 +811,13 @@ impl Lowerer<'_> {
         expression: &ast::Expression,
         expected: &TypeRef,
     ) -> Option<hir::Expression> {
+        if let Some(adaptation) = self.semantics.rust_result_adaptation(expression.span) {
+            return Some(hir::Expression::UnwrapRustResult {
+                expression: Box::new(self.lower_expression(expression, ExpressionMode::Value)?),
+                error_message: lower_rust_error_message(adaptation.error_message),
+                target: self.exception_target.clone(),
+            });
+        }
         let resolution = self.semantics.expression(expression.span);
         if let TypeRef::Reference {
             mutable,
@@ -1033,6 +1040,10 @@ impl Lowerer<'_> {
         callee: Option<&ast::Expression>,
         arguments: &[ast::Expression],
     ) -> Option<hir::Expression> {
+        let handles_checked_effect = matches!(
+            call.target,
+            CallTarget::Intrinsic(Intrinsic::UnwrapRustResult { .. })
+        );
         let lowered = match &call.target {
             CallTarget::Stainless(id) => {
                 let Some(function) = self.semantics.function(*id) else {
@@ -1125,6 +1136,25 @@ impl Lowerer<'_> {
                     self.lower_expression(argument, ExpressionMode::Value)?,
                 )))
             }
+            CallTarget::Intrinsic(Intrinsic::UnwrapRustResult { error_message }) => {
+                let Some(ast::Expression {
+                    kind: ExpressionKind::Field { receiver, .. },
+                    ..
+                }) = callee
+                else {
+                    self.push(
+                        "HIR011",
+                        "native Result unwrap has no receiver".to_owned(),
+                        call.span,
+                    );
+                    return None;
+                };
+                Some(hir::Expression::UnwrapRustResult {
+                    expression: Box::new(self.lower_expression(receiver, ExpressionMode::Value)?),
+                    error_message: lower_rust_error_message(*error_message),
+                    target: self.exception_target.clone(),
+                })
+            }
             CallTarget::Intrinsic(Intrinsic::PrimitiveCast { target }) => {
                 let expression = arguments.first()?;
                 Some(hir::Expression::Cast {
@@ -1188,7 +1218,7 @@ impl Lowerer<'_> {
                 })
             }
         }?;
-        if call.throws.is_empty() {
+        if call.throws.is_empty() || handles_checked_effect {
             Some(lowered)
         } else {
             Some(hir::Expression::Propagate {
@@ -1352,6 +1382,8 @@ fn native_type_path(
     match path {
         "rust::String" => Some("::std::string::String"),
         "rust::Vec" => Some("::std::vec::Vec"),
+        "rust::Option" => Some("::std::option::Option"),
+        "rust::Result" => Some("::std::result::Result"),
         _ => {
             diagnostics.push(Diagnostic::hir(
                 "HIR014",
@@ -1360,6 +1392,13 @@ fn native_type_path(
             ));
             None
         }
+    }
+}
+
+fn lower_rust_error_message(message: crate::resolution::RustErrorMessage) -> hir::RustErrorMessage {
+    match message {
+        crate::resolution::RustErrorMessage::Display => hir::RustErrorMessage::Display,
+        crate::resolution::RustErrorMessage::Fallback => hir::RustErrorMessage::Fallback,
     }
 }
 

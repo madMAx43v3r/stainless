@@ -1,0 +1,45 @@
+// Compiler-supported native Rust Result adaptation.
+// Result stays a Rust type until an explicit .unwrap() or an exact
+// target-typed initialization/assignment converts it to the success type.
+
+use rust::{Result, String, Vec};
+
+namespace samples {
+
+i32 explicit_unwrap(
+    Result<i32, String> result
+) throws stainless::RustError {
+    // Unlike Rust's panicking Result::unwrap, this consumes result and throws
+    // a checked stainless::RustError on Err.
+    return result.unwrap();
+}
+
+i32 implicit_unwrap(
+    Result<i32, String> result
+) throws stainless::RustError {
+    // A named Result must still be moved. The exact i32 target then inserts
+    // the same checked conversion as .unwrap().
+    i32 value = move(result);
+    return value;
+}
+
+i32 handled_unwrap(Result<i32, String> result) {
+    try {
+        return result.unwrap();
+    } catch (const stainless::RustError& error) {
+        // String implements Display, so its text becomes the message.
+        return i32(error.message.len());
+    }
+}
+
+i32 fallback_message(Result<i32, Vec<i32>> result) {
+    try {
+        return result.unwrap();
+    } catch (const stainless::RustError& error) {
+        // Vec<i32> has no currently proven Display representation, so the
+        // compiler uses "native Rust operation failed".
+        return i32(error.message.len());
+    }
+}
+
+} // namespace samples

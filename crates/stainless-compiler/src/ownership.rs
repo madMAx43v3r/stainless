@@ -387,6 +387,13 @@ impl Analyzer<'_> {
         } else {
             if let Some(initializer) = &local.initializer {
                 self.expression(initializer, Usage::Read);
+                if self
+                    .semantics
+                    .rust_result_adaptation(initializer.span)
+                    .is_some()
+                {
+                    self.capture_exception_state();
+                }
             } else if self
                 .semantics
                 .call(local.span)
@@ -725,6 +732,13 @@ impl Analyzer<'_> {
             ExpressionKind::Aggregate { initializers, .. } => {
                 for initializer in initializers {
                     self.expression(initializer, Usage::Read);
+                    if self
+                        .semantics
+                        .rust_result_adaptation(initializer.span)
+                        .is_some()
+                    {
+                        self.capture_exception_state();
+                    }
                 }
                 None
             }
@@ -745,6 +759,9 @@ impl Analyzer<'_> {
     ) {
         if operator == BinaryOperator::Assign {
             self.expression(right, Usage::Read);
+            if self.semantics.rust_result_adaptation(right.span).is_some() {
+                self.capture_exception_state();
+            }
             self.write(left);
         } else if is_compound_assignment(operator) {
             self.expression(right, Usage::Read);
@@ -808,13 +825,33 @@ impl Analyzer<'_> {
                 }
                 None
             }
+            CallTarget::Intrinsic(Intrinsic::UnwrapRustResult { .. }) => {
+                let receiver = call_receiver(expression)?;
+                if let Some(id) = named_binding(receiver, &self.state) {
+                    self.mark_moved(id, expression.span);
+                } else {
+                    self.expression(receiver, Usage::Read);
+                }
+                None
+            }
             CallTarget::Intrinsic(
-                Intrinsic::PrimitiveCast { .. }
-                | Intrinsic::ValueInitialization { .. }
-                | Intrinsic::ExceptionRoot { .. },
+                Intrinsic::PrimitiveCast { .. } | Intrinsic::ExceptionRoot { .. },
             ) => {
                 if let Some(argument) = arguments.first() {
                     self.expression(argument, Usage::Read);
+                }
+                None
+            }
+            CallTarget::Intrinsic(Intrinsic::ValueInitialization { .. }) => {
+                if let Some(argument) = arguments.first() {
+                    self.expression(argument, Usage::Read);
+                    if self
+                        .semantics
+                        .rust_result_adaptation(argument.span)
+                        .is_some()
+                    {
+                        self.capture_exception_state();
+                    }
                 }
                 None
             }
@@ -1198,6 +1235,16 @@ fn named_binding(expression: &ast::Expression, state: &FlowState) -> Option<Bind
         ExpressionKind::Parenthesized(inner) => named_binding(inner, state),
         _ => None,
     }
+}
+
+fn call_receiver(expression: &ast::Expression) -> Option<&ast::Expression> {
+    let ExpressionKind::Call { callee, .. } = &expression.kind else {
+        return None;
+    };
+    let ExpressionKind::Field { receiver, .. } = &callee.kind else {
+        return None;
+    };
+    Some(receiver)
 }
 
 fn is_move_call(semantics: &SemanticModel, expression: &ast::Expression) -> bool {

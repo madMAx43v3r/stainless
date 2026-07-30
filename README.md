@@ -78,14 +78,18 @@ implemented:
 - [`15_checked_exception_subset.stl`](docs/ref/15_checked_exception_subset.stl)
   — the currently compiler-supported checked exception, throwing constructor,
   typed catch, base catch, and bare-rethrow subset.
+- [`16_native_result_unwrap.stl`](docs/ref/16_native_result_unwrap.stl) — the
+  compiler-supported explicit and target-typed native `Result<T, E>` conversion
+  to checked `stainless::RustError`.
 
 `01_basics.stl`, `02_structs_and_data_inheritance.stl`,
 `11_vec_and_string.stl`, `13_range_for.stl`, and `14_constructors.stl` are
 currently parsed, resolved, lowered to HIR, emitted as Rust, and compiled by
 `rustc` in the test suite, as is the focused
-`15_checked_exception_subset.stl` sample. Other samples remain forward-looking
-and must become explicit parser, diagnostic, and transpilation fixtures rather
-than being allowed to drift from the implementation.
+`15_checked_exception_subset.stl` sample and the native-Result
+`16_native_result_unwrap.stl` sample. Other samples remain forward-looking and
+must become explicit parser, diagnostic, and transpilation fixtures rather than
+being allowed to drift from the implementation.
 
 ## Language boundaries
 
@@ -1414,6 +1418,11 @@ failed"`. This choice is made statically from verified Rust trait metadata; it
 does not use unsafe inspection or unstable specialization. The original `E`
 value is consumed and dropped after the message is produced.
 
+The initial implementation proves `Display` for primitive error values and
+`rust::String`; other error types currently receive the fixed fallback.
+Generalized `Display`/`Debug` proof from external Rust binding metadata remains
+future work.
+
 This compiler-generated match replaces Rust's panicking `Result::unwrap`,
 keeping panic unwinding outside the Stainless exception model. Crate entry
 points and thread entry functions initially require an empty exception set, so
@@ -2063,6 +2072,9 @@ The initial `stainless_compiler::resolution` pass now provides:
 - exception-struct hierarchy validation, normalized checked `throws` sets,
   mandatory catch-or-declare checking, ordered base/derived handlers, and
   propagation through calls and constructor initialization;
+- consuming native `rust::Result<T, E>.unwrap()` resolution plus exact
+  target-typed Result-to-success adaptation for initialization and assignment,
+  both with checked `stainless::RustError` effects;
 - concrete `rust::Vec<T>`/`rust::String` constructor, associated-function, and
   method resolution, including generic substitution, receiver mutability,
   consuming-receiver checks, Rust argument adaptations, and default
@@ -2083,6 +2095,9 @@ resolution and before HIR construction. For the implemented subset it:
   across a loop that may repeat;
 - treats consuming ranges as definite moves and checks moves inside potentially
   repeated classic/range loop bodies;
+- treats an explicit native `Result.unwrap()` and an inserted target-typed
+  Result conversion as consuming operations and preserves their exceptional
+  ownership paths;
 - verifies that a direct reference return ultimately originates from the
   function's single reference parameter.
 
@@ -2108,26 +2123,29 @@ defined Rust semantics, it returns no Rust. For the accepted subset it now:
 - lowers checked functions and constructors to Rust `Result`, throws to a
   boxed compiler-private error carrier, and typed catches to safe base
   projection without `unsafe`;
+- lowers native `Result` conversion to an inline non-panicking `match` that
+  constructs and propagates a checked `stainless::RustError`;
 - emits deterministic Rust with `proc-macro2` and `quote`, validates the
   generated token tree by parsing it with `syn`, and formats it with
   `prettyplease`;
-- compiles all six supported reference files as Rust libraries in integration
+- compiles all seven supported reference files as Rust libraries in integration
   tests and executes a generated behavior fixture covering functions, borrows,
   loops, structs, memberwise copying, data inheritance, `Vec`, `String`, and
   moves, plus checked-exception fixtures covering propagation, typed/base
-  catches, bare rethrow, and throwing constructors.
+  catches, bare rethrow, throwing constructors, and native `Result`
+  conversion.
 
 This is still not full semantic validation. Classes, interfaces, access
-control, ownership pointers, cross-file modules, native `Result`-to-
-`stainless::RustError` adaptation, ownership through fields and future pointer
-types, full path-sensitive loop-exit precision, general borrow lifetimes,
-member/native returned-reference provenance, and native trait satisfaction
-remain unresolved. Struct member functions and constructors currently lower
-to deterministically named Rust free functions. Member functions receive an
-explicit hidden receiver; constructors create a hidden mutable borrow only
-after assembling every field. This preserves static dispatch while overloaded
-Rust `impl` emission remains future work. Accepting an AST shape therefore
-still does not imply that all ownership or type semantics are valid.
+control, ownership pointers, cross-file modules, ownership through fields and
+future pointer types, full path-sensitive loop-exit precision, general borrow
+lifetimes, member/native returned-reference provenance, and generalized native
+trait satisfaction remain unresolved. Struct member functions and constructors
+currently lower to deterministically named Rust free functions. Member
+functions receive an explicit hidden receiver; constructors create a hidden
+mutable borrow only after assembling every field. This preserves static
+dispatch while overloaded Rust `impl` emission remains future work. Accepting
+an AST shape therefore still does not imply that all ownership or type
+semantics are valid.
 
 ## Cargo integration and compiler packaging
 

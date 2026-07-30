@@ -229,6 +229,15 @@ pub enum ExceptionTarget {
     Unreachable,
 }
 
+/// Statically selected conversion from a native Rust error to a message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RustErrorMessage {
+    /// Call the proven Rust `Display`/`ToString` implementation.
+    Display,
+    /// Consume the error and use a fixed message.
+    Fallback,
+}
+
 /// One checked-exception handler.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Catch {
@@ -299,6 +308,15 @@ pub enum Expression {
     /// Explicitly consume a binding, even when the surrounding context borrows
     /// the resulting temporary.
     Move(Box<Expression>),
+    /// Consume a native Rust Result, converting `Err` to checked `RustError`.
+    UnwrapRustResult {
+        /// Native `Result<T, E>` expression.
+        expression: Box<Expression>,
+        /// Statically selected error-message conversion.
+        error_message: RustErrorMessage,
+        /// Active checked boundary.
+        target: ExceptionTarget,
+    },
     /// Convert a normal return value into `Ok`.
     Success(Option<Box<Expression>>),
     /// Extract a successful checked call or propagate its erased error.

@@ -1,6 +1,6 @@
 use stainless_compiler::analyze;
 use stainless_compiler::interop::{ArgumentAdaptation, CallStyle, Receiver, RustLowering, TypeRef};
-use stainless_compiler::resolution::{CallTarget, Intrinsic};
+use stainless_compiler::resolution::{CallTarget, Intrinsic, RustErrorMessage};
 
 #[test]
 fn resolves_reference_parser_fixtures_without_semantic_errors() {
@@ -9,6 +9,7 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
         include_str!("../../../docs/ref/11_vec_and_string.stl"),
         include_str!("../../../docs/ref/13_range_for.stl"),
         include_str!("../../../docs/ref/15_checked_exception_subset.stl"),
+        include_str!("../../../docs/ref/16_native_result_unwrap.stl"),
     ] {
         let analysis = analyze(source);
 
@@ -351,4 +352,83 @@ i32 uncaught_default_construction() {
     assert!(codes.contains(&"RES068"), "{:?}", analysis.diagnostics);
     assert!(codes.contains(&"RES069"), "{:?}", analysis.diagnostics);
     assert!(codes.contains(&"RES075"), "{:?}", analysis.diagnostics);
+}
+
+#[test]
+fn native_result_unwrap_is_a_checked_consuming_intrinsic() {
+    let source = r"use rust::{Result, String};
+
+i32 unwrap_value(Result<i32, String> result) throws stainless::RustError {
+    return result.unwrap();
+}
+";
+    let analysis = analyze(source);
+
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:?}",
+        analysis.diagnostics
+    );
+    let call = analysis
+        .semantics
+        .calls
+        .iter()
+        .find(|call| {
+            matches!(
+                call.target,
+                CallTarget::Intrinsic(Intrinsic::UnwrapRustResult { .. })
+            )
+        })
+        .expect("native Result unwrap call");
+    assert_eq!(call.return_type, TypeRef::I32);
+    assert_eq!(call.throws.len(), 1);
+    assert_eq!(
+        analysis.semantics.structure(call.throws[0]).unwrap().path,
+        ["stainless", "RustError"]
+    );
+    assert_eq!(
+        call.target,
+        CallTarget::Intrinsic(Intrinsic::UnwrapRustResult {
+            error_message: RustErrorMessage::Display,
+        })
+    );
+}
+
+#[test]
+fn native_result_adaptation_reports_effect_receiver_and_move_errors() {
+    let source = r"use rust::{Result, String};
+
+i32 uncaught(Result<i32, String> result) {
+    return result.unwrap();
+}
+
+i32 borrowed(const Result<i32, String>& result) throws stainless::RustError {
+    return result.unwrap();
+}
+
+i32 bad_arity(Result<i32, String> result) throws stainless::RustError {
+    return result.unwrap(1);
+}
+
+i32 implicit_without_move(
+    Result<i32, String> result
+) throws stainless::RustError {
+    i32 value = result;
+    return value;
+}
+";
+    let analysis = analyze(source);
+    let codes = analysis
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+
+    for expected in ["RES075", "RES078", "RES079", "RES080"] {
+        assert!(
+            codes.contains(&expected),
+            "missing {expected}: {:?}",
+            analysis.diagnostics
+        );
+    }
 }

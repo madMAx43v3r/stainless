@@ -15,7 +15,8 @@ use super::{
     BindingResolution, CallTarget, ConstructorFieldInitialization, ConstructorId,
     ConstructorSymbol, ExpressionResolution, FieldSymbol, FunctionId, FunctionSymbol, Intrinsic,
     NativeCall, ParameterSymbol, Resolution, ResolvedCall, ResolvedField, ResolvedTraitRequirement,
-    SemanticModel, StructId, StructReceiver, StructSymbol, ValueCategory,
+    RustErrorMessage, RustResultAdaptation, SemanticModel, StructId, StructReceiver, StructSymbol,
+    ValueCategory,
 };
 
 /// Resolves names and types using an explicit native binding registry.
@@ -1049,6 +1050,7 @@ impl Resolver<'_> {
     ) -> Option<ResolvedCall> {
         let expected = canonical(target);
         let actual = self.resolve_expression(argument, Some(&expected), context);
+        let actual = self.adapt_rust_result(target, actual, argument, context);
         self.validate_binding(target, &actual, argument.span, "constructor initializer");
         if canonical(&actual.ty) == expected {
             Some(ResolvedCall {
@@ -1408,6 +1410,17 @@ impl Resolver<'_> {
         self.struct_by_path.get(&path).copied()
     }
 
+    fn rust_error_struct(&mut self) -> StructId {
+        if self.exception_root().is_none() {
+            self.install_exception_builtins();
+        }
+        let path = vec!["stainless".to_owned(), "RustError".to_owned()];
+        self.struct_by_path
+            .get(&path)
+            .copied()
+            .expect("installing exception builtins creates RustError")
+    }
+
     fn resolve_local(&mut self, local: &ast::LocalDeclaration, context: &mut FunctionContext) {
         let declared = if local.ty.is_inferred() {
             None
@@ -1416,8 +1429,9 @@ impl Resolver<'_> {
         };
         let resolved_type = if let Some(initializer) = &local.initializer {
             let expected = declared.as_ref().map(canonical);
-            let actual = self.resolve_expression(initializer, expected.as_ref(), context);
+            let mut actual = self.resolve_expression(initializer, expected.as_ref(), context);
             if let Some(declared) = &declared {
+                actual = self.adapt_rust_result(declared, actual, initializer, context);
                 self.validate_binding(declared, &actual, initializer.span, "initializer");
                 declared.clone()
             } else {
@@ -1450,6 +1464,45 @@ impl Resolver<'_> {
             .last_mut()
             .expect("a function context always has a scope");
         self.insert_variable(scope, &local.name, variable, local.span);
+    }
+
+    fn adapt_rust_result(
+        &mut self,
+        expected: &TypeRef,
+        actual: ExpressionInfo,
+        expression: &Expression,
+        context: &FunctionContext,
+    ) -> ExpressionInfo {
+        if expected.is_reference() {
+            return actual;
+        }
+        let TypeRef::Native { path, arguments } = canonical(&actual.ty) else {
+            return actual;
+        };
+        let [value_type, error_type] = arguments.as_slice() else {
+            return actual;
+        };
+        if path != "rust::Result" || canonical(expected) != canonical(value_type) {
+            return actual;
+        }
+        if actual.category != ValueCategory::Temporary {
+            self.push(
+                "RES080",
+                "implicit native Result conversion requires `move(result)` for a named value"
+                    .to_owned(),
+                expression.span,
+            );
+            return error_info();
+        }
+        let rust_error = self.rust_error_struct();
+        self.validate_checked_effect(rust_error, expression.span, context);
+        self.model
+            .rust_result_adaptations
+            .push(RustResultAdaptation {
+                span: expression.span,
+                error_message: rust_error_message(error_type),
+            });
+        temporary(canonical(expected))
     }
 
     fn resolve_range_binding(
@@ -1721,9 +1774,10 @@ impl Resolver<'_> {
         }
         for (index, initializer) in initializers.iter().enumerate() {
             let expected_type = expected.get(index);
-            let actual =
+            let mut actual =
                 self.resolve_expression(initializer, expected_type.map(canonical_ref), context);
             if let Some(expected_type) = expected_type {
+                actual = self.adapt_rust_result(expected_type, actual, initializer, context);
                 self.validate_binding(expected_type, &actual, initializer.span, "initializer");
             }
         }
@@ -1833,7 +1887,7 @@ impl Resolver<'_> {
         if is_assignment(operator) {
             let left_info = self.resolve_expression(left, expected, context);
             let left_type = canonical(&left_info.ty);
-            let right_info = self.resolve_expression(right, Some(&left_type), context);
+            let mut right_info = self.resolve_expression(right, Some(&left_type), context);
             if left_info.category != ValueCategory::MutablePlace {
                 self.push(
                     "RES013",
@@ -1842,6 +1896,7 @@ impl Resolver<'_> {
                 );
             }
             if operator == BinaryOperator::Assign {
+                right_info = self.adapt_rust_result(&left_type, right_info, right, context);
                 self.validate_binding(&left_type, &right_info, right.span, "assignment");
             } else {
                 self.require_exact(&left_type, &right_info.ty, right.span, "assignment");
@@ -2004,6 +2059,16 @@ impl Resolver<'_> {
                 path,
                 arguments: type_arguments,
             } if name.segments.len() == 1 => {
+                if path == "rust::Result" && name.segments[0] == "unwrap" {
+                    return self.resolve_rust_result_unwrap(
+                        receiver,
+                        &receiver_info,
+                        &type_arguments,
+                        arguments,
+                        span,
+                        context,
+                    );
+                }
                 let instance = NativeInstance {
                     type_path: path,
                     arguments: type_arguments,
@@ -2036,6 +2101,58 @@ impl Resolver<'_> {
                 (error_info(), None)
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_rust_result_unwrap(
+        &mut self,
+        receiver: &Expression,
+        receiver_info: &ExpressionInfo,
+        type_arguments: &[TypeRef],
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        if !arguments.is_empty() {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES078",
+                "native `Result.unwrap()` does not accept arguments".to_owned(),
+                span,
+            );
+            return (error_info(), None);
+        }
+        let [value_type, error_type] = type_arguments else {
+            self.push(
+                "RES078",
+                "native `Result` must have value and error type arguments".to_owned(),
+                span,
+            );
+            return (error_info(), None);
+        };
+        let owned_name = receiver_info.category == ValueCategory::MutablePlace
+            && !receiver_info.ty.is_reference()
+            && is_named_value_expression(receiver);
+        if receiver_info.category != ValueCategory::Temporary && !owned_name {
+            self.push(
+                "RES079",
+                "native `Result.unwrap()` requires a temporary or owned mutable binding".to_owned(),
+                receiver.span,
+            );
+            return (error_info(), None);
+        }
+        let rust_error = self.rust_error_struct();
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::UnwrapRustResult {
+                error_message: rust_error_message(error_type),
+            }),
+            return_type: value_type.clone(),
+            throws: vec![rust_error],
+        };
+        (temporary(value_type.clone()), Some(call))
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -3516,6 +3633,46 @@ fn known_native_path(segments: &[String], bindings: &NativeBindings) -> Option<&
             "rust::Result" => Some("rust::Result"),
             _ => None,
         })
+}
+
+fn is_named_value_expression(expression: &Expression) -> bool {
+    match &expression.kind {
+        ExpressionKind::Name(path) => path.segments.len() == 1,
+        ExpressionKind::Parenthesized(inner) => is_named_value_expression(inner),
+        _ => false,
+    }
+}
+
+fn rust_error_message(ty: &TypeRef) -> RustErrorMessage {
+    let display = match canonical_ref(ty) {
+        TypeRef::Bool
+        | TypeRef::Char
+        | TypeRef::I8
+        | TypeRef::I16
+        | TypeRef::I32
+        | TypeRef::I64
+        | TypeRef::I128
+        | TypeRef::Isize
+        | TypeRef::U8
+        | TypeRef::U16
+        | TypeRef::U32
+        | TypeRef::U64
+        | TypeRef::U128
+        | TypeRef::Usize
+        | TypeRef::F32
+        | TypeRef::F64 => true,
+        TypeRef::Native { path, arguments } => *path == "rust::String" && arguments.is_empty(),
+        TypeRef::Void
+        | TypeRef::Parameter(_)
+        | TypeRef::Struct { .. }
+        | TypeRef::Reference { .. }
+        | TypeRef::Error => false,
+    };
+    if display {
+        RustErrorMessage::Display
+    } else {
+        RustErrorMessage::Fallback
+    }
 }
 
 fn native_container_arity(path: &str) -> Option<usize> {

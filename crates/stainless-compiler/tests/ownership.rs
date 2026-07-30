@@ -282,6 +282,43 @@ void invalid(String value) {
     assert_codes(&analysis, &["OWN001"]);
 }
 
+#[test]
+fn explicitly_unwrapping_a_named_native_result_consumes_it() {
+    let analysis = analyze(
+        r"use rust::{Result, String};
+
+i32 invalid(Result<i32, String> result) throws stainless::RustError {
+    i32 first = result.unwrap();
+    return result.unwrap();
+}
+",
+    );
+
+    assert_codes(&analysis, &["OWN001"]);
+}
+
+#[test]
+fn target_typed_result_conversion_preserves_the_consumed_exception_path() {
+    let analysis = analyze(
+        r"use rust::{Result, String};
+
+struct Payload {
+    i32 value;
+};
+
+void invalid(Result<Payload, String> result) {
+    try {
+        Payload value = Payload(move(result));
+    } catch (const stainless::RustError& error) {
+        Result<Payload, String> reused = move(result);
+    }
+}
+",
+    );
+
+    assert_codes(&analysis, &["OWN001"]);
+}
+
 fn assert_codes(analysis: &stainless_compiler::Analysis, expected: &[&str]) {
     let ownership = analysis
         .diagnostics

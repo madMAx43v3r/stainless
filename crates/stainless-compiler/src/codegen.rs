@@ -524,6 +524,11 @@ impl Emitter {
                     #temporary
                 }))
             }
+            hir::Expression::UnwrapRustResult {
+                expression,
+                error_message,
+                target,
+            } => self.unwrap_rust_result(expression, *error_message, target),
             hir::Expression::Success(value) => {
                 let value = value
                     .as_deref()
@@ -617,6 +622,44 @@ impl Emitter {
             | hir::Expression::Clone { .. }
             | hir::Expression::Cast { .. } => self.call_expression(expression),
         }
+    }
+
+    fn unwrap_rust_result(
+        &mut self,
+        expression: &hir::Expression,
+        error_message: hir::RustErrorMessage,
+        target: &hir::ExceptionTarget,
+    ) -> Result<TokenStream, String> {
+        let expression = self.expression(expression)?;
+        let error = self.temporary("native_error")?;
+        let message = self.temporary("native_error_message")?;
+        let message_value = match error_message {
+            hir::RustErrorMessage::Display => {
+                quote!(::std::string::ToString::to_string(&#error))
+            }
+            hir::RustErrorMessage::Fallback => quote!({
+                ::std::mem::drop(#error);
+                ::std::string::String::from("native Rust operation failed")
+            }),
+        };
+        let converted = quote! {
+            Box::new(crate::__stainless_namespace_stainless::RustError {
+                __stainless_base_Exception:
+                    crate::__stainless_namespace_stainless::Exception {
+                        message: #message,
+                    },
+            }) as crate::__StainlessExceptionBox
+        };
+        let propagation = exception_propagation(target, &converted);
+        Ok(quote! {
+            match #expression {
+                Ok(value) => value,
+                Err(#error) => {
+                    let #message: ::std::string::String = #message_value;
+                    #propagation
+                }
+            }
+        })
     }
 
     fn call_expression(&mut self, expression: &hir::Expression) -> Result<TokenStream, String> {

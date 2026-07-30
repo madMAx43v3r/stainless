@@ -264,6 +264,29 @@ pub enum Intrinsic {
         /// Constructed value type.
         target: TypeRef,
     },
+    /// Consume a native Rust `Result<T, E>` and convert `Err` to `RustError`.
+    UnwrapRustResult {
+        /// Statically selected error-message conversion.
+        error_message: RustErrorMessage,
+    },
+}
+
+/// Statically proven way to obtain a native Rust error message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RustErrorMessage {
+    /// The native error type is known to implement Rust `Display`.
+    Display,
+    /// No formatting trait is proven, so use the specified fixed fallback.
+    Fallback,
+}
+
+/// One compiler-inserted exact `Result<T, E>` to `T` conversion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RustResultAdaptation {
+    /// Span of the source expression producing the native Result.
+    pub span: Span,
+    /// Statically selected error-message conversion.
+    pub error_message: RustErrorMessage,
 }
 
 /// Successfully retained semantic facts for one source file.
@@ -281,6 +304,8 @@ pub struct SemanticModel {
     pub bindings: Vec<BindingResolution>,
     /// Explicit and implicit calls in traversal order.
     pub calls: Vec<ResolvedCall>,
+    /// Target-typed native Result conversions in traversal order.
+    pub rust_result_adaptations: Vec<RustResultAdaptation>,
 }
 
 impl SemanticModel {
@@ -341,6 +366,14 @@ impl SemanticModel {
     #[must_use]
     pub fn call(&self, span: Span) -> Option<&ResolvedCall> {
         self.calls.iter().find(|call| call.span == span)
+    }
+
+    /// Finds a compiler-inserted native Result conversion by expression span.
+    #[must_use]
+    pub fn rust_result_adaptation(&self, span: Span) -> Option<&RustResultAdaptation> {
+        self.rust_result_adaptations
+            .iter()
+            .find(|adaptation| adaptation.span == span)
     }
 }
 

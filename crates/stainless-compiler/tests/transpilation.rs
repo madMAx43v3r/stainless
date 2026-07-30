@@ -207,6 +207,10 @@ fn transpiles_and_compiles_resolved_reference_programs() {
             "checked-exception-subset",
             include_str!("../../../docs/ref/15_checked_exception_subset.stl"),
         ),
+        (
+            "native-result-unwrap",
+            include_str!("../../../docs/ref/16_native_result_unwrap.stl"),
+        ),
     ] {
         let result = transpile(source);
         assert!(
@@ -619,6 +623,155 @@ fn main() {{
     let output = Command::new(&binary)
         .output()
         .expect("generated throwing-constructor program should run");
+    assert!(
+        output.status.success(),
+        "status: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    remove_temporary_parent(&binary);
+}
+
+const NATIVE_RESULT_SOURCE: &str = r"use rust::{Result, String, Vec};
+
+namespace samples {
+
+struct Number {
+    i32 value;
+};
+
+i32 explicit_unwrap(Result<i32, String> result) {
+    try {
+        return result.unwrap();
+    } catch (const stainless::RustError& error) {
+        return i32(error.message.len());
+    }
+}
+
+i32 implicit_local(Result<i32, String> result) {
+    try {
+        i32 value = move(result);
+        return value;
+    } catch (const stainless::RustError& error) {
+        return i32(error.message.len());
+    }
+}
+
+i32 implicit_assignment(Result<i32, String> result) {
+    try {
+        i32 value = 0;
+        value = move(result);
+        return value;
+    } catch (const stainless::RustError& error) {
+        return i32(error.message.len());
+    }
+}
+
+i32 implicit_aggregate(Result<i32, String> result) {
+    try {
+        Number number = Number{move(result)};
+        return number.value;
+    } catch (const stainless::RustError& error) {
+        return i32(error.message.len());
+    }
+}
+
+i32 implicit_direct(Result<Number, String> result) {
+    try {
+        Number number = Number(move(result));
+        return number.value;
+    } catch (const stainless::RustError& error) {
+        return i32(error.message.len());
+    }
+}
+
+i32 fallback_message(Result<i32, Vec<i32>> result) {
+    try {
+        return result.unwrap();
+    } catch (const stainless::RustError& error) {
+        return i32(error.message.len());
+    }
+}
+
+} // namespace samples
+";
+
+#[test]
+fn native_results_convert_to_checked_rust_errors_without_panicking() {
+    let result = transpile(NATIVE_RESULT_SOURCE);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:?}",
+        result.analysis.diagnostics
+    );
+    let find_name = |source_name: &str| {
+        result
+            .analysis
+            .semantics
+            .functions
+            .iter()
+            .find(|function| function.path == ["samples", source_name])
+            .unwrap_or_else(|| panic!("missing `{source_name}`"))
+            .mangled_name
+            .clone()
+    };
+    let explicit_unwrap = find_name("explicit_unwrap");
+    let implicit_local = find_name("implicit_local");
+    let implicit_assignment = find_name("implicit_assignment");
+    let implicit_aggregate = find_name("implicit_aggregate");
+    let implicit_direct = find_name("implicit_direct");
+    let fallback_message = find_name("fallback_message");
+    let mut rust = result
+        .rust
+        .expect("native Result adaptation should emit Rust");
+    write!(
+        rust,
+        r#"
+fn main() {{
+    use ::std::result::Result::{{Err, Ok}};
+
+    assert_eq!(__stainless_namespace_samples::{explicit_unwrap}(
+        Ok(17),
+    ), 17);
+    assert_eq!(__stainless_namespace_samples::{explicit_unwrap}(
+        Err(::std::string::String::from("oops")),
+    ), 4);
+    assert_eq!(__stainless_namespace_samples::{implicit_local}(
+        Ok(19),
+    ), 19);
+    assert_eq!(__stainless_namespace_samples::{implicit_local}(
+        Err(::std::string::String::from("local")),
+    ), 5);
+    assert_eq!(__stainless_namespace_samples::{implicit_assignment}(
+        Ok(23),
+    ), 23);
+    assert_eq!(__stainless_namespace_samples::{implicit_assignment}(
+        Err(::std::string::String::from("assign")),
+    ), 6);
+    assert_eq!(__stainless_namespace_samples::{implicit_aggregate}(
+        Ok(29),
+    ), 29);
+    assert_eq!(__stainless_namespace_samples::{implicit_aggregate}(
+        Err(::std::string::String::from("field")),
+    ), 5);
+    assert_eq!(__stainless_namespace_samples::{implicit_direct}(
+        Ok(__stainless_namespace_samples::Number {{ value: 31 }}),
+    ), 31);
+    assert_eq!(__stainless_namespace_samples::{implicit_direct}(
+        Err(::std::string::String::from("direct")),
+    ), 6);
+    assert_eq!(__stainless_namespace_samples::{fallback_message}(
+        Err(::std::vec::Vec::from([1])),
+    ), 28);
+}}
+"#
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("native-result", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .expect("generated native Result program should run");
     assert!(
         output.status.success(),
         "status: {}\nstdout:\n{}\nstderr:\n{}",
