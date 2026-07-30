@@ -481,9 +481,12 @@ impl Lowerer<'_> {
             CallTarget::Native(native) => {
                 self.lower_native_call(native, callee, arguments, call.span)
             }
-            CallTarget::Intrinsic(Intrinsic::Move) => arguments
-                .first()
-                .and_then(|argument| self.lower_expression(argument, ExpressionMode::Value)),
+            CallTarget::Intrinsic(Intrinsic::Move) => {
+                let argument = arguments.first()?;
+                Some(hir::Expression::Move(Box::new(
+                    self.lower_expression(argument, ExpressionMode::Value)?,
+                )))
+            }
             CallTarget::Intrinsic(Intrinsic::PrimitiveCast { target }) => {
                 let expression = arguments.first()?;
                 Some(hir::Expression::Cast {

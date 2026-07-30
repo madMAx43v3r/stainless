@@ -7,8 +7,8 @@ Stainless is a new C++-like language that transpiles to Rust.
 > and Rowan parser, typed CST views, compiler-owned AST lowering, structural
 > diagnostics, an initial name/type/call resolver, a typed Rust-shaped HIR, and
 > structured Rust emission for the supported function/control-flow and
-> `Vec`/`String` subset. Ownership dataflow and most declaration kinds have not
-> started yet.
+> `Vec`/`String` subset. An initial move/borrow dataflow pass now validates that
+> subset; most declaration kinds have not started yet.
 
 ## Project charter
 
@@ -766,11 +766,13 @@ implicitly copyable: copying increments the underlying `Arc` strong count and
 leaves the source valid. `move(value)` transfers a shared handle without that
 increment and invalidates the source binding.
 
-The Stainless semantic pass must track moves, borrows, conditional control
-flow, and reinitialization so it can diagnose errors against `.stl` source.
-Lowering `move(value)` to an actual Rust move lets `rustc` independently verify
-the result, but generated-Rust errors are a backstop rather than the primary
-Stainless diagnostic mechanism.
+The initial Stainless ownership pass now tracks moves, reinitialization,
+conditional control-flow joins, and local reference borrows for the implemented
+function subset, so these errors are reported against `.stl` source. It also
+checks potentially repeated loop moves conservatively. Lowering `move(value)`
+to an actual Rust move lets `rustc` independently verify the result, but
+generated-Rust errors are a backstop rather than the primary Stainless
+diagnostic mechanism.
 
 ### References and borrowed returns
 
@@ -2013,6 +2015,22 @@ The initial `stainless_compiler::resolution` pass now provides:
 - `Vec<T>` range-element resolution for shared, mutable, copied, and explicitly
   consumed range loops.
 
+The initial `stainless_compiler::ownership` pass runs after successful
+resolution and before HIR construction. For the implemented subset it:
+
+- tracks each non-copy binding as available, moved, or possibly moved after a
+  control-flow join;
+- recognizes assignment as explicit reinitialization and preserves availability
+  when every continuing path restores the binding;
+- validates shared and mutable local-reference loans, mutable reborrowing, and
+  conflicting owner access;
+- ends local loans after their final source use, while retaining outer loans
+  across a loop that may repeat;
+- treats consuming ranges as definite moves and checks moves inside potentially
+  repeated classic/range loop bodies;
+- verifies that a direct reference return ultimately originates from the
+  function's single reference parameter.
+
 `stainless_compiler::transpile` is the first fail-closed backend API. If the
 front end reports a diagnostic, or HIR lowering encounters a construct without
 defined Rust semantics, it returns no Rust. For the accepted subset it now:
@@ -2032,10 +2050,11 @@ defined Rust semantics, it returns no Rust. For the accepted subset it now:
 
 This is still not full semantic validation. Struct/class/interface names,
 fields, member functions, checked exceptions, ownership pointers, cross-file
-modules, move/use-after-move dataflow, general borrow lifetimes,
-returned-reference provenance, and native trait satisfaction remain unresolved.
-Accepting an AST shape therefore still does not imply that all ownership or
-type semantics are valid.
+modules, ownership through fields and future pointer types, full path-sensitive
+loop-exit precision, general borrow lifetimes, member/native returned-reference
+provenance, and native trait satisfaction remain unresolved. Accepting an AST
+shape therefore still does not imply that all ownership or type semantics are
+valid.
 
 ## Cargo integration and compiler packaging
 
@@ -2145,9 +2164,9 @@ recorded inline so implemented syntax is not confused with planned work:
    `if`/`else`, and classic/range `for` loops into a Rowan CST with recoverable
    error nodes.
 4. **In progress:** typed CST views, AST lowering, structural validation, the
-   initial single-file name/type/call resolver, and resolved HIR construction
-   are implemented for the function/control-flow subset. Ownership analysis
-   and broader declaration kinds remain.
+   initial single-file name/type/call resolver, move/borrow analysis, and
+   resolved HIR construction are implemented for the function/control-flow
+   subset. Broader declaration kinds and ownership through fields remain.
 5. **In progress:** the initial `Vec` and `String` metadata is connected through
    resolution and code generation. Next, add one explicit wrapper for a small
    external Cargo dependency and prove that Cargo rejects a stale or incorrect

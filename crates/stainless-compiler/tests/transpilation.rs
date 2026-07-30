@@ -81,6 +81,14 @@ String greeting() {
     return move(text);
 }
 
+usize inspect_text(const String& text) {
+    return text.len();
+}
+
+usize borrow_moved_text(String text) {
+    return inspect_text(move(text));
+}
+
 const i32& identity_ref(const i32& value) {
     return value;
 }
@@ -156,6 +164,7 @@ fn generated_program_preserves_current_subset_behavior() {
     let primitive_cast = find_name("primitive_cast");
     let mutate_and_sum = find_name("mutate_and_sum");
     let greeting = find_name("greeting");
+    let borrow_moved_text = find_name("borrow_moved_text");
     let use_reference_return = find_name("use_reference_return");
     let reopened_namespace = find_name("reopened_namespace");
     let qualified_definition = find_name("qualified_definition");
@@ -171,6 +180,12 @@ fn main() {{
     assert_eq!(__stainless_namespace_samples::{primitive_cast}(7), 7u32);
     assert_eq!(__stainless_namespace_samples::{mutate_and_sum}(), 9);
     assert_eq!(__stainless_namespace_samples::{greeting}(), "hello!");
+    assert_eq!(
+        __stainless_namespace_samples::{borrow_moved_text}(
+            ::std::string::String::from("moved")
+        ),
+        5
+    );
     assert_eq!(__stainless_namespace_samples::{use_reference_return}(17), 17);
     assert_eq!(__stainless_namespace_samples::{reopened_namespace}(), 23);
     assert_eq!(__stainless_namespace_samples::{qualified_definition}(), 29);

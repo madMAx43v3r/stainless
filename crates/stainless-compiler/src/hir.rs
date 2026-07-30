@@ -198,6 +198,9 @@ pub enum Expression {
     },
     /// Read or update through a reference binding.
     Dereference(Box<Expression>),
+    /// Explicitly consume a binding, even when the surrounding context borrows
+    /// the resulting temporary.
+    Move(Box<Expression>),
     /// A prefix operation that maps directly to Rust.
     Prefix {
         /// Source operator.

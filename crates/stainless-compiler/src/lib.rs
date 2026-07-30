@@ -11,6 +11,7 @@ pub mod hir;
 mod hir_lowering;
 pub mod interop;
 pub mod lowering;
+pub mod ownership;
 pub mod resolution;
 pub mod semantics;
 
@@ -49,6 +50,9 @@ pub fn analyze(source: &str) -> Analysis {
             resolution::SemanticModel::default()
         }
     };
+    if diagnostics.is_empty() {
+        diagnostics.extend(ownership::validate(&ast, &semantic_model));
+    }
     diagnostics.sort_by_key(|diagnostic| diagnostic.span);
 
     Analysis {
@@ -68,7 +72,7 @@ pub struct Analysis {
     pub ast: ast::SourceFile,
     /// Resolved functions, expression types, and call targets.
     pub semantics: resolution::SemanticModel,
-    /// Syntax, structural, name, and type diagnostics in source order.
+    /// Syntax, semantic, resolution, and ownership diagnostics in source order.
     pub diagnostics: Vec<Diagnostic>,
 }
 

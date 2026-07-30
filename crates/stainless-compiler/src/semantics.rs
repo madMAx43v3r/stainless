@@ -11,8 +11,8 @@ use crate::ast::{
 /// Validates structural rules over a lowered source file.
 ///
 /// This initial pass deliberately does not claim to resolve names, infer
-/// expression types, or check ownership. Those checks will be layered on top
-/// of this stable AST.
+/// expression types, or check ownership. Resolution and ownership validation
+/// are separate passes layered on top of this stable AST.
 #[must_use]
 pub fn validate(source: &SourceFile) -> Vec<Diagnostic> {
     let mut validator = Validator {

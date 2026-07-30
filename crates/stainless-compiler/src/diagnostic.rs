@@ -7,6 +7,8 @@ pub enum DiagnosticPhase {
     Syntax,
     /// Structural semantic validation of the lowered AST.
     Semantic,
+    /// Move, borrow, and reference-lifetime validation.
+    Ownership,
     /// Lowering from resolved syntax into the compiler's backend IR.
     Hir,
     /// Structured Rust generation or validation.
@@ -40,6 +42,15 @@ impl Diagnostic {
         Self {
             code,
             phase: DiagnosticPhase::Semantic,
+            message,
+            span,
+        }
+    }
+
+    pub(crate) fn ownership(code: &'static str, message: String, span: Span) -> Self {
+        Self {
+            code,
+            phase: DiagnosticPhase::Ownership,
             message,
             span,
         }

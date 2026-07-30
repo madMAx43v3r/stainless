@@ -279,6 +279,14 @@ impl Emitter {
                 let expression = self.expression(expression)?;
                 Ok(quote!(*(#expression)))
             }
+            hir::Expression::Move(expression) => {
+                let expression = self.expression(expression)?;
+                let temporary = self.temporary("moved")?;
+                Ok(quote!({
+                    let #temporary = #expression;
+                    #temporary
+                }))
+            }
             hir::Expression::Prefix { operator, operand } => {
                 let operand = self.expression(operand)?;
                 match operator {
