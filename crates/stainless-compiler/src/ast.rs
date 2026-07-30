@@ -267,6 +267,10 @@ pub enum StatementKind {
     Local(LocalDeclaration),
     /// A return with an optional value.
     Return(Option<Expression>),
+    /// A checked throw or bare rethrow.
+    Throw(Option<Expression>),
+    /// A checked `try` statement and ordered handlers.
+    Try(TryStatement),
     /// Conditional control flow.
     If(IfStatement),
     /// Classic or range iteration.
@@ -281,6 +285,37 @@ pub enum StatementKind {
     Empty,
     /// Malformed syntax retained after recovery.
     Error,
+}
+
+/// A checked `try` body followed by one or more catches.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TryStatement {
+    /// Protected body.
+    pub body: Block,
+    /// Handlers in source order.
+    pub catches: Vec<CatchClause>,
+}
+
+/// One typed or catch-all exception handler.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatchClause {
+    /// Typed binder, absent for `catch (...)`.
+    pub binding: Option<CatchBinding>,
+    /// Handler body.
+    pub body: Block,
+    /// Complete handler range.
+    pub span: Span,
+}
+
+/// A compiler-managed `const Exception&` catch binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CatchBinding {
+    /// Declared exception-reference type.
+    pub ty: Type,
+    /// Source binding name.
+    pub name: String,
+    /// Binding range.
+    pub span: Span,
 }
 
 /// A local variable declaration.

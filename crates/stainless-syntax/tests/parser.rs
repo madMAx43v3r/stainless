@@ -85,6 +85,28 @@ fn deleted_constructor_requires_the_contextual_delete_spelling() {
 }
 
 #[test]
+fn parses_throw_try_and_ordered_catches_losslessly() {
+    let source = r"Config load() throws IoError {
+    try {
+        throw IoError{};
+    } catch (const IoError& error) {
+        throw;
+    } catch (...) {
+        return Config{};
+    }
+}
+";
+    let parsed = parse(source);
+    let root = parsed.syntax();
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(root.to_string(), source);
+    assert_eq!(count_kind(&root, SyntaxKind::TryStatement), 1);
+    assert_eq!(count_kind(&root, SyntaxKind::CatchClause), 2);
+    assert_eq!(count_kind(&root, SyntaxKind::ThrowStatement), 2);
+}
+
+#[test]
 fn parses_initial_functions_control_flow_and_both_for_forms_losslessly() {
     let source = r"use rust::Vec;
 

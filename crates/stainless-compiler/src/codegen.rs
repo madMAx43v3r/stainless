@@ -20,6 +20,21 @@ struct Emitter {
 
 impl Emitter {
     fn program(&mut self, program: &hir::Program) -> Result<TokenStream, String> {
+        let exception_runtime = program_has_exceptions(program).then(|| {
+            quote! {
+                pub trait __StainlessException:
+                    ::std::error::Error + ::std::any::Any
+                {
+                    fn __stainless_project(
+                        &self,
+                        target: ::std::any::TypeId,
+                    ) -> Option<&dyn ::std::any::Any>;
+                    fn __stainless_message(&self) -> &str;
+                }
+
+                pub type __StainlessExceptionBox = Box<dyn __StainlessException>;
+            }
+        });
         let structs = program
             .structs
             .iter()
@@ -36,6 +51,7 @@ impl Emitter {
             .map(|module| self.module(module))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(quote! {
+            #exception_runtime
             #(#structs)*
             #(#functions)*
             #(#modules)*
@@ -80,12 +96,77 @@ impl Emitter {
                 Ok(quote!(pub #name: #ty))
             })
             .collect::<Result<Vec<_>, String>>()?;
+        let exception_impl = if structure.is_exception {
+            let projection_fallback = if let Some(base_field) = &structure.exception_base_field {
+                let base_field = identifier(base_field)?;
+                quote! {
+                    crate::__StainlessException::__stainless_project(
+                        &self.#base_field,
+                        target,
+                    )
+                }
+            } else {
+                quote!(None)
+            };
+            let message = if let Some(base_field) = &structure.exception_base_field {
+                let base_field = identifier(base_field)?;
+                quote! {
+                    crate::__StainlessException::__stainless_message(&self.#base_field)
+                }
+            } else {
+                let message = identifier("message")?;
+                quote!((&self.#message).as_str())
+            };
+            quote! {
+                impl crate::__StainlessException for #name {
+                    fn __stainless_project(
+                        &self,
+                        target: ::std::any::TypeId,
+                    ) -> Option<&dyn ::std::any::Any> {
+                        if target == ::std::any::TypeId::of::<Self>() {
+                            Some(self)
+                        } else {
+                            #projection_fallback
+                        }
+                    }
+
+                    fn __stainless_message(&self) -> &str {
+                        #message
+                    }
+                }
+
+                impl ::std::fmt::Display for #name {
+                    fn fmt(
+                        &self,
+                        formatter: &mut ::std::fmt::Formatter<'_>,
+                    ) -> ::std::fmt::Result {
+                        formatter.write_str(
+                            crate::__StainlessException::__stainless_message(self),
+                        )
+                    }
+                }
+
+                impl ::std::fmt::Debug for #name {
+                    fn fmt(
+                        &self,
+                        formatter: &mut ::std::fmt::Formatter<'_>,
+                    ) -> ::std::fmt::Result {
+                        ::std::fmt::Display::fmt(self, formatter)
+                    }
+                }
+
+                impl ::std::error::Error for #name {}
+            }
+        } else {
+            TokenStream::new()
+        };
         Ok(quote! {
             #[derive(Clone)]
             #[allow(non_snake_case)]
             pub struct #name {
                 #(#fields),*
             }
+            #exception_impl
         })
     }
 
@@ -114,10 +195,21 @@ impl Emitter {
             &function.return_type,
             explicit_lifetime.then_some(&lifetime),
         )?;
+        let return_type = if function.throws {
+            quote!(::std::result::Result<#return_type, crate::__StainlessExceptionBox>)
+        } else {
+            return_type
+        };
         let body = self.block(&function.body)?;
         let generics = explicit_lifetime.then(|| quote!(<'__stainless_borrow>));
         Ok(quote! {
-            #[allow(non_snake_case, unused_mut, unused_parens, unused_variables)]
+            #[allow(
+                non_snake_case,
+                unreachable_code,
+                unused_mut,
+                unused_parens,
+                unused_variables,
+            )]
             pub fn #name #generics (#(#parameters),*) -> #return_type #body
         })
     }
@@ -153,6 +245,8 @@ impl Emitter {
                     .transpose()?;
                 Ok(quote!(return #value;))
             }
+            hir::Statement::Throw { value, target } => self.throw_statement(value, target),
+            statement @ hir::Statement::Try { .. } => self.try_statement(statement),
             hir::Statement::If {
                 condition,
                 then_branch,
@@ -178,23 +272,27 @@ impl Emitter {
                 Ok(quote!(if #condition #then_branch #else_branch))
             }
             hir::Statement::ClassicFor {
+                label,
                 initializer,
                 condition,
                 update,
                 body,
             } => self.classic_for(
+                label,
                 initializer.as_ref(),
                 condition.as_ref(),
                 update.as_ref(),
                 body,
             ),
             hir::Statement::RangeFor {
+                label,
                 name,
                 mutable,
                 mode,
                 iterable,
                 body,
             } => {
+                let label = rust_label(label);
                 let name = identifier(name)?;
                 let mutable = mutable.then(|| quote!(mut));
                 let iterable = self.expression(iterable)?;
@@ -206,10 +304,16 @@ impl Emitter {
                     hir::RangeMode::Move => quote!((#iterable).into_iter()),
                 };
                 let body = self.block(body)?;
-                Ok(quote!(for #mutable #name in #iterator #body))
+                Ok(quote!(#label: for #mutable #name in #iterator #body))
             }
-            hir::Statement::Break => Ok(quote!(break;)),
-            hir::Statement::Continue => Ok(quote!(continue;)),
+            hir::Statement::Break(label) => {
+                let label = rust_label(label);
+                Ok(quote!(break #label;))
+            }
+            hir::Statement::Continue(label) => {
+                let label = rust_label(label);
+                Ok(quote!(continue #label;))
+            }
             hir::Statement::Expression(expression) => {
                 let expression = self.expression(expression)?;
                 Ok(quote!(#expression;))
@@ -217,13 +321,112 @@ impl Emitter {
         }
     }
 
+    fn throw_statement(
+        &mut self,
+        value: &hir::ExceptionValue,
+        target: &hir::ExceptionTarget,
+    ) -> Result<TokenStream, String> {
+        let error = match value {
+            hir::ExceptionValue::New(value) => {
+                let value = self.expression(value)?;
+                quote! {
+                    Box::new(#value) as crate::__StainlessExceptionBox
+                }
+            }
+            hir::ExceptionValue::Existing(name) => {
+                let name = identifier(name)?;
+                quote!(#name)
+            }
+        };
+        Ok(exception_propagation(target, &error))
+    }
+
+    fn try_statement(&mut self, statement: &hir::Statement) -> Result<TokenStream, String> {
+        let hir::Statement::Try {
+            label,
+            error_name,
+            body,
+            body_falls_through,
+            catches,
+            diverges,
+            unmatched_target,
+        } = statement
+        else {
+            return Err("internal try emitter received a non-try statement".to_owned());
+        };
+        let label = syn::Lifetime::new(&format!("'{label}"), TokenSpan::call_site());
+        let result_name = self.temporary("try_result")?;
+        let error_name = identifier(error_name)?;
+        let body = self.block(body)?;
+        let unmatched_error = quote!(#error_name);
+        let unmatched = exception_propagation(unmatched_target, &unmatched_error);
+        let mut handlers = unmatched;
+        for catch in catches.iter().rev() {
+            let catch_body = self.block(&catch.body)?;
+            if let Some(ty) = &catch.ty {
+                let ty = type_tokens(ty, None)?;
+                let binding = catch
+                    .binding
+                    .as_deref()
+                    .ok_or_else(|| "typed catch is missing its binding".to_owned())
+                    .and_then(identifier)?;
+                handlers = quote! {
+                    if let Some(#binding) =
+                        crate::__StainlessException::__stainless_project(
+                            &*#error_name,
+                            ::std::any::TypeId::of::<#ty>(),
+                        )
+                        .and_then(|value| value.downcast_ref::<#ty>())
+                    {
+                        #catch_body
+                    } else {
+                        #handlers
+                    }
+                };
+            } else {
+                handlers = quote! { #catch_body };
+            }
+        }
+        let normal_completion = body_falls_through.then(|| quote!(break #label Ok(());));
+        let dispatch = if *diverges {
+            quote! {
+                match #result_name {
+                    Ok(()) => unreachable!(
+                        "statically diverging Stainless try completed normally"
+                    ),
+                    Err(#error_name) => {
+                        #handlers
+                    }
+                }
+            }
+        } else {
+            quote! {
+                if let Err(#error_name) = #result_name {
+                    #handlers
+                }
+            }
+        };
+        Ok(quote! {
+            let #result_name: ::std::result::Result<
+                (),
+                crate::__StainlessExceptionBox,
+            > = #label: {
+                #body
+                #normal_completion
+            };
+            #dispatch
+        })
+    }
+
     fn classic_for(
         &mut self,
+        label: &str,
         initializer: Option<&hir::ForInitializer>,
         condition: Option<&hir::Expression>,
         update: Option<&hir::Expression>,
         body: &hir::Block,
     ) -> Result<TokenStream, String> {
+        let label = rust_label(label);
         let initializer = initializer
             .map(|initializer| self.for_initializer(initializer))
             .transpose()?;
@@ -233,7 +436,7 @@ impl Emitter {
         let condition_check = condition.map(|condition| {
             quote! {
                 if !(#condition) {
-                    break;
+                    break #label;
                 }
             }
         });
@@ -244,7 +447,7 @@ impl Emitter {
             Ok(quote!({
                 #initializer
                 let mut #first = true;
-                loop {
+                #label: loop {
                     if #first {
                         #first = false;
                     } else {
@@ -257,7 +460,7 @@ impl Emitter {
         } else {
             Ok(quote!({
                 #initializer
-                loop {
+                #label: loop {
                     #condition_check
                     #body
                 }
@@ -320,6 +523,28 @@ impl Emitter {
                     let #temporary = #expression;
                     #temporary
                 }))
+            }
+            hir::Expression::Success(value) => {
+                let value = value
+                    .as_deref()
+                    .map(|value| self.expression(value))
+                    .transpose()?
+                    .unwrap_or_else(|| quote!(()));
+                Ok(quote!(Ok(#value)))
+            }
+            hir::Expression::Propagate { expression, target } => {
+                let expression = self.expression(expression)?;
+                let error = self.temporary("propagated_error")?;
+                let propagation_error = quote!(#error);
+                let propagation = exception_propagation(target, &propagation_error);
+                Ok(quote! {
+                    match #expression {
+                        Ok(value) => value,
+                        Err(#error) => {
+                            #propagation
+                        }
+                    }
+                })
             }
             hir::Expression::Prefix { operator, operand } => {
                 let operand = self.expression(operand)?;
@@ -563,4 +788,37 @@ fn binary_operator(operator: BinaryOperator) -> TokenStream {
         BinaryOperator::Divide => quote!(/),
         BinaryOperator::Remainder => quote!(%),
     }
+}
+
+fn exception_propagation(target: &hir::ExceptionTarget, error: &TokenStream) -> TokenStream {
+    match target {
+        hir::ExceptionTarget::Function => quote!(return Err(#error);),
+        hir::ExceptionTarget::Try(label) => {
+            let label = syn::Lifetime::new(&format!("'{label}"), TokenSpan::call_site());
+            quote!(break #label Err(#error);)
+        }
+        hir::ExceptionTarget::Unreachable => quote! {
+            unreachable!("statically exhaustive Stainless catch set missed an exception");
+        },
+    }
+}
+
+fn rust_label(label: &str) -> syn::Lifetime {
+    syn::Lifetime::new(&format!("'{label}"), TokenSpan::call_site())
+}
+
+fn program_has_exceptions(program: &hir::Program) -> bool {
+    fn module_has_exceptions(module: &hir::Module) -> bool {
+        module
+            .structs
+            .iter()
+            .any(|structure| structure.is_exception)
+            || module.modules.iter().any(module_has_exceptions)
+    }
+
+    program
+        .structs
+        .iter()
+        .any(|structure| structure.is_exception)
+        || program.modules.iter().any(module_has_exceptions)
 }

@@ -17,8 +17,30 @@ pub(crate) fn lower(
         current_return_type: None,
         current_fluent_receiver: false,
         current_constructor: false,
+        current_throwing: false,
+        exception_target: hir::ExceptionTarget::Function,
+        caught_error: None,
+        try_index: 0,
+        loop_index: 0,
+        loop_labels: Vec::new(),
     };
-    let lowered_structs = lowerer.lower_structs(&source.items);
+    let mut lowered_structs = lowerer.lower_structs(&source.items);
+    for structure in semantics.structs.iter().filter(|structure| {
+        matches!(
+            structure.path.as_slice(),
+            [namespace, name]
+                if namespace == "stainless"
+                    && matches!(name.as_str(), "Exception" | "RustError")
+        )
+    }) {
+        if let Some(structure) = lowerer.lower_struct_symbol(
+            structure,
+            structure.path.last().map_or("<missing>", String::as_str),
+            structure.span,
+        ) {
+            lowered_structs.push(structure);
+        }
+    }
     let mut lowered_functions = lowerer.lower_functions(&source.items);
     lowered_functions.extend(lowerer.lower_constructors(&source.items));
     for constructor in semantics
@@ -67,6 +89,12 @@ struct Lowerer<'a> {
     current_return_type: Option<TypeRef>,
     current_fluent_receiver: bool,
     current_constructor: bool,
+    current_throwing: bool,
+    exception_target: hir::ExceptionTarget,
+    caught_error: Option<String>,
+    try_index: usize,
+    loop_index: usize,
+    loop_labels: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -92,44 +120,71 @@ impl Lowerer<'_> {
                         );
                         continue;
                     };
-                    let mut fields = Vec::new();
-                    if let Some(base) = symbol.base {
-                        let Some(base_symbol) = self.semantics.structure(base) else {
-                            self.push(
-                                "HIR015",
-                                "resolved data base is missing".to_owned(),
-                                structure.span,
-                            );
-                            continue;
-                        };
-                        fields.push(hir::Field {
-                            rust_name: base_field_name(base_symbol),
-                            ty: self
-                                .lower_type(
-                                    &TypeRef::Struct {
-                                        path: base_symbol.path.clone(),
-                                    },
-                                    structure.span,
-                                )
-                                .expect("resolved base type lowers"),
-                        });
+                    if let Some(lowered) =
+                        self.lower_struct_symbol(&symbol, &structure.name, structure.span)
+                    {
+                        structs.push(lowered);
                     }
-                    fields.extend(symbol.fields.iter().filter_map(|field| {
-                        Some(hir::Field {
-                            rust_name: field.name.clone(),
-                            ty: self.lower_type(&field.ty, field.span)?,
-                        })
-                    }));
-                    structs.push(hir::Struct {
-                        source_path: symbol.path.clone(),
-                        rust_name: structure.name.clone(),
-                        fields,
-                    });
                 }
                 Item::Use(_) | Item::Constructor(_) | Item::Function(_) => {}
             }
         }
         structs
+    }
+
+    fn lower_struct_symbol(
+        &mut self,
+        symbol: &StructSymbol,
+        rust_name: &str,
+        span: ast::Span,
+    ) -> Option<hir::Struct> {
+        let mut fields = Vec::new();
+        if let Some(base) = symbol.base {
+            let base_symbol = self.semantics.structure(base)?;
+            fields.push(hir::Field {
+                rust_name: base_field_name(base_symbol),
+                ty: self.lower_type(
+                    &TypeRef::Struct {
+                        path: base_symbol.path.clone(),
+                    },
+                    span,
+                )?,
+            });
+        }
+        fields.extend(symbol.fields.iter().filter_map(|field| {
+            Some(hir::Field {
+                rust_name: field.name.clone(),
+                ty: self.lower_type(&field.ty, field.span)?,
+            })
+        }));
+        let is_exception = self.is_exception_structure(symbol.id);
+        let exception_base_field = if is_exception {
+            symbol
+                .base
+                .and_then(|base| self.semantics.structure(base))
+                .map(base_field_name)
+        } else {
+            None
+        };
+        Some(hir::Struct {
+            source_path: symbol.path.clone(),
+            rust_name: rust_name.to_owned(),
+            fields,
+            is_exception,
+            exception_base_field,
+        })
+    }
+
+    fn is_exception_structure(&self, structure: crate::resolution::StructId) -> bool {
+        let mut current = Some(structure);
+        while let Some(id) = current {
+            let symbol = &self.semantics.structs[id.0];
+            if symbol.path == ["stainless", "Exception"] {
+                return true;
+            }
+            current = symbol.base;
+        }
+        false
     }
 
     fn lower_functions(&mut self, items: &[Item]) -> Vec<hir::Function> {
@@ -205,14 +260,7 @@ impl Lowerer<'_> {
     ) -> Option<hir::Function> {
         let structure = self.semantics.structure(symbol.structure)?.clone();
         let span = syntax.map_or(structure.span, |constructor| constructor.span);
-        if syntax.is_some_and(|constructor| !constructor.throws.is_empty()) {
-            self.push(
-                "HIR001",
-                "checked-exception lowering is not implemented yet".to_owned(),
-                span,
-            );
-            return None;
-        }
+        let throwing = !symbol.throws.is_empty();
         let parameters = match syntax {
             Some(syntax) => {
                 if syntax.parameters.len() != symbol.parameters.len() {
@@ -242,6 +290,11 @@ impl Lowerer<'_> {
         let struct_type = TypeRef::Struct {
             path: structure.path.clone(),
         };
+        let previous_throwing = self.current_throwing;
+        let previous_target =
+            std::mem::replace(&mut self.exception_target, hir::ExceptionTarget::Function);
+        let previous_caught = self.caught_error.take();
+        self.current_throwing = throwing;
         let fields = symbol
             .initializations
             .iter()
@@ -260,8 +313,14 @@ impl Lowerer<'_> {
                     self.lower_resolved_call(&initialization.call, None, arguments)?,
                 ))
             })
-            .collect::<Option<Vec<_>>>()?;
-        let lowered_type = self.lower_type(&struct_type, span)?;
+            .collect::<Option<Vec<_>>>();
+        let lowered_type = self.lower_type(&struct_type, span);
+        let (Some(fields), Some(lowered_type)) = (fields, lowered_type) else {
+            self.current_throwing = previous_throwing;
+            self.exception_target = previous_target;
+            self.caught_error = previous_caught;
+            return None;
+        };
         let mut statements = vec![
             hir::Statement::Let {
                 name: "__stainless_constructed".to_owned(),
@@ -294,18 +353,25 @@ impl Lowerer<'_> {
         self.current_fluent_receiver = false;
         self.current_constructor = true;
         let lowered_body = match syntax.and_then(|constructor| constructor.body.as_ref()) {
-            Some(body) => self.lower_block(body)?,
-            None => hir::Block {
+            Some(body) => self.lower_block(body),
+            None => Some(hir::Block {
                 statements: Vec::new(),
-            },
+            }),
         };
         self.current_return_type = previous_return_type;
         self.current_fluent_receiver = previous_fluent_receiver;
         self.current_constructor = previous_constructor;
+        self.current_throwing = previous_throwing;
+        self.exception_target = previous_target;
+        self.caught_error = previous_caught;
+        let lowered_body = lowered_body?;
         statements.extend(lowered_body.statements);
-        statements.push(hir::Statement::Return(Some(hir::Expression::Name(
-            "__stainless_constructed".to_owned(),
-        ))));
+        let completed = hir::Expression::Name("__stainless_constructed".to_owned());
+        statements.push(hir::Statement::Return(Some(if throwing {
+            hir::Expression::Success(Some(Box::new(completed)))
+        } else {
+            completed
+        })));
 
         let mut source_path = structure.path.clone();
         source_path.push(
@@ -321,6 +387,7 @@ impl Lowerer<'_> {
             rust_name: symbol.mangled_name.clone(),
             parameters,
             return_type: lowered_type,
+            throws: throwing,
             body: hir::Block { statements },
             span,
         })
@@ -328,14 +395,6 @@ impl Lowerer<'_> {
 
     fn lower_function(&mut self, function: &ast::Function) -> Option<hir::Function> {
         let body = function.body.as_ref()?;
-        if !function.throws.is_empty() {
-            self.push(
-                "HIR001",
-                "checked-exception lowering is not implemented yet".to_owned(),
-                function.span,
-            );
-            return None;
-        }
         let Some(symbol) = self.semantics.function_at(function.span) else {
             self.push(
                 "HIR002",
@@ -388,27 +447,47 @@ impl Lowerer<'_> {
         }
 
         let return_type = self.lower_type(&symbol.return_type, function.return_type.span)?;
+        let throwing = !symbol.throws.is_empty();
         let previous_return_type = self.current_return_type.replace(symbol.return_type.clone());
         let previous_fluent_receiver = self.current_fluent_receiver;
+        let previous_throwing = self.current_throwing;
+        let previous_target =
+            std::mem::replace(&mut self.exception_target, hir::ExceptionTarget::Function);
+        let previous_caught = self.caught_error.take();
+        self.current_throwing = throwing;
         self.current_fluent_receiver = function.return_type.is_void() && symbol.receiver.is_some();
         let mut lowered_body = self.lower_block(body);
         if self.current_fluent_receiver
             && !block_definitely_returns(body)
             && let Some(body) = &mut lowered_body
         {
+            let value = hir::Expression::Name("__stainless_self".to_owned());
             body.statements
-                .push(hir::Statement::Return(Some(hir::Expression::Name(
-                    "__stainless_self".to_owned(),
-                ))));
+                .push(hir::Statement::Return(Some(if throwing {
+                    hir::Expression::Success(Some(Box::new(value)))
+                } else {
+                    value
+                })));
+        } else if throwing
+            && function.return_type.is_void()
+            && !block_definitely_returns(body)
+            && let Some(body) = &mut lowered_body
+        {
+            body.statements
+                .push(hir::Statement::Return(Some(hir::Expression::Success(None))));
         }
         self.current_return_type = previous_return_type;
         self.current_fluent_receiver = previous_fluent_receiver;
+        self.current_throwing = previous_throwing;
+        self.exception_target = previous_target;
+        self.caught_error = previous_caught;
         Some(hir::Function {
             source_path: symbol.path.clone(),
             module_path: function_module_path(symbol, self.semantics),
             rust_name: symbol.mangled_name.clone(),
             parameters,
             return_type,
+            throws: throwing,
             body: lowered_body?,
             span: function.span,
         })
@@ -438,7 +517,7 @@ impl Lowerer<'_> {
                     })
             }
             StatementKind::Return(value) => {
-                let value = match value {
+                let mut value = match value {
                     Some(value) => {
                         let Some(return_type) = self.current_return_type.clone() else {
                             self.push(
@@ -458,8 +537,27 @@ impl Lowerer<'_> {
                     }
                     None => None,
                 };
+                if self.current_throwing {
+                    value = Some(hir::Expression::Success(value.map(Box::new)));
+                }
                 Some(hir::Statement::Return(value))
             }
+            StatementKind::Throw(value) => {
+                let value = match value {
+                    Some(value) => {
+                        let resolution = self.semantics.expression(value.span)?;
+                        hir::ExceptionValue::New(
+                            self.lower_bound_expression(value, canonical_ref(&resolution.ty))?,
+                        )
+                    }
+                    None => hir::ExceptionValue::Existing(self.caught_error.clone()?),
+                };
+                Some(hir::Statement::Throw {
+                    value,
+                    target: self.exception_target.clone(),
+                })
+            }
+            StatementKind::Try(try_statement) => self.lower_try_statement(try_statement),
             StatementKind::If(if_statement) => {
                 let condition =
                     self.lower_expression(&if_statement.condition, ExpressionMode::Value)?;
@@ -475,8 +573,8 @@ impl Lowerer<'_> {
                 })
             }
             StatementKind::For(for_statement) => self.lower_for(for_statement),
-            StatementKind::Break => Some(hir::Statement::Break),
-            StatementKind::Continue => Some(hir::Statement::Continue),
+            StatementKind::Break => self.lower_loop_jump(false, statement.span),
+            StatementKind::Continue => self.lower_loop_jump(true, statement.span),
             StatementKind::Expression(expression) => {
                 let mode = if self
                     .semantics
@@ -501,6 +599,60 @@ impl Lowerer<'_> {
                 None
             }
         }
+    }
+
+    fn lower_try_statement(&mut self, try_statement: &ast::TryStatement) -> Option<hir::Statement> {
+        let index = self.try_index;
+        self.try_index += 1;
+        let label = format!("__stainless_try_{index}");
+        let error_name = format!("__stainless_error_{index}");
+        let unmatched_target =
+            if !self.current_throwing && self.exception_target == hir::ExceptionTarget::Function {
+                hir::ExceptionTarget::Unreachable
+            } else {
+                self.exception_target.clone()
+            };
+        let previous_target = std::mem::replace(
+            &mut self.exception_target,
+            hir::ExceptionTarget::Try(label.clone()),
+        );
+        let previous_caught = self.caught_error.take();
+        let body = self.lower_block(&try_statement.body);
+        self.exception_target = previous_target;
+        self.caught_error.clone_from(&previous_caught);
+        let body = body?;
+
+        let mut catches = Vec::new();
+        for catch in &try_statement.catches {
+            let (ty, binding) = if let Some(binding) = &catch.binding {
+                let resolution = self.semantics.binding(binding.span)?;
+                (
+                    Some(self.lower_type(canonical_ref(&resolution.ty), binding.span)?),
+                    Some(binding_name(&binding.name)),
+                )
+            } else {
+                (None, None)
+            };
+            self.caught_error = Some(error_name.clone());
+            let body = self.lower_block(&catch.body);
+            self.caught_error.clone_from(&previous_caught);
+            let body = body?;
+            catches.push(hir::Catch { ty, binding, body });
+        }
+
+        Some(hir::Statement::Try {
+            label,
+            error_name,
+            body,
+            body_falls_through: block_may_fall_through(&try_statement.body),
+            catches,
+            diverges: block_definitely_returns(&try_statement.body)
+                && try_statement
+                    .catches
+                    .iter()
+                    .all(|catch| block_definitely_returns(&catch.body)),
+            unmatched_target,
+        })
     }
 
     fn lower_local(
@@ -540,6 +692,8 @@ impl Lowerer<'_> {
     }
 
     fn lower_for(&mut self, statement: &ast::ForStatement) -> Option<hir::Statement> {
+        let label = format!("__stainless_loop_{}", self.loop_index);
+        self.loop_index += 1;
         match &statement.clause {
             ForClause::Classic(classic) => {
                 let initializer = match &classic.initializer {
@@ -573,11 +727,13 @@ impl Lowerer<'_> {
                     }
                     None => None,
                 };
+                let body = self.lower_loop_body(&label, &statement.body)?;
                 Some(hir::Statement::ClassicFor {
+                    label,
                     initializer,
                     condition,
                     update,
-                    body: self.statement_as_block(&statement.body)?,
+                    body,
                 })
             }
             ForClause::Range(range) => {
@@ -596,12 +752,14 @@ impl Lowerer<'_> {
                     TypeRef::Struct { .. } => hir::RangeMode::Clone,
                     _ => hir::RangeMode::Copy,
                 };
+                let body = self.lower_loop_body(&label, &statement.body)?;
                 Some(hir::Statement::RangeFor {
+                    label,
                     name: binding_name(&range.name),
                     mutable: binding.mutable && !binding.ty.is_reference(),
                     mode,
                     iterable: self.lower_expression(&range.iterable, ExpressionMode::Reference)?,
-                    body: self.statement_as_block(&statement.body)?,
+                    body,
                 })
             }
             ForClause::Error => {
@@ -613,6 +771,29 @@ impl Lowerer<'_> {
                 None
             }
         }
+    }
+
+    fn lower_loop_body(&mut self, label: &str, statement: &ast::Statement) -> Option<hir::Block> {
+        self.loop_labels.push(label.to_owned());
+        let body = self.statement_as_block(statement);
+        self.loop_labels.pop();
+        body
+    }
+
+    fn lower_loop_jump(&mut self, is_continue: bool, span: ast::Span) -> Option<hir::Statement> {
+        let Some(label) = self.loop_labels.last().cloned() else {
+            self.push(
+                "HIR003",
+                "loop jump reached HIR lowering without an enclosing loop".to_owned(),
+                span,
+            );
+            return None;
+        };
+        Some(if is_continue {
+            hir::Statement::Continue(label)
+        } else {
+            hir::Statement::Break(label)
+        })
     }
 
     fn statement_as_block(&mut self, statement: &ast::Statement) -> Option<hir::Block> {
@@ -852,7 +1033,7 @@ impl Lowerer<'_> {
         callee: Option<&ast::Expression>,
         arguments: &[ast::Expression],
     ) -> Option<hir::Expression> {
-        match &call.target {
+        let lowered = match &call.target {
             CallTarget::Stainless(id) => {
                 let Some(function) = self.semantics.function(*id) else {
                     self.push(
@@ -955,6 +1136,26 @@ impl Lowerer<'_> {
                 let expression = arguments.first()?;
                 self.lower_bound_expression(expression, target)
             }
+            CallTarget::Intrinsic(Intrinsic::ExceptionRoot { structure }) => {
+                let symbol = self.semantics.structure(*structure)?;
+                let message = arguments.first()?;
+                let expected = TypeRef::Native {
+                    path: "rust::String",
+                    arguments: Vec::new(),
+                };
+                Some(hir::Expression::Aggregate {
+                    ty: self.lower_type(
+                        &TypeRef::Struct {
+                            path: symbol.path.clone(),
+                        },
+                        call.span,
+                    )?,
+                    fields: vec![(
+                        "message".to_owned(),
+                        self.lower_bound_expression(message, &expected)?,
+                    )],
+                })
+            }
             CallTarget::Intrinsic(Intrinsic::StructAggregate { structure }) => {
                 let symbol = self.semantics.structure(*structure)?;
                 let mut expected = Vec::new();
@@ -986,6 +1187,14 @@ impl Lowerer<'_> {
                     fields,
                 })
             }
+        }?;
+        if call.throws.is_empty() {
+            Some(lowered)
+        } else {
+            Some(hir::Expression::Propagate {
+                expression: Box::new(lowered),
+                target: self.exception_target.clone(),
+            })
         }
     }
 
@@ -1277,10 +1486,49 @@ fn block_definitely_returns(block: &ast::Block) -> bool {
         .is_some_and(statement_definitely_returns)
 }
 
+fn block_may_fall_through(block: &ast::Block) -> bool {
+    block
+        .statements
+        .last()
+        .is_none_or(statement_may_fall_through)
+}
+
+fn statement_may_fall_through(statement: &ast::Statement) -> bool {
+    match &statement.kind {
+        StatementKind::Return(_)
+        | StatementKind::Throw(_)
+        | StatementKind::Break
+        | StatementKind::Continue => false,
+        StatementKind::Block(block) => block_may_fall_through(block),
+        StatementKind::If(statement) => {
+            statement_may_fall_through(&statement.then_branch)
+                || statement
+                    .else_branch
+                    .as_deref()
+                    .is_none_or(statement_may_fall_through)
+        }
+        StatementKind::Try(statement) => {
+            block_may_fall_through(&statement.body)
+                || statement
+                    .catches
+                    .iter()
+                    .any(|catch| block_may_fall_through(&catch.body))
+        }
+        _ => true,
+    }
+}
+
 fn statement_definitely_returns(statement: &ast::Statement) -> bool {
     match &statement.kind {
-        StatementKind::Return(_) => true,
+        StatementKind::Return(_) | StatementKind::Throw(_) => true,
         StatementKind::Block(block) => block_definitely_returns(block),
+        StatementKind::Try(statement) => {
+            block_definitely_returns(&statement.body)
+                && statement
+                    .catches
+                    .iter()
+                    .all(|catch| block_definitely_returns(&catch.body))
+        }
         StatementKind::If(statement) => {
             statement_definitely_returns(&statement.then_branch)
                 && statement

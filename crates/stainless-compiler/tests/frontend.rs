@@ -136,3 +136,36 @@ fn syntax_diagnostics_survive_ast_recovery() {
     );
     assert_eq!(analysis.ast.items.len(), 1);
 }
+
+#[test]
+fn structural_semantics_rejects_invalid_catch_and_rethrow_forms() {
+    let source = r"struct Failure : stainless::Exception {};
+
+void invalid() {
+    throw;
+    try {
+        return;
+    } catch (...) {
+        return;
+    } catch (Failure error) {
+        return;
+    }
+}
+";
+    let analysis = analyze(source);
+    let codes = analysis
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code.starts_with("SEM"))
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+
+    assert!(
+        analysis.parse.errors().is_empty(),
+        "{:?}",
+        analysis.parse.errors()
+    );
+    assert!(codes.contains(&"SEM011"), "{:?}", analysis.diagnostics);
+    assert!(codes.contains(&"SEM012"), "{:?}", analysis.diagnostics);
+    assert!(codes.contains(&"SEM013"), "{:?}", analysis.diagnostics);
+}

@@ -35,6 +35,9 @@ pub fn resolve(source: &SourceFile, bindings: &NativeBindings) -> Resolution {
         constructor_sets: BTreeMap::new(),
         constructor_by_span: BTreeMap::new(),
     };
+    if source_uses_exceptions(source) {
+        resolver.install_exception_builtins();
+    }
     resolver.collect_struct_names(&source.items, &mut Vec::new());
     resolver.resolve_struct_definitions(&source.items, &mut Vec::new());
     resolver.validate_struct_cycles();
@@ -75,6 +78,9 @@ struct FunctionContext {
     return_type: TypeRef,
     scopes: Vec<BTreeMap<String, Variable>>,
     receiver: Option<StructReceiver>,
+    declared_throws: Vec<StructId>,
+    handled_throws: Vec<Vec<StructId>>,
+    current_catch: Option<StructId>,
 }
 
 #[derive(Clone, Debug)]
@@ -104,6 +110,37 @@ struct ConcreteNativeCandidate {
 }
 
 impl Resolver<'_> {
+    fn install_exception_builtins(&mut self) {
+        let root = StructId(self.model.structs.len());
+        let root_path = vec!["stainless".to_owned(), "Exception".to_owned()];
+        self.model.structs.push(StructSymbol {
+            id: root,
+            path: root_path.clone(),
+            base: None,
+            fields: vec![FieldSymbol {
+                name: "message".to_owned(),
+                ty: TypeRef::Native {
+                    path: "rust::String",
+                    arguments: Vec::new(),
+                },
+                span: Span::default(),
+            }],
+            span: Span::default(),
+        });
+        self.struct_by_path.insert(root_path, root);
+
+        let rust_error = StructId(self.model.structs.len());
+        let rust_error_path = vec!["stainless".to_owned(), "RustError".to_owned()];
+        self.model.structs.push(StructSymbol {
+            id: rust_error,
+            path: rust_error_path.clone(),
+            base: Some(root),
+            fields: Vec::new(),
+            span: Span::default(),
+        });
+        self.struct_by_path.insert(rust_error_path, rust_error);
+    }
+
     fn collect_struct_names(&mut self, items: &[Item], namespace: &mut Vec<String>) {
         for item in items {
             match item {
@@ -302,9 +339,8 @@ impl Resolver<'_> {
             );
         }
         let type_namespace = &structure_path[..structure_path.len().saturating_sub(1)];
-        for thrown in &constructor.throws {
-            self.resolve_type(thrown, type_namespace, false);
-        }
+        let throws =
+            self.resolve_exception_set(&constructor.throws, type_namespace, constructor.span);
         let parameters = constructor
             .parameters
             .iter()
@@ -339,6 +375,7 @@ impl Resolver<'_> {
                 .eq(parameters.iter().map(|parameter| &parameter.ty));
             let has_definition = self.model.constructors[id.0].has_definition;
             let is_deleted = self.model.constructors[id.0].is_deleted;
+            let different_throws = self.model.constructors[id.0].throws != throws;
             if !same_modes {
                 self.push(
                     "RES055",
@@ -362,6 +399,13 @@ impl Resolver<'_> {
                     constructor.span,
                 );
             }
+            if different_throws {
+                self.push(
+                    "RES068",
+                    "constructor declarations have different checked exception sets".to_owned(),
+                    constructor.span,
+                );
+            }
             let symbol = &mut self.model.constructors[id.0];
             symbol.declarations.push(constructor.span);
             symbol.has_definition |= constructor.body.is_some();
@@ -382,6 +426,7 @@ impl Resolver<'_> {
             id,
             structure: owner,
             parameters,
+            throws,
             mangled_name,
             declarations: vec![constructor.span],
             has_definition: constructor.body.is_some(),
@@ -416,6 +461,7 @@ impl Resolver<'_> {
                 id,
                 structure: structure.id,
                 parameters: Vec::new(),
+                throws: Vec::new(),
                 mangled_name: mangle::function_name(&path, &[]),
                 declarations: vec![structure.span],
                 has_definition: true,
@@ -464,6 +510,7 @@ impl Resolver<'_> {
                 && constructor.parameters.is_empty()
                 && !constructor.is_deleted
                 && constructor.has_definition
+                && constructor.throws.is_empty()
         }) {
             visiting.remove(&structure);
             return true;
@@ -531,16 +578,24 @@ impl Resolver<'_> {
             structure,
             mutable: !function.is_const,
         });
+        let type_namespace = receiver.as_ref().map_or_else(
+            || namespace.to_vec(),
+            |receiver| {
+                let path = &self.model.structs[receiver.structure.0].path;
+                path[..path.len().saturating_sub(1)].to_vec()
+            },
+        );
         let parameters = function
             .parameters
             .iter()
             .map(|parameter| ParameterSymbol {
                 name: parameter.name.clone(),
-                ty: self.resolve_type(&parameter.ty, namespace, false),
+                ty: self.resolve_type(&parameter.ty, &type_namespace, false),
                 span: parameter.span,
             })
             .collect::<Vec<_>>();
-        let mut return_type = self.resolve_type(&function.return_type, namespace, false);
+        let mut return_type = self.resolve_type(&function.return_type, &type_namespace, false);
+        let throws = self.resolve_exception_set(&function.throws, &type_namespace, function.span);
         if return_type == TypeRef::Void
             && let Some(receiver) = &receiver
         {
@@ -576,6 +631,7 @@ impl Resolver<'_> {
             let different_return_type = existing.return_type != return_type;
             let duplicate_definition = existing.has_definition && function.body.is_some();
             let different_receiver = existing.receiver != receiver;
+            let different_throws = existing.throws != throws;
             if same_passing_modes {
                 if different_return_type {
                     self.push(
@@ -599,6 +655,16 @@ impl Resolver<'_> {
                         "RES045",
                         format!(
                             "declarations of `{}` disagree on member `const` qualification",
+                            display_path(&path)
+                        ),
+                        function.span,
+                    );
+                }
+                if different_throws {
+                    self.push(
+                        "RES069",
+                        format!(
+                            "declarations of `{}` have different checked exception sets",
                             display_path(&path)
                         ),
                         function.span,
@@ -636,6 +702,7 @@ impl Resolver<'_> {
             path: path.clone(),
             parameters,
             return_type,
+            throws,
             receiver,
             mangled_name,
             declarations: vec![function.span],
@@ -708,6 +775,7 @@ impl Resolver<'_> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn resolve_constructor_body(&mut self, constructor: &ast::Constructor, _namespace: &[String]) {
         let Some(id) = self.constructor_by_span.get(&constructor.span).copied() else {
             return;
@@ -716,9 +784,6 @@ impl Resolver<'_> {
         let structure = self.model.structs[symbol.structure.0].clone();
         let constructor_namespace =
             structure.path[..structure.path.len().saturating_sub(1)].to_vec();
-        if !constructor.throws.is_empty() {
-            return;
-        }
         let mut scope = BTreeMap::new();
         for (syntax, parameter) in constructor.parameters.iter().zip(&symbol.parameters) {
             scope.insert(
@@ -734,6 +799,9 @@ impl Resolver<'_> {
             return_type: TypeRef::Void,
             scopes: vec![scope.clone()],
             receiver: None,
+            declared_throws: symbol.throws.clone(),
+            handled_throws: Vec::new(),
+            current_catch: None,
         };
         let slots = self.constructor_slots(symbol.structure);
         let mut explicit = BTreeMap::<usize, &ast::ConstructorInitializer>::new();
@@ -784,6 +852,9 @@ impl Resolver<'_> {
                 )
             };
             if let Some(call) = call {
+                for thrown in &call.throws {
+                    self.validate_checked_effect(*thrown, call.span, &initialization_context);
+                }
                 self.model.calls.push(call.clone());
                 initializations.push(ConstructorFieldInitialization {
                     rust_name,
@@ -803,6 +874,9 @@ impl Resolver<'_> {
                 structure: symbol.structure,
                 mutable: true,
             }),
+            declared_throws: symbol.throws,
+            handled_throws: Vec::new(),
+            current_catch: None,
         };
         if let Some(body) = &constructor.body {
             self.resolve_block(body, &mut context, false);
@@ -825,6 +899,9 @@ impl Resolver<'_> {
                 return_type: TypeRef::Void,
                 scopes: vec![BTreeMap::new()],
                 receiver: None,
+                declared_throws: Vec::new(),
+                handled_throws: Vec::new(),
+                current_catch: None,
             };
             let mut initializations = Vec::new();
             for (rust_name, ty) in self.constructor_slots(symbol.structure) {
@@ -980,6 +1057,7 @@ impl Resolver<'_> {
                     target: target.clone(),
                 }),
                 return_type: target.clone(),
+                throws: Vec::new(),
             })
         } else {
             None
@@ -1031,11 +1109,18 @@ impl Resolver<'_> {
         }
     }
 
-    fn resolve_function_body(&mut self, function: &ast::Function, namespace: &[String]) {
+    fn resolve_function_body(&mut self, function: &ast::Function, _namespace: &[String]) {
         let Some(id) = self.function_by_span.get(&function.span).copied() else {
             return;
         };
         let symbol = self.model.functions[id.0].clone();
+        let function_namespace = symbol.receiver.as_ref().map_or_else(
+            || symbol.path[..symbol.path.len().saturating_sub(1)].to_vec(),
+            |receiver| {
+                let path = &self.model.structs[receiver.structure.0].path;
+                path[..path.len().saturating_sub(1)].to_vec()
+            },
+        );
         let mut initial_scope = BTreeMap::new();
         for (index, parameter) in function.parameters.iter().enumerate() {
             let Some(symbol_parameter) = symbol.parameters.get(index) else {
@@ -1050,10 +1135,13 @@ impl Resolver<'_> {
             );
         }
         let mut context = FunctionContext {
-            namespace: namespace.to_vec(),
+            namespace: function_namespace,
             return_type: symbol.return_type,
             scopes: vec![initial_scope],
             receiver: symbol.receiver,
+            declared_throws: symbol.throws,
+            handled_throws: Vec::new(),
+            current_catch: None,
         };
         if let Some(body) = &function.body {
             self.resolve_block(body, &mut context, false);
@@ -1092,6 +1180,12 @@ impl Resolver<'_> {
                         self.validate_binding(&expected, &actual, value.span, "return value");
                     }
                 }
+            }
+            StatementKind::Throw(value) => {
+                self.resolve_throw_statement(value.as_ref(), statement.span, context);
+            }
+            StatementKind::Try(try_statement) => {
+                self.resolve_try_statement(try_statement, context);
             }
             StatementKind::If(if_statement) => {
                 let condition =
@@ -1147,6 +1241,171 @@ impl Resolver<'_> {
             | StatementKind::Empty
             | StatementKind::Error => {}
         }
+    }
+
+    fn resolve_throw_statement(
+        &mut self,
+        value: Option<&Expression>,
+        span: Span,
+        context: &mut FunctionContext,
+    ) {
+        let thrown = if let Some(value) = value {
+            let actual = self.resolve_expression(value, None, context);
+            let TypeRef::Struct { path } = canonical(&actual.ty) else {
+                if actual.ty != TypeRef::Error {
+                    self.push(
+                        "RES074",
+                        format!(
+                            "`throw` requires an exception struct, found `{}`",
+                            display_type(&actual.ty)
+                        ),
+                        value.span,
+                    );
+                }
+                return;
+            };
+            let Some(id) = self.struct_by_path.get(&path).copied() else {
+                return;
+            };
+            if !self.is_exception_struct(id) {
+                self.push(
+                    "RES074",
+                    format!(
+                        "`{}` does not derive from `stainless::Exception`",
+                        display_path(&path)
+                    ),
+                    value.span,
+                );
+                return;
+            }
+            id
+        } else {
+            let Some(id) = context.current_catch else {
+                return;
+            };
+            id
+        };
+        self.validate_checked_effect(thrown, span, context);
+    }
+
+    fn resolve_try_statement(
+        &mut self,
+        try_statement: &ast::TryStatement,
+        context: &mut FunctionContext,
+    ) {
+        let root = self.exception_root();
+        let mut catches = Vec::new();
+        let mut resolved_catches = Vec::new();
+        for catch in &try_statement.catches {
+            let caught = if let Some(binding) = &catch.binding {
+                let resolved = self.resolve_type(&binding.ty, &context.namespace, false);
+                if let TypeRef::Struct { path } = canonical(&resolved) {
+                    self.struct_by_path.get(&path).copied().and_then(|id| {
+                        if self.is_exception_struct(id) {
+                            Some(id)
+                        } else {
+                            self.push(
+                                "RES076",
+                                format!(
+                                    "`{}` does not derive from `stainless::Exception`",
+                                    display_path(&path)
+                                ),
+                                binding.span,
+                            );
+                            None
+                        }
+                    })
+                } else {
+                    if resolved != TypeRef::Error {
+                        self.push(
+                            "RES076",
+                            "catch binding must name an exception struct".to_owned(),
+                            binding.span,
+                        );
+                    }
+                    None
+                }
+            } else {
+                root
+            };
+            if let Some(caught) = caught {
+                if catches
+                    .iter()
+                    .any(|previous| self.exception_covers(*previous, caught))
+                {
+                    self.push(
+                        "RES077",
+                        format!(
+                            "catch for `{}` is unreachable after an earlier base handler",
+                            display_path(&self.model.structs[caught.0].path)
+                        ),
+                        catch.span,
+                    );
+                }
+                catches.push(caught);
+            }
+            resolved_catches.push(caught);
+        }
+
+        context.handled_throws.push(catches.clone());
+        self.resolve_block(&try_statement.body, context, true);
+        context.handled_throws.pop();
+
+        for (catch, caught) in try_statement.catches.iter().zip(resolved_catches) {
+            context.scopes.push(BTreeMap::new());
+            if let Some(binding) = &catch.binding
+                && let Some(caught) = caught
+            {
+                let path = self.model.structs[caught.0].path.clone();
+                let ty = TypeRef::Reference {
+                    mutable: false,
+                    target: Box::new(TypeRef::Struct { path }),
+                };
+                let variable = Variable {
+                    ty: ty.clone(),
+                    mutable: false,
+                };
+                self.model.bindings.push(BindingResolution {
+                    span: binding.span,
+                    name: binding.name.clone(),
+                    ty,
+                    mutable: false,
+                });
+                let scope = context.scopes.last_mut().expect("catch scope was pushed");
+                self.insert_variable(scope, &binding.name, variable, binding.span);
+            }
+            let previous = std::mem::replace(&mut context.current_catch, caught.or(root));
+            self.resolve_block(&catch.body, context, false);
+            context.current_catch = previous;
+            context.scopes.pop();
+        }
+    }
+
+    fn validate_checked_effect(&mut self, thrown: StructId, span: Span, context: &FunctionContext) {
+        let handled = context.handled_throws.iter().rev().any(|catches| {
+            catches
+                .iter()
+                .any(|caught| self.exception_covers(*caught, thrown))
+        });
+        let declared = context
+            .declared_throws
+            .iter()
+            .any(|allowed| self.exception_covers(*allowed, thrown));
+        if !handled && !declared {
+            self.push(
+                "RES075",
+                format!(
+                    "checked exception `{}` must be caught or declared in `throws`",
+                    display_path(&self.model.structs[thrown.0].path)
+                ),
+                span,
+            );
+        }
+    }
+
+    fn exception_root(&self) -> Option<StructId> {
+        let path = vec!["stainless".to_owned(), "Exception".to_owned()];
+        self.struct_by_path.get(&path).copied()
     }
 
     fn resolve_local(&mut self, local: &ast::LocalDeclaration, context: &mut FunctionContext) {
@@ -1366,6 +1625,11 @@ impl Resolver<'_> {
             }
             ExpressionKind::Error => (error_info(), None, None),
         };
+        if let Some(call) = &call {
+            for thrown in &call.throws {
+                self.validate_checked_effect(*thrown, expression.span, context);
+            }
+        }
         self.record_expression(expression.span, info.clone(), call, field);
         info
     }
@@ -1470,6 +1734,7 @@ impl Resolver<'_> {
             span,
             target: CallTarget::Intrinsic(Intrinsic::StructAggregate { structure: id }),
             return_type: return_type.clone(),
+            throws: Vec::new(),
         };
         (temporary(return_type), Some(call))
     }
@@ -1641,6 +1906,11 @@ impl Resolver<'_> {
                 }
                 if let Some(structure) = self.lookup_struct_path(&path.segments, &context.namespace)
                 {
+                    if self.model.structs[structure.0].path == ["stainless", "Exception"] {
+                        return self.resolve_exception_root_constructor(
+                            structure, arguments, span, context,
+                        );
+                    }
                     return self.resolve_user_constructor(structure, arguments, span, context);
                 }
                 match self.lookup_native_instance(path, expected, context, span) {
@@ -1880,6 +2150,7 @@ impl Resolver<'_> {
             span,
             target: CallTarget::Stainless(id),
             return_type: return_type.clone(),
+            throws: symbol.throws,
         };
         (info_for_return_type(return_type), Some(call))
     }
@@ -1918,6 +2189,7 @@ impl Resolver<'_> {
             span,
             target: CallTarget::Intrinsic(Intrinsic::Move),
             return_type: return_type.clone(),
+            throws: Vec::new(),
         };
         (temporary(return_type), Some(call))
     }
@@ -1956,8 +2228,45 @@ impl Resolver<'_> {
                 target: target.clone(),
             }),
             return_type: target.clone(),
+            throws: Vec::new(),
         };
         (temporary(target), Some(call))
+    }
+
+    fn resolve_exception_root_constructor(
+        &mut self,
+        structure: StructId,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        let expected = TypeRef::Native {
+            path: "rust::String",
+            arguments: Vec::new(),
+        };
+        if arguments.len() != 1 {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES073",
+                "`stainless::Exception` requires one String message".to_owned(),
+                span,
+            );
+            return (error_info(), None);
+        }
+        let actual = self.resolve_expression(&arguments[0], Some(&expected), context);
+        self.validate_binding(&expected, &actual, arguments[0].span, "exception message");
+        let return_type = TypeRef::Struct {
+            path: self.model.structs[structure.0].path.clone(),
+        };
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::ExceptionRoot { structure }),
+            return_type: return_type.clone(),
+            throws: Vec::new(),
+        };
+        (temporary(return_type), Some(call))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2065,6 +2374,7 @@ impl Resolver<'_> {
                     target: target.clone(),
                 }),
                 return_type: target.clone(),
+                throws: Vec::new(),
             };
             return (temporary(target), Some(call));
         }
@@ -2138,6 +2448,7 @@ impl Resolver<'_> {
             span,
             target: CallTarget::Constructor(id),
             return_type: return_type.clone(),
+            throws: symbol.throws,
         };
         (temporary(return_type), Some(call))
     }
@@ -2258,6 +2569,7 @@ impl Resolver<'_> {
             span,
             target: CallTarget::Stainless(id),
             return_type: return_type.clone(),
+            throws: symbol.throws,
         };
         (info_for_return_type(return_type), Some(call))
     }
@@ -2398,6 +2710,7 @@ impl Resolver<'_> {
             span,
             target: CallTarget::Native(native_call),
             return_type: candidate.return_type.clone(),
+            throws: Vec::new(),
         };
         (info_for_return_type(candidate.return_type), Some(call))
     }
@@ -2600,8 +2913,108 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
     ) {
         if let Some(call) = self.resolve_default_call(ty, span, context) {
+            for thrown in &call.throws {
+                self.validate_checked_effect(*thrown, call.span, context);
+            }
             self.model.calls.push(call);
         }
+    }
+
+    fn resolve_exception_set(
+        &mut self,
+        syntax: &[ast::Type],
+        namespace: &[String],
+        declaration_span: Span,
+    ) -> Vec<StructId> {
+        let mut exceptions = Vec::new();
+        for ty in syntax {
+            let resolved = self.resolve_type(ty, namespace, false);
+            if resolved.is_reference() {
+                self.push(
+                    "RES070",
+                    "a `throws` entry must be an exception struct value type".to_owned(),
+                    ty.span,
+                );
+                continue;
+            }
+            let TypeRef::Struct { path } = canonical(&resolved) else {
+                if resolved != TypeRef::Error {
+                    self.push(
+                        "RES070",
+                        format!(
+                            "checked exception `{}` is not a struct",
+                            display_type(&resolved)
+                        ),
+                        ty.span,
+                    );
+                }
+                continue;
+            };
+            let Some(id) = self.struct_by_path.get(&path).copied() else {
+                continue;
+            };
+            if !self.is_exception_struct(id) {
+                self.push(
+                    "RES070",
+                    format!(
+                        "`{}` does not derive from `stainless::Exception`",
+                        display_path(&path)
+                    ),
+                    ty.span,
+                );
+                continue;
+            }
+            if exceptions.contains(&id) {
+                self.push(
+                    "RES071",
+                    format!("duplicate checked exception `{}`", display_path(&path)),
+                    ty.span,
+                );
+                continue;
+            }
+            exceptions.push(id);
+        }
+        exceptions.sort_by(|left, right| {
+            self.model.structs[left.0]
+                .path
+                .cmp(&self.model.structs[right.0].path)
+        });
+        for (index, derived) in exceptions.iter().enumerate() {
+            if exceptions
+                .iter()
+                .enumerate()
+                .any(|(other, base)| index != other && self.exception_covers(*base, *derived))
+            {
+                self.push(
+                    "RES072",
+                    format!(
+                        "checked exception `{}` is redundant because a listed base covers it",
+                        display_path(&self.model.structs[derived.0].path)
+                    ),
+                    declaration_span,
+                );
+            }
+        }
+        exceptions
+    }
+
+    fn is_exception_struct(&self, structure: StructId) -> bool {
+        let path = vec!["stainless".to_owned(), "Exception".to_owned()];
+        let Some(root) = self.struct_by_path.get(&path).copied() else {
+            return false;
+        };
+        self.exception_covers(root, structure)
+    }
+
+    fn exception_covers(&self, base: StructId, thrown: StructId) -> bool {
+        let mut current = Some(thrown);
+        while let Some(id) = current {
+            if id == base {
+                return true;
+            }
+            current = self.model.structs[id.0].base;
+        }
+        false
     }
 
     fn lookup_native_instance(
@@ -3360,4 +3773,65 @@ fn binary_name(operator: BinaryOperator) -> &'static str {
         BinaryOperator::Divide => "/",
         BinaryOperator::Remainder => "%",
     }
+}
+
+fn source_uses_exceptions(source: &SourceFile) -> bool {
+    fn block_uses_exceptions(block: &ast::Block) -> bool {
+        block.statements.iter().any(statement_uses_exceptions)
+    }
+
+    fn statement_uses_exceptions(statement: &Statement) -> bool {
+        match &statement.kind {
+            StatementKind::Throw(_) | StatementKind::Try(_) => true,
+            StatementKind::Block(block) => block_uses_exceptions(block),
+            StatementKind::If(statement) => {
+                statement_uses_exceptions(&statement.then_branch)
+                    || statement
+                        .else_branch
+                        .as_deref()
+                        .is_some_and(statement_uses_exceptions)
+            }
+            StatementKind::For(statement) => statement_uses_exceptions(&statement.body),
+            StatementKind::Local(_)
+            | StatementKind::Return(_)
+            | StatementKind::Break
+            | StatementKind::Continue
+            | StatementKind::Expression(_)
+            | StatementKind::Empty
+            | StatementKind::Error => false,
+        }
+    }
+
+    fn items_use_exceptions(items: &[Item]) -> bool {
+        items.iter().any(|item| match item {
+            Item::Namespace(namespace) => items_use_exceptions(&namespace.items),
+            Item::Struct(structure) => {
+                structure.base.as_ref().is_some_and(|base| {
+                    matches!(
+                        base.segments.as_slice(),
+                        [namespace, name]
+                            if namespace == "stainless"
+                                && matches!(name.as_str(), "Exception" | "RustError")
+                    )
+                }) || structure.constructors.iter().any(|constructor| {
+                    !constructor.throws.is_empty()
+                        || constructor.body.as_ref().is_some_and(block_uses_exceptions)
+                }) || structure.functions.iter().any(|function| {
+                    !function.throws.is_empty()
+                        || function.body.as_ref().is_some_and(block_uses_exceptions)
+                })
+            }
+            Item::Constructor(constructor) => {
+                !constructor.throws.is_empty()
+                    || constructor.body.as_ref().is_some_and(block_uses_exceptions)
+            }
+            Item::Function(function) => {
+                !function.throws.is_empty()
+                    || function.body.as_ref().is_some_and(block_uses_exceptions)
+            }
+            Item::Use(_) => false,
+        })
+    }
+
+    items_use_exceptions(&source.items)
 }

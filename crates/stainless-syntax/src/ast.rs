@@ -75,6 +75,9 @@ ast_node!(ThrowsClause, ThrowsClause);
 ast_node!(Block, Block);
 ast_node!(LocalDeclaration, LocalDeclaration);
 ast_node!(ReturnStatement, ReturnStatement);
+ast_node!(ThrowStatement, ThrowStatement);
+ast_node!(TryStatement, TryStatement);
+ast_node!(CatchClause, CatchClause);
 ast_node!(IfStatement, IfStatement);
 ast_node!(ElseClause, ElseClause);
 ast_node!(ForStatement, ForStatement);
@@ -210,6 +213,8 @@ pub enum Statement {
     Block(Block),
     Local(LocalDeclaration),
     Return(ReturnStatement),
+    Throw(ThrowStatement),
+    Try(TryStatement),
     If(IfStatement),
     For(ForStatement),
     Break(BreakStatement),
@@ -226,6 +231,8 @@ impl AstNode for Statement {
             SyntaxKind::Block
                 | SyntaxKind::LocalDeclaration
                 | SyntaxKind::ReturnStatement
+                | SyntaxKind::ThrowStatement
+                | SyntaxKind::TryStatement
                 | SyntaxKind::IfStatement
                 | SyntaxKind::ForStatement
                 | SyntaxKind::BreakStatement
@@ -241,6 +248,8 @@ impl AstNode for Statement {
             SyntaxKind::Block => Block::cast(syntax).map(Self::Block),
             SyntaxKind::LocalDeclaration => LocalDeclaration::cast(syntax).map(Self::Local),
             SyntaxKind::ReturnStatement => ReturnStatement::cast(syntax).map(Self::Return),
+            SyntaxKind::ThrowStatement => ThrowStatement::cast(syntax).map(Self::Throw),
+            SyntaxKind::TryStatement => TryStatement::cast(syntax).map(Self::Try),
             SyntaxKind::IfStatement => IfStatement::cast(syntax).map(Self::If),
             SyntaxKind::ForStatement => ForStatement::cast(syntax).map(Self::For),
             SyntaxKind::BreakStatement => BreakStatement::cast(syntax).map(Self::Break),
@@ -259,6 +268,8 @@ impl AstNode for Statement {
             Self::Block(node) => node.syntax(),
             Self::Local(node) => node.syntax(),
             Self::Return(node) => node.syntax(),
+            Self::Throw(node) => node.syntax(),
+            Self::Try(node) => node.syntax(),
             Self::If(node) => node.syntax(),
             Self::For(node) => node.syntax(),
             Self::Break(node) => node.syntax(),
@@ -792,6 +803,47 @@ impl ReturnStatement {
     #[must_use]
     pub fn value(&self) -> Option<Expression> {
         expression_children(self.syntax()).next()
+    }
+}
+
+impl ThrowStatement {
+    #[must_use]
+    pub fn value(&self) -> Option<Expression> {
+        expression_children(self.syntax()).next()
+    }
+}
+
+impl TryStatement {
+    #[must_use]
+    pub fn body(&self) -> Option<Block> {
+        child(self.syntax())
+    }
+
+    #[must_use]
+    pub fn catches(&self) -> AstChildren<CatchClause> {
+        children(self.syntax())
+    }
+}
+
+impl CatchClause {
+    #[must_use]
+    pub fn is_catch_all(&self) -> bool {
+        token(self.syntax(), SyntaxKind::Ellipsis).is_some()
+    }
+
+    #[must_use]
+    pub fn ty(&self) -> Option<TypeReference> {
+        child(self.syntax())
+    }
+
+    #[must_use]
+    pub fn name_token(&self) -> Option<SyntaxToken> {
+        direct_tokens(self.syntax()).find(|token| token.kind() == SyntaxKind::Identifier)
+    }
+
+    #[must_use]
+    pub fn body(&self) -> Option<Block> {
+        child(self.syntax())
     }
 }
 

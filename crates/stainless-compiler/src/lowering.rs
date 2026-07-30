@@ -207,6 +207,49 @@ fn lower_statement(statement: cst::Statement) -> Statement {
         cst::Statement::Return(return_statement) => {
             StatementKind::Return(return_statement.value().map(lower_expression))
         }
+        cst::Statement::Throw(throw_statement) => {
+            StatementKind::Throw(throw_statement.value().map(lower_expression))
+        }
+        cst::Statement::Try(try_statement) => {
+            let body = try_statement.body().map_or_else(
+                || ast::Block {
+                    statements: Vec::new(),
+                    span: statement_span,
+                },
+                |body| lower_block(&body),
+            );
+            StatementKind::Try(ast::TryStatement {
+                body,
+                catches: try_statement
+                    .catches()
+                    .map(|catch| {
+                        let catch_span = span(&catch);
+                        ast::CatchClause {
+                            binding: (!catch.is_catch_all()).then(|| {
+                                let ty = catch
+                                    .ty()
+                                    .map_or_else(|| error_type(catch_span), |ty| lower_type(&ty));
+                                ast::CatchBinding {
+                                    span: ty.span,
+                                    ty,
+                                    name: catch
+                                        .name_token()
+                                        .map_or_else(missing_name, |token| token.text().to_owned()),
+                                }
+                            }),
+                            body: catch.body().map_or_else(
+                                || ast::Block {
+                                    statements: Vec::new(),
+                                    span: catch_span,
+                                },
+                                |body| lower_block(&body),
+                            ),
+                            span: catch_span,
+                        }
+                    })
+                    .collect(),
+            })
+        }
         cst::Statement::If(if_statement) => {
             let condition = if_statement
                 .condition()

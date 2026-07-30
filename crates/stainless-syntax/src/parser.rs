@@ -431,6 +431,8 @@ impl Parser<'_> {
         match self.current() {
             Some(SyntaxKind::LBrace) => self.parse_block(),
             Some(SyntaxKind::ReturnKw) => self.parse_return_statement(),
+            Some(SyntaxKind::ThrowKw) => self.parse_throw_statement(),
+            Some(SyntaxKind::TryKw) => self.parse_try_statement(),
             Some(SyntaxKind::IfKw) => self.parse_if_statement(),
             Some(SyntaxKind::ForKw) => self.parse_for_statement(),
             Some(SyntaxKind::BreakKw) => {
@@ -471,6 +473,44 @@ impl Parser<'_> {
             self.parse_expression();
         }
         self.expect(SyntaxKind::Semicolon, "expected `;` after return");
+        self.finish();
+    }
+
+    fn parse_throw_statement(&mut self) {
+        self.start(SyntaxKind::ThrowStatement);
+        self.bump();
+        if !self.at(SyntaxKind::Semicolon) {
+            self.parse_expression();
+        }
+        self.expect(SyntaxKind::Semicolon, "expected `;` after throw");
+        self.finish();
+    }
+
+    fn parse_try_statement(&mut self) {
+        self.start(SyntaxKind::TryStatement);
+        self.bump();
+        self.parse_block();
+        if !self.at(SyntaxKind::CatchKw) {
+            self.error("expected at least one `catch` after `try`");
+        }
+        while self.at(SyntaxKind::CatchKw) {
+            self.parse_catch_clause();
+        }
+        self.finish();
+    }
+
+    fn parse_catch_clause(&mut self) {
+        self.start(SyntaxKind::CatchClause);
+        self.bump();
+        self.expect(SyntaxKind::LParen, "expected `(` after `catch`");
+        if self.eat(SyntaxKind::Ellipsis) {
+            // A catch-all has no binding.
+        } else {
+            self.parse_type(false);
+            self.expect(SyntaxKind::Identifier, "expected a catch binding name");
+        }
+        self.expect(SyntaxKind::RParen, "expected `)` after catch binding");
+        self.parse_block();
         self.finish();
     }
 

@@ -67,6 +67,8 @@ pub struct ConstructorSymbol {
     pub structure: StructId,
     /// Resolved parameters.
     pub parameters: Vec<ParameterSymbol>,
+    /// Declared checked exception set.
+    pub throws: Vec<StructId>,
     /// Deterministic generated Rust function name.
     pub mangled_name: String,
     /// All matching declaration/definition ranges.
@@ -118,6 +120,8 @@ pub struct FunctionSymbol {
     pub parameters: Vec<ParameterSymbol>,
     /// Resolved return type.
     pub return_type: TypeRef,
+    /// Declared checked exception set.
+    pub throws: Vec<StructId>,
     /// Implicit member receiver, absent for free functions.
     pub receiver: Option<StructReceiver>,
     /// Deterministic generated Rust name.
@@ -186,6 +190,8 @@ pub struct ResolvedCall {
     pub target: CallTarget,
     /// Concrete return type.
     pub return_type: TypeRef,
+    /// Checked exception types that may escape this invocation.
+    pub throws: Vec<StructId>,
 }
 
 /// Call categories represented by the initial semantic model.
@@ -246,6 +252,11 @@ pub enum Intrinsic {
     /// Aggregate construction of a user-defined struct.
     StructAggregate {
         /// Constructed struct.
+        structure: StructId,
+    },
+    /// Compiler-provided `stainless::Exception(message)` construction.
+    ExceptionRoot {
+        /// Built-in root struct.
         structure: StructId,
     },
     /// Direct initialization from one exact value.

@@ -38,6 +38,10 @@ pub struct Struct {
     pub rust_name: String,
     /// Direct representation fields, including an optional base subobject.
     pub fields: Vec<Field>,
+    /// Whether this struct participates in the checked-exception hierarchy.
+    pub is_exception: bool,
+    /// Embedded exception-base field, absent on the compiler-provided root.
+    pub exception_base_field: Option<String>,
 }
 
 /// One generated Rust struct field.
@@ -62,6 +66,8 @@ pub struct Function {
     pub parameters: Vec<Parameter>,
     /// Resolved return type.
     pub return_type: Type,
+    /// Whether the Rust return type is wrapped in the erased exception Result.
+    pub throws: bool,
     /// Lowered function body.
     pub body: Block,
     /// Source range used for backend diagnostics.
@@ -134,6 +140,30 @@ pub enum Statement {
     },
     /// A return statement.
     Return(Option<Expression>),
+    /// Create or rethrow a checked exception toward the active boundary.
+    Throw {
+        /// New value or existing erased catch allocation.
+        value: ExceptionValue,
+        /// Enclosing function or generated try boundary.
+        target: ExceptionTarget,
+    },
+    /// Protected execution followed by ordered typed handlers.
+    Try {
+        /// Unique Rust label for propagation from the protected body.
+        label: String,
+        /// Hidden erased error binding.
+        error_name: String,
+        /// Protected body.
+        body: Block,
+        /// Whether normal control can reach the end of the protected body.
+        body_falls_through: bool,
+        /// Handlers in source order.
+        catches: Vec<Catch>,
+        /// Whether every successful and handled path exits the enclosing flow.
+        diverges: bool,
+        /// Destination for an unmatched exception.
+        unmatched_target: ExceptionTarget,
+    },
     /// Conditional control flow.
     If {
         /// Boolean condition.
@@ -145,6 +175,8 @@ pub enum Statement {
     },
     /// A three-clause loop.
     ClassicFor {
+        /// Generated Rust loop label used by nested try blocks.
+        label: String,
         /// Optional initializer.
         initializer: Option<ForInitializer>,
         /// Optional condition.
@@ -156,6 +188,8 @@ pub enum Statement {
     },
     /// A range loop over a native collection.
     RangeFor {
+        /// Generated Rust loop label used by nested try blocks.
+        label: String,
         /// Rust binding identifier.
         name: String,
         /// Whether a copied value binding is mutable.
@@ -167,12 +201,43 @@ pub enum Statement {
         /// Loop body.
         body: Block,
     },
-    /// Exit the nearest loop.
-    Break,
-    /// Continue the nearest loop.
-    Continue,
+    /// Exit the source loop identified during lowering.
+    Break(String),
+    /// Continue the source loop identified during lowering.
+    Continue(String),
     /// Evaluate an expression for side effects.
     Expression(Expression),
+}
+
+/// A newly allocated exception or a catch allocation being rethrown.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExceptionValue {
+    /// Box this concrete exception value.
+    New(Expression),
+    /// Move an existing erased exception box.
+    Existing(String),
+}
+
+/// Where checked propagation exits.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExceptionTarget {
+    /// Return `Err` from the current throwing function.
+    Function,
+    /// Break from a generated labeled try boundary with `Err`.
+    Try(String),
+    /// Statically exhaustive handlers make this carrier state impossible.
+    Unreachable,
+}
+
+/// One checked-exception handler.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Catch {
+    /// Caught exception type; absent for `catch (...)`.
+    pub ty: Option<Type>,
+    /// Rust catch binding; absent for catch-all.
+    pub binding: Option<String>,
+    /// Handler body.
+    pub body: Block,
 }
 
 /// The initializer slot of a classic loop.
@@ -234,6 +299,15 @@ pub enum Expression {
     /// Explicitly consume a binding, even when the surrounding context borrows
     /// the resulting temporary.
     Move(Box<Expression>),
+    /// Convert a normal return value into `Ok`.
+    Success(Option<Box<Expression>>),
+    /// Extract a successful checked call or propagate its erased error.
+    Propagate {
+        /// Result-producing expression.
+        expression: Box<Expression>,
+        /// Active checked boundary.
+        target: ExceptionTarget,
+    },
     /// A prefix operation that maps directly to Rust.
     Prefix {
         /// Source operator.

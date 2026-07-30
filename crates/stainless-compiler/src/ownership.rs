@@ -24,6 +24,7 @@ pub fn validate(source: &ast::SourceFile, semantics: &SemanticModel) -> Vec<Diag
         returns_reference: false,
         loop_depth: 0,
         loops: Vec::new(),
+        exceptions: Vec::new(),
     };
     analyzer.items(&source.items);
     analyzer
@@ -158,12 +159,18 @@ struct Analyzer<'a> {
     returns_reference: bool,
     loop_depth: usize,
     loops: Vec<LoopContext>,
+    exceptions: Vec<ExceptionContext>,
 }
 
 struct LoopContext {
     scope_depth: usize,
     break_states: Vec<FlowState>,
     continue_states: Vec<FlowState>,
+}
+
+struct ExceptionContext {
+    scope_depth: usize,
+    states: Vec<FlowState>,
 }
 
 impl Analyzer<'_> {
@@ -215,6 +222,7 @@ impl Analyzer<'_> {
         }
         self.return_borrow = None;
         self.returns_reference = false;
+        self.exceptions.clear();
         if let Some(body) = &constructor.body {
             self.block(body, false);
         }
@@ -241,6 +249,7 @@ impl Analyzer<'_> {
         self.return_borrow =
             return_borrow_parameter(&symbol).and_then(|index| parameter_ids.get(index).copied());
         self.returns_reference = symbol.return_type.is_reference();
+        self.exceptions.clear();
         if let Some(body) = &function.body {
             self.block(body, false);
         }
@@ -282,6 +291,57 @@ impl Analyzer<'_> {
                     }
                 }
                 false
+            }
+            StatementKind::Throw(value) => {
+                if let Some(value) = value {
+                    self.expression(value, Usage::Read);
+                }
+                self.capture_exception_state();
+                false
+            }
+            StatementKind::Try(try_statement) => {
+                let baseline = self.state.clone();
+                self.exceptions.push(ExceptionContext {
+                    scope_depth: baseline.scopes.len(),
+                    states: Vec::new(),
+                });
+                let (try_state, try_reachable) =
+                    self.analyze_block_branch(&try_statement.body, baseline.clone(), None);
+                let exception_states = self
+                    .exceptions
+                    .pop()
+                    .expect("a try statement pushed an exception context")
+                    .states;
+                let catch_baseline = if exception_states.is_empty() {
+                    baseline.clone()
+                } else {
+                    merge_many_states(&baseline, &exception_states)
+                };
+                let mut continuing = Vec::new();
+                if try_reachable {
+                    continuing.push(try_state);
+                }
+                for catch in &try_statement.catches {
+                    let binding = catch
+                        .binding
+                        .as_ref()
+                        .and_then(|binding| self.semantics.binding(binding.span).cloned());
+                    let (state, reachable) = self.analyze_block_branch(
+                        &catch.body,
+                        catch_baseline.clone(),
+                        binding.as_ref(),
+                    );
+                    if reachable {
+                        continuing.push(state);
+                    }
+                }
+                if continuing.is_empty() {
+                    self.state = baseline;
+                    false
+                } else {
+                    self.state = merge_many_states(&baseline, &continuing);
+                    true
+                }
             }
             StatementKind::If(if_statement) => {
                 self.expression(&if_statement.condition, Usage::Read);
@@ -327,6 +387,12 @@ impl Analyzer<'_> {
         } else {
             if let Some(initializer) = &local.initializer {
                 self.expression(initializer, Usage::Read);
+            } else if self
+                .semantics
+                .call(local.span)
+                .is_some_and(|call| !call.throws.is_empty())
+            {
+                self.capture_exception_state();
             }
             None
         };
@@ -377,6 +443,30 @@ impl Analyzer<'_> {
         self.state.push_scope();
         let reachable = self.statement(statement);
         self.release_expired_loans(statement.span.end);
+        self.state.pop_scope();
+        let result = std::mem::replace(&mut self.state, saved);
+        (result, reachable)
+    }
+
+    fn analyze_block_branch(
+        &mut self,
+        block: &ast::Block,
+        state: FlowState,
+        binding: Option<&crate::resolution::BindingResolution>,
+    ) -> (FlowState, bool) {
+        let saved = std::mem::replace(&mut self.state, state);
+        self.state.push_scope();
+        if let Some(binding) = binding {
+            self.state.declare(
+                binding.name.clone(),
+                binding.ty.clone(),
+                None,
+                binding.span,
+                self.last_uses.get(&binding.span).copied(),
+                self.loop_depth,
+            );
+        }
+        let reachable = self.block(block, false);
         self.state.pop_scope();
         let result = std::mem::replace(&mut self.state, saved);
         (result, reachable)
@@ -583,6 +673,16 @@ impl Analyzer<'_> {
         }
     }
 
+    fn capture_exception_state(&mut self) {
+        for context in &mut self.exceptions {
+            let mut state = self.state.clone();
+            while state.scopes.len() > context.scope_depth {
+                state.pop_scope();
+            }
+            context.states.push(state);
+        }
+    }
+
     fn expression(&mut self, expression: &ast::Expression, usage: Usage) -> Option<BindingId> {
         match &expression.kind {
             ExpressionKind::Name(path) => {
@@ -694,8 +794,10 @@ impl Analyzer<'_> {
         let call = self
             .semantics
             .expression(expression.span)
-            .and_then(|resolution| resolution.call.as_ref())?;
-        match &call.target {
+            .and_then(|resolution| resolution.call.as_ref())
+            .cloned()?;
+        let throws = !call.throws.is_empty();
+        let result = match &call.target {
             CallTarget::Intrinsic(Intrinsic::Move) => {
                 let argument = arguments.first()?;
                 let id = named_binding(argument, &self.state)?;
@@ -707,7 +809,9 @@ impl Analyzer<'_> {
                 None
             }
             CallTarget::Intrinsic(
-                Intrinsic::PrimitiveCast { .. } | Intrinsic::ValueInitialization { .. },
+                Intrinsic::PrimitiveCast { .. }
+                | Intrinsic::ValueInitialization { .. }
+                | Intrinsic::ExceptionRoot { .. },
             ) => {
                 if let Some(argument) = arguments.first() {
                     self.expression(argument, Usage::Read);
@@ -749,10 +853,11 @@ impl Analyzer<'_> {
                     self.state.release(loan);
                 }
                 if function.receiver.is_some() && function.return_type.is_reference() {
-                    return receiver_origin;
+                    receiver_origin
+                } else {
+                    return_borrow_parameter(&function)
+                        .and_then(|index| origins.get(index).copied().flatten())
                 }
-                return_borrow_parameter(&function)
-                    .and_then(|index| origins.get(index).copied().flatten())
             }
             CallTarget::Constructor(id) => {
                 let constructor = self.semantics.constructor(*id)?.clone();
@@ -789,7 +894,11 @@ impl Analyzer<'_> {
                 }
                 None
             }
+        };
+        if throws {
+            self.capture_exception_state();
         }
+        result
     }
 
     fn call_arguments<'a>(
@@ -1220,9 +1329,20 @@ impl UseCollector {
                 }
                 self.declare(&local.name, local.span);
             }
-            StatementKind::Return(value) => {
+            StatementKind::Return(value) | StatementKind::Throw(value) => {
                 if let Some(value) = value {
                     self.expression(value);
+                }
+            }
+            StatementKind::Try(try_statement) => {
+                self.block(&try_statement.body, true);
+                for catch in &try_statement.catches {
+                    self.push_scope();
+                    if let Some(binding) = &catch.binding {
+                        self.declare(&binding.name, binding.span);
+                    }
+                    self.block(&catch.body, false);
+                    self.scopes.pop();
                 }
             }
             StatementKind::If(if_statement) => {

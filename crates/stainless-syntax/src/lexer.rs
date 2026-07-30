@@ -185,6 +185,8 @@ enum RawToken {
     Tilde,
     #[token("=")]
     Eq,
+    #[token("...")]
+    Ellipsis,
     #[token(".")]
     Dot,
     #[token(",")]
@@ -280,6 +282,7 @@ impl From<RawToken> for SyntaxKind {
             RawToken::PlusPlus => Self::PlusPlus,
             RawToken::MinusMinus => Self::MinusMinus,
             RawToken::Dot => Self::Dot,
+            RawToken::Ellipsis => Self::Ellipsis,
             RawToken::Comma => Self::Comma,
             RawToken::Semicolon => Self::Semicolon,
             RawToken::Colon => Self::Colon,

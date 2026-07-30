@@ -1,0 +1,53 @@
+// Compiler-supported checked-exception subset.
+// C++ control-flow syntax is paired with Java-style catch-or-declare checking.
+
+namespace samples {
+
+struct DomainError : stainless::Exception {
+    i32 code;
+};
+
+struct OpenError : DomainError {
+    i32 detail;
+};
+
+struct Resource {
+    i32 value;
+
+    Resource(i32 value, bool fail) throws OpenError;
+};
+
+Resource::Resource(i32 value, bool fail) throws OpenError
+    : value(value) {
+    if (fail) {
+        throw OpenError{
+            DomainError{stainless::Exception("resource unavailable"), 30},
+            4
+        };
+    }
+}
+
+i32 create(bool fail) throws OpenError {
+    Resource resource = Resource(6, fail);
+    return resource.value;
+}
+
+i32 rethrow_as_base(bool fail) throws DomainError {
+    try {
+        return create(fail);
+    } catch (const OpenError& error) {
+        // Bare rethrow preserves the complete OpenError allocation.
+        throw;
+    }
+}
+
+i32 handle(bool fail) {
+    try {
+        return rethrow_as_base(fail);
+    } catch (const DomainError& error) {
+        // A base catch sees the embedded DomainError data.
+        return error.code + 1;
+    }
+}
+
+} // namespace samples

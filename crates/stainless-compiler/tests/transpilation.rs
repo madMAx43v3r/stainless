@@ -203,6 +203,10 @@ fn transpiles_and_compiles_resolved_reference_programs() {
             "constructors",
             include_str!("../../../docs/ref/14_constructors.stl"),
         ),
+        (
+            "checked-exception-subset",
+            include_str!("../../../docs/ref/15_checked_exception_subset.stl"),
+        ),
     ] {
         let result = transpile(source);
         assert!(
@@ -365,9 +369,272 @@ i32 constructor_result() {
 }
 
 #[test]
-fn unsupported_backend_forms_fail_without_emitting_rust() {
+fn checked_exceptions_propagate_and_match_typed_catches() {
+    let source = r#"namespace samples {
+
+struct IoError : stainless::Exception {
+    i32 code;
+};
+
+struct ParseError : stainless::Exception {
+    i32 offset;
+};
+
+i32 fail(i32 kind) throws IoError, ParseError {
+    if (kind == 1) {
+        throw IoError{stainless::Exception("io"), 10};
+    }
+    if (kind == 2) {
+        throw ParseError{stainless::Exception("parse"), 20};
+    }
+    return 7;
+}
+
+i32 feed_forward(i32 kind) throws IoError, ParseError {
+    return fail(kind) + 1;
+}
+
+i32 handle(i32 kind) {
+    try {
+        return feed_forward(kind);
+    } catch (const IoError& error) {
+        return error.code;
+    } catch (const ParseError& error) {
+        return error.offset;
+    }
+}
+
+i32 partial(i32 kind) throws IoError {
+    try {
+        return fail(kind);
+    } catch (const ParseError& error) {
+        return error.offset + 1;
+    }
+}
+
+i32 handle_partial(i32 kind) {
+    try {
+        return partial(kind);
+    } catch (const IoError& error) {
+        return error.code;
+    }
+}
+
+} // namespace samples
+"#;
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:?}",
+        result.analysis.diagnostics
+    );
+    let handle = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "handle"])
+        .expect("handle symbol")
+        .mangled_name
+        .clone();
+    let handle_partial = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "handle_partial"])
+        .expect("handle_partial symbol")
+        .mangled_name
+        .clone();
+    let mut rust = result.rust.expect("checked exceptions should emit Rust");
+    write!(
+        rust,
+        r"
+fn main() {{
+    assert_eq!(__stainless_namespace_samples::{handle}(0), 8);
+    assert_eq!(__stainless_namespace_samples::{handle}(1), 10);
+    assert_eq!(__stainless_namespace_samples::{handle}(2), 20);
+    assert_eq!(__stainless_namespace_samples::{handle_partial}(0), 7);
+    assert_eq!(__stainless_namespace_samples::{handle_partial}(1), 10);
+    assert_eq!(__stainless_namespace_samples::{handle_partial}(2), 21);
+}}
+"
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("checked-exceptions", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .expect("generated exception program should run");
+    assert!(
+        output.status.success(),
+        "status: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    remove_temporary_parent(&binary);
+}
+
+#[test]
+fn try_blocks_preserve_break_and_continue_targets() {
+    let source = r"i32 break_from_try() {
+    for (i32 index = 0; index < 2; index += 1) {
+        try {
+            break;
+        } catch (...) {
+            break;
+        }
+    }
+    return 9;
+}
+
+i32 continue_from_try() {
+    for (i32 index = 0; index < 2; index += 1) {
+        try {
+            continue;
+        } catch (...) {
+            break;
+        }
+    }
+    return 11;
+}
+";
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:?}",
+        result.analysis.diagnostics
+    );
+    let find_name = |source_name: &str| {
+        result
+            .analysis
+            .semantics
+            .functions
+            .iter()
+            .find(|function| function.path == [source_name])
+            .unwrap_or_else(|| panic!("missing `{source_name}`"))
+            .mangled_name
+            .clone()
+    };
+    let break_from_try = find_name("break_from_try");
+    let continue_from_try = find_name("continue_from_try");
+    let mut rust = result.rust.expect("try loop control should emit Rust");
+    write!(
+        rust,
+        r"
+fn main() {{
+    assert_eq!({break_from_try}(), 9);
+    assert_eq!({continue_from_try}(), 11);
+}}
+"
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("try-loop-control", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .expect("generated try loop-control program should run");
+    assert!(output.status.success(), "{output:?}");
+    remove_temporary_parent(&binary);
+}
+
+#[test]
+fn throwing_constructors_and_bare_rethrows_preserve_exception_identity() {
+    let source = r#"namespace samples {
+
+struct DomainError : stainless::Exception {
+    i32 code;
+};
+
+struct OpenError : DomainError {
+    i32 detail;
+};
+
+struct Resource {
+    i32 value;
+    Resource(i32 value, bool fail) throws OpenError;
+};
+
+Resource::Resource(i32 value, bool fail) throws OpenError
+    : value(value) {
+    if (fail) {
+        throw OpenError{
+            DomainError{stainless::Exception("open"), 30},
+            4
+        };
+    }
+}
+
+i32 create(bool fail) throws OpenError {
+    Resource resource = Resource(6, fail);
+    return resource.value;
+}
+
+i32 rethrow_as_base(bool fail) throws DomainError {
+    try {
+        return create(fail);
+    } catch (const OpenError& error) {
+        throw;
+    }
+}
+
+i32 handle(bool fail) {
+    try {
+        return rethrow_as_base(fail);
+    } catch (const DomainError& error) {
+        return error.code + 1;
+    }
+}
+
+} // namespace samples
+"#;
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:?}",
+        result.analysis.diagnostics
+    );
+    let handle = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "handle"])
+        .expect("handle symbol")
+        .mangled_name
+        .clone();
+    let mut rust = result
+        .rust
+        .expect("throwing constructors and rethrows should emit Rust");
+    write!(
+        rust,
+        r"
+fn main() {{
+    assert_eq!(__stainless_namespace_samples::{handle}(false), 6);
+    assert_eq!(__stainless_namespace_samples::{handle}(true), 31);
+}}
+"
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("throwing-constructors", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .expect("generated throwing-constructor program should run");
+    assert!(
+        output.status.success(),
+        "status: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    remove_temporary_parent(&binary);
+}
+
+#[test]
+fn invalid_checked_exception_prevents_rust_emission() {
     let result = transpile(
-        r"i32 load() throws Failure {
+        r"struct Failure {};
+
+i32 load() throws Failure {
     return 1;
 }
 ",
@@ -376,7 +643,7 @@ fn unsupported_backend_forms_fail_without_emitting_rust() {
     assert!(result.hir.is_none());
     assert!(result.rust.is_none());
     assert!(result.analysis.diagnostics.iter().any(|diagnostic| {
-        diagnostic.phase == DiagnosticPhase::Hir && diagnostic.code == "HIR001"
+        diagnostic.phase == DiagnosticPhase::Semantic && diagnostic.code == "RES070"
     }));
 }
 

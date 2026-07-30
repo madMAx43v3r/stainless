@@ -17,6 +17,7 @@ use crate::ast::{
 pub fn validate(source: &SourceFile) -> Vec<Diagnostic> {
     let mut validator = Validator {
         diagnostics: Vec::new(),
+        catch_depth: 0,
     };
     validator.items(&source.items);
     validator
@@ -27,6 +28,7 @@ pub fn validate(source: &SourceFile) -> Vec<Diagnostic> {
 
 struct Validator {
     diagnostics: Vec<Diagnostic>,
+    catch_depth: u32,
 }
 
 impl Validator {
@@ -121,6 +123,35 @@ impl Validator {
                 ),
                 _ => {}
             },
+            StatementKind::Throw(None) if self.catch_depth == 0 => self.push(
+                "SEM011",
+                "bare `throw;` is only valid inside a catch handler".to_owned(),
+                statement.span,
+            ),
+            StatementKind::Try(try_statement) => {
+                self.block(&try_statement.body, loop_depth, returns_void);
+                for (index, catch) in try_statement.catches.iter().enumerate() {
+                    if let Some(binding) = &catch.binding
+                        && (!binding.ty.is_const || !binding.ty.is_reference)
+                    {
+                        self.push(
+                            "SEM012",
+                            "typed catches require `const ExceptionType& name`".to_owned(),
+                            binding.span,
+                        );
+                    }
+                    if catch.binding.is_none() && index + 1 != try_statement.catches.len() {
+                        self.push(
+                            "SEM013",
+                            "`catch (...)` must be the final handler".to_owned(),
+                            catch.span,
+                        );
+                    }
+                    self.catch_depth += 1;
+                    self.block(&catch.body, loop_depth, returns_void);
+                    self.catch_depth -= 1;
+                }
+            }
             StatementKind::If(if_statement) => {
                 self.statement(&if_statement.then_branch, loop_depth, returns_void);
                 if let Some(else_branch) = &if_statement.else_branch {
@@ -145,7 +176,8 @@ impl Validator {
                 "`continue` is only valid inside a loop".to_owned(),
                 statement.span,
             ),
-            StatementKind::Break
+            StatementKind::Throw(_)
+            | StatementKind::Break
             | StatementKind::Continue
             | StatementKind::Expression(_)
             | StatementKind::Empty

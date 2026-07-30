@@ -8,6 +8,7 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
         include_str!("../../../docs/ref/01_basics.stl"),
         include_str!("../../../docs/ref/11_vec_and_string.stl"),
         include_str!("../../../docs/ref/13_range_for.stl"),
+        include_str!("../../../docs/ref/15_checked_exception_subset.stl"),
     ] {
         let analysis = analyze(source);
 
@@ -255,4 +256,99 @@ i32 inspect(const i32& value);
             .any(|diagnostic| diagnostic.code == "RES003")
     );
     assert_eq!(analysis.semantics.functions.len(), 1);
+}
+
+#[test]
+fn checked_exception_sets_and_handlers_are_validated() {
+    let source = r#"struct NotAnError {};
+
+struct BaseError : stainless::Exception {};
+
+struct DerivedError : BaseError {};
+
+i32 fail() throws DerivedError {
+    throw DerivedError{BaseError{stainless::Exception("failure")}};
+}
+
+i32 uncaught() {
+    return fail();
+}
+
+i32 malformed_set() throws NotAnError, DerivedError, DerivedError, BaseError;
+
+i32 reference_set() throws const DerivedError&;
+
+void unreachable_handler() {
+    try {
+        fail();
+    } catch (const BaseError& error) {
+        return;
+    } catch (const DerivedError& error) {
+        return;
+    }
+}
+
+void invalid_handler() {
+    try {
+        fail();
+    } catch (const NotAnError& error) {
+        return;
+    } catch (...) {
+        return;
+    }
+}
+"#;
+    let analysis = analyze(source);
+    let codes = analysis
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+
+    assert!(
+        analysis.parse.errors().is_empty(),
+        "{:?}",
+        analysis.parse.errors()
+    );
+    for expected in ["RES070", "RES071", "RES072", "RES075", "RES076", "RES077"] {
+        assert!(
+            codes.contains(&expected),
+            "missing {expected}: {:?}",
+            analysis.diagnostics
+        );
+    }
+}
+
+#[test]
+fn declarations_must_agree_on_checked_exception_sets() {
+    let source = r"struct Failure : stainless::Exception {};
+
+struct Resource {
+    Resource() throws Failure;
+};
+
+Resource::Resource() {
+}
+
+i32 load() throws Failure;
+
+i32 load() {
+    return 1;
+}
+
+i32 uncaught_default_construction() {
+    Resource resource;
+    return 2;
+}
+";
+    let analysis = analyze(source);
+    let codes = analysis
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+
+    assert!(codes.contains(&"RES068"), "{:?}", analysis.diagnostics);
+    assert!(codes.contains(&"RES069"), "{:?}", analysis.diagnostics);
+    assert!(codes.contains(&"RES075"), "{:?}", analysis.diagnostics);
 }

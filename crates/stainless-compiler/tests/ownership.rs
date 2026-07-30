@@ -261,6 +261,27 @@ void valid(String value) {
     assert_codes(&continue_then_reinitialize, &[]);
 }
 
+#[test]
+fn catch_paths_preserve_moves_that_happened_before_an_exception() {
+    let analysis = analyze(
+        r#"use rust::String;
+
+struct Failure : stainless::Exception {};
+
+void invalid(String value) {
+    try {
+        String consumed = move(value);
+        throw Failure{stainless::Exception("failure")};
+    } catch (const Failure& error) {
+        value.push('!');
+    }
+}
+"#,
+    );
+
+    assert_codes(&analysis, &["OWN001"]);
+}
+
 fn assert_codes(analysis: &stainless_compiler::Analysis, expected: &[&str]) {
     let ownership = analysis
         .diagnostics
