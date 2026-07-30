@@ -198,6 +198,31 @@ pub enum RustLowering {
     Method { rust_name: &'static str },
     /// Clone a constructor argument without exposing Rust `From` details.
     CloneArgument { index: usize },
+    /// Call through a generated, compile-checked Rust wrapper.
+    GeneratedWrapper {
+        /// Deterministic private wrapper function name.
+        wrapper_name: &'static str,
+        /// Real Rust item invoked by the wrapper.
+        target: WrapperTarget,
+    },
+}
+
+/// Rust item form invoked inside a generated external wrapper.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WrapperTarget {
+    /// Fully qualified free or associated function.
+    Function { rust_path: &'static str },
+    /// Inherent method invoked on the wrapper's receiver parameter.
+    Method { rust_name: &'static str },
+}
+
+/// Formatting capability asserted for a native Rust error type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeErrorFormat {
+    /// The native type implements `Display`.
+    Display,
+    /// The native type implements `Debug`.
+    Debug,
 }
 
 /// A constructor, associated function, or method exposed to Stainless.
@@ -238,6 +263,8 @@ pub struct NativeTypeBinding {
     pub rust_path: &'static str,
     /// Generic type parameters in declaration order.
     pub type_parameters: Vec<&'static str>,
+    /// Proven formatting for use by checked native `Result` conversion.
+    pub error_format: Option<NativeErrorFormat>,
     /// Constructors, associated functions, and methods.
     pub callables: Vec<CallableBinding>,
 }
@@ -296,6 +323,7 @@ impl NativeBindings {
 
     fn validate(&self) -> Result<(), BindingError> {
         let mut paths = BTreeSet::new();
+        let mut wrapper_names = BTreeSet::new();
 
         for native_type in &self.types {
             if !native_type.stainless_path.starts_with("rust::") {
@@ -310,6 +338,28 @@ impl NativeBindings {
             let mut signatures = BTreeSet::new();
             for callable in &native_type.callables {
                 validate_return_borrow(native_type.stainless_path, callable)?;
+                if let RustLowering::GeneratedWrapper {
+                    wrapper_name,
+                    target,
+                } = &callable.lowering
+                {
+                    if !wrapper_names.insert(*wrapper_name) {
+                        return Err(BindingError::DuplicateWrapperName(wrapper_name));
+                    }
+                    let target_matches = matches!(
+                        (callable.style, target),
+                        (
+                            CallStyle::Constructor | CallStyle::AssociatedFunction,
+                            WrapperTarget::Function { .. },
+                        ) | (CallStyle::Method, WrapperTarget::Method { .. })
+                    );
+                    if !target_matches {
+                        return Err(BindingError::WrapperTargetMismatch {
+                            type_path: native_type.stainless_path,
+                            callable: callable.source_name,
+                        });
+                    }
+                }
 
                 let signature = (
                     callable.style as u8,
@@ -546,6 +596,15 @@ pub enum BindingError {
         /// Invalid callable.
         callable: &'static str,
     },
+    /// Two generated wrappers would use the same Rust function name.
+    DuplicateWrapperName(&'static str),
+    /// Generated wrapper target form disagreed with the source call style.
+    WrapperTargetMismatch {
+        /// Containing native type.
+        type_path: &'static str,
+        /// Invalid callable.
+        callable: &'static str,
+    },
     /// A callable has invalid or unsupported returned-reference metadata.
     InvalidReturnBorrow {
         /// Containing type.
@@ -589,6 +648,16 @@ impl fmt::Display for BindingError {
             } => write!(
                 formatter,
                 "non-method `{type_path}::{callable}` has receiver metadata"
+            ),
+            Self::DuplicateWrapperName(name) => {
+                write!(formatter, "duplicate generated wrapper name `{name}`")
+            }
+            Self::WrapperTargetMismatch {
+                type_path,
+                callable,
+            } => write!(
+                formatter,
+                "generated wrapper target does not match native call style for `{type_path}::{callable}`"
             ),
             Self::InvalidReturnBorrow {
                 type_path,

@@ -1,6 +1,6 @@
 use super::model::{
-    ArgumentAdaptation, CallStyle, CallableBinding, NativeBindings, NativeTypeBinding, Parameter,
-    Receiver, RustLowering, TraitRequirement, TypeRef,
+    ArgumentAdaptation, CallStyle, CallableBinding, NativeBindings, NativeErrorFormat,
+    NativeTypeBinding, Parameter, Receiver, RustLowering, TraitRequirement, TypeRef, WrapperTarget,
 };
 
 const T: &str = "T";
@@ -15,7 +15,9 @@ const T: &str = "T";
 /// Returns an error if compiler-provided metadata violates registry
 /// invariants. Such an error indicates a compiler implementation defect.
 pub fn standard_bindings() -> Result<NativeBindings, super::BindingError> {
-    NativeBindings::new(vec![string_binding(), vec_binding()])
+    let mut bindings = vec![string_binding(), vec_binding()];
+    bindings.extend(regex_bindings());
+    NativeBindings::new(bindings)
 }
 
 fn vec_binding() -> NativeTypeBinding {
@@ -30,6 +32,7 @@ fn vec_binding() -> NativeTypeBinding {
         stainless_path: "rust::Vec",
         rust_path: "::std::vec::Vec",
         type_parameters: vec![T],
+        error_format: None,
         callables,
     }
 }
@@ -172,8 +175,70 @@ fn string_binding() -> NativeTypeBinding {
         stainless_path: "rust::String",
         rust_path: "::std::string::String",
         type_parameters: vec![],
+        error_format: None,
         callables,
     }
+}
+
+fn regex_bindings() -> Vec<NativeTypeBinding> {
+    let regex = TypeRef::native("rust::regex::Regex", vec![]);
+    let error = TypeRef::native("rust::regex::Error", vec![]);
+    let result = TypeRef::native("rust::Result", vec![regex.clone(), error]);
+    let string_ref = TypeRef::shared_ref(string_type());
+    let pattern = Parameter::adapted(
+        "pattern",
+        string_ref.clone(),
+        ArgumentAdaptation::StringRefToStr,
+    );
+    let text = Parameter::adapted("text", string_ref, ArgumentAdaptation::StringRefToStr);
+
+    vec![
+        NativeTypeBinding {
+            stainless_path: "rust::regex::Error",
+            rust_path: "::regex::Error",
+            type_parameters: vec![],
+            error_format: Some(NativeErrorFormat::Display),
+            callables: vec![],
+        },
+        NativeTypeBinding {
+            stainless_path: "rust::regex::Regex",
+            rust_path: "::regex::Regex",
+            type_parameters: vec![],
+            error_format: None,
+            callables: vec![
+                CallableBinding {
+                    source_name: "new",
+                    style: CallStyle::AssociatedFunction,
+                    receiver: None,
+                    parameters: vec![pattern],
+                    return_type: result,
+                    return_borrow: None,
+                    requirements: vec![],
+                    lowering: RustLowering::GeneratedWrapper {
+                        wrapper_name: "__stainless_wrapper_regex_Regex_new",
+                        target: WrapperTarget::Function {
+                            rust_path: "::regex::Regex::new",
+                        },
+                    },
+                },
+                CallableBinding {
+                    source_name: "is_match",
+                    style: CallStyle::Method,
+                    receiver: Some(Receiver::Shared),
+                    parameters: vec![text],
+                    return_type: TypeRef::Bool,
+                    return_borrow: None,
+                    requirements: vec![],
+                    lowering: RustLowering::GeneratedWrapper {
+                        wrapper_name: "__stainless_wrapper_regex_Regex_is_match",
+                        target: WrapperTarget::Method {
+                            rust_name: "is_match",
+                        },
+                    },
+                },
+            ],
+        },
+    ]
 }
 
 fn string_construction(string: &TypeRef, string_ref: &TypeRef) -> Vec<CallableBinding> {

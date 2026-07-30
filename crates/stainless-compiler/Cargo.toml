@@ -14,3 +14,6 @@ proc-macro2.workspace = true
 quote.workspace = true
 stainless-syntax = { path = "../stainless-syntax" }
 syn.workspace = true
+
+[dev-dependencies]
+regex.workspace = true

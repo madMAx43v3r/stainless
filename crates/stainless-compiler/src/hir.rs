@@ -1,17 +1,52 @@
 //! Typed, Rust-shaped intermediate representation used by the backend.
 
 use crate::ast::{BinaryOperator, LiteralKind, PrefixOperator, Span};
-use crate::interop::Receiver;
+use crate::interop::{ArgumentAdaptation, Receiver, WrapperTarget};
 
 /// A source file after successful semantic resolution and backend lowering.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Program {
+    /// Compile-checked adapters for selected external Rust APIs.
+    pub native_wrappers: Vec<NativeWrapper>,
     /// Data-only structs declared directly at crate scope.
     pub structs: Vec<Struct>,
     /// Functions declared directly at crate scope.
     pub functions: Vec<Function>,
     /// Nested Stainless namespaces, emitted as Rust modules.
     pub modules: Vec<Module>,
+}
+
+/// One generated adapter around an external Rust callable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeWrapper {
+    /// Deterministic private Rust function name.
+    pub rust_name: &'static str,
+    /// Actual external Rust item invoked by the wrapper.
+    pub target: WrapperTarget,
+    /// Concrete method receiver, absent for free and associated functions.
+    pub receiver: Option<NativeWrapperReceiver>,
+    /// Concrete wrapper parameters.
+    pub parameters: Vec<NativeWrapperParameter>,
+    /// Concrete wrapper return type.
+    pub return_type: Type,
+}
+
+/// Concrete receiver of a generated method wrapper.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeWrapperReceiver {
+    /// Native receiver value type.
+    pub ty: Type,
+    /// Value or borrow behavior.
+    pub mode: Receiver,
+}
+
+/// One generated-wrapper parameter and its boundary adaptation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeWrapperParameter {
+    /// Stainless-visible concrete Rust representation.
+    pub ty: Type,
+    /// Conversion performed inside the compile-checked wrapper.
+    pub adaptation: ArgumentAdaptation,
 }
 
 /// A Stainless namespace represented as a Rust module.
@@ -234,6 +269,8 @@ pub enum ExceptionTarget {
 pub enum RustErrorMessage {
     /// Call the proven Rust `Display`/`ToString` implementation.
     Display,
+    /// Format through the proven Rust `Debug` implementation.
+    Debug,
     /// Consume the error and use a fixed message.
     Fallback,
 }
@@ -379,6 +416,13 @@ pub enum Expression {
         /// Fully qualified Rust callable path.
         rust_path: &'static str,
         /// Lowered arguments.
+        arguments: Vec<Expression>,
+    },
+    /// A call through a generated external Rust wrapper.
+    WrapperCall {
+        /// Deterministic wrapper function name.
+        rust_name: &'static str,
+        /// Receiver followed by ordinary arguments.
         arguments: Vec<Expression>,
     },
     /// A native Rust method.

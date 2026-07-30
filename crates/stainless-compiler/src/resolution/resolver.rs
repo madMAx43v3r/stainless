@@ -6,7 +6,8 @@ use crate::ast::{
     PrefixOperator, SourceFile, Span, Statement, StatementKind, TypeKind,
 };
 use crate::interop::{
-    CallStyle, CallableBinding, NativeBindings, NativeTypeBinding, Receiver, TypeRef,
+    CallStyle, CallableBinding, NativeBindings, NativeErrorFormat, NativeTypeBinding, Receiver,
+    TypeRef,
 };
 
 use super::imports::ImportTable;
@@ -14,9 +15,9 @@ use super::mangle;
 use super::{
     BindingResolution, CallTarget, ConstructorFieldInitialization, ConstructorId,
     ConstructorSymbol, ExpressionResolution, FieldSymbol, FunctionId, FunctionSymbol, Intrinsic,
-    NativeCall, ParameterSymbol, Resolution, ResolvedCall, ResolvedField, ResolvedTraitRequirement,
-    RustErrorMessage, RustResultAdaptation, SemanticModel, StructId, StructReceiver, StructSymbol,
-    ValueCategory,
+    NativeCall, ParameterSymbol, Resolution, ResolvedCall, ResolvedField, ResolvedNativeType,
+    ResolvedTraitRequirement, RustErrorMessage, RustResultAdaptation, SemanticModel, StructId,
+    StructReceiver, StructSymbol, ValueCategory,
 };
 
 /// Resolves names and types using an explicit native binding registry.
@@ -24,11 +25,21 @@ use super::{
 pub fn resolve(source: &SourceFile, bindings: &NativeBindings) -> Resolution {
     let mut diagnostics = Vec::new();
     let imports = ImportTable::build(source, &mut diagnostics);
+    let model = SemanticModel {
+        native_types: bindings
+            .types()
+            .map(|binding| ResolvedNativeType {
+                stainless_path: binding.stainless_path,
+                rust_path: binding.rust_path,
+            })
+            .collect(),
+        ..SemanticModel::default()
+    };
     let mut resolver = Resolver {
         bindings,
         imports,
         diagnostics,
-        model: SemanticModel::default(),
+        model,
         function_sets: BTreeMap::new(),
         function_by_span: BTreeMap::new(),
         struct_by_path: BTreeMap::new(),
@@ -1500,7 +1511,7 @@ impl Resolver<'_> {
             .rust_result_adaptations
             .push(RustResultAdaptation {
                 span: expression.span,
-                error_message: rust_error_message(error_type),
+                error_message: self.rust_error_message(error_type),
             });
         temporary(canonical(expected))
     }
@@ -2147,7 +2158,7 @@ impl Resolver<'_> {
         let call = ResolvedCall {
             span,
             target: CallTarget::Intrinsic(Intrinsic::UnwrapRustResult {
-                error_message: rust_error_message(error_type),
+                error_message: self.rust_error_message(error_type),
             }),
             return_type: value_type.clone(),
             throws: vec![rust_error],
@@ -2812,6 +2823,10 @@ impl Resolver<'_> {
             style,
             source_name: candidate.callable.source_name,
             receiver: candidate.callable.receiver,
+            receiver_type: candidate.callable.receiver.map(|_| TypeRef::Native {
+                path: instance.type_path,
+                arguments: instance.arguments.clone(),
+            }),
             parameter_types: candidate.parameter_types,
             adaptations: candidate
                 .callable
@@ -3476,6 +3491,51 @@ impl Resolver<'_> {
         });
     }
 
+    fn rust_error_message(&self, ty: &TypeRef) -> RustErrorMessage {
+        let display = match canonical_ref(ty) {
+            TypeRef::Bool
+            | TypeRef::Char
+            | TypeRef::I8
+            | TypeRef::I16
+            | TypeRef::I32
+            | TypeRef::I64
+            | TypeRef::I128
+            | TypeRef::Isize
+            | TypeRef::U8
+            | TypeRef::U16
+            | TypeRef::U32
+            | TypeRef::U64
+            | TypeRef::U128
+            | TypeRef::Usize
+            | TypeRef::F32
+            | TypeRef::F64 => true,
+            TypeRef::Native { path, arguments } => {
+                if *path == "rust::String" && arguments.is_empty() {
+                    return RustErrorMessage::Display;
+                }
+                return match self
+                    .bindings
+                    .type_by_path(path)
+                    .and_then(|binding| binding.error_format)
+                {
+                    Some(NativeErrorFormat::Display) => RustErrorMessage::Display,
+                    Some(NativeErrorFormat::Debug) => RustErrorMessage::Debug,
+                    None => RustErrorMessage::Fallback,
+                };
+            }
+            TypeRef::Void
+            | TypeRef::Parameter(_)
+            | TypeRef::Struct { .. }
+            | TypeRef::Reference { .. }
+            | TypeRef::Error => false,
+        };
+        if display {
+            RustErrorMessage::Display
+        } else {
+            RustErrorMessage::Fallback
+        }
+    }
+
     fn push(&mut self, code: &'static str, message: String, span: Span) {
         self.diagnostics
             .push(Diagnostic::semantic(code, message, span));
@@ -3640,38 +3700,6 @@ fn is_named_value_expression(expression: &Expression) -> bool {
         ExpressionKind::Name(path) => path.segments.len() == 1,
         ExpressionKind::Parenthesized(inner) => is_named_value_expression(inner),
         _ => false,
-    }
-}
-
-fn rust_error_message(ty: &TypeRef) -> RustErrorMessage {
-    let display = match canonical_ref(ty) {
-        TypeRef::Bool
-        | TypeRef::Char
-        | TypeRef::I8
-        | TypeRef::I16
-        | TypeRef::I32
-        | TypeRef::I64
-        | TypeRef::I128
-        | TypeRef::Isize
-        | TypeRef::U8
-        | TypeRef::U16
-        | TypeRef::U32
-        | TypeRef::U64
-        | TypeRef::U128
-        | TypeRef::Usize
-        | TypeRef::F32
-        | TypeRef::F64 => true,
-        TypeRef::Native { path, arguments } => *path == "rust::String" && arguments.is_empty(),
-        TypeRef::Void
-        | TypeRef::Parameter(_)
-        | TypeRef::Struct { .. }
-        | TypeRef::Reference { .. }
-        | TypeRef::Error => false,
-    };
-    if display {
-        RustErrorMessage::Display
-    } else {
-        RustErrorMessage::Fallback
     }
 }
 

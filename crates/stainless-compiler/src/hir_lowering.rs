@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::Diagnostic;
 use crate::ast::{self, ExpressionKind, ForClause, Item, StatementKind};
 use crate::hir;
@@ -23,6 +25,7 @@ pub(crate) fn lower(
         try_index: 0,
         loop_index: 0,
         loop_labels: Vec::new(),
+        native_wrappers: BTreeMap::new(),
     };
     let mut lowered_structs = lowerer.lower_structs(&source.items);
     for structure in semantics.structs.iter().filter(|structure| {
@@ -52,7 +55,11 @@ pub(crate) fn lower(
             lowered_functions.push(constructor);
         }
     }
+    let native_wrappers = std::mem::take(&mut lowerer.native_wrappers)
+        .into_values()
+        .collect();
     let mut program = hir::Program {
+        native_wrappers,
         structs: Vec::new(),
         functions: Vec::new(),
         modules: Vec::new(),
@@ -95,6 +102,7 @@ struct Lowerer<'a> {
     try_index: usize,
     loop_index: usize,
     loop_labels: Vec<String>,
+    native_wrappers: BTreeMap<&'static str, hir::NativeWrapper>,
 }
 
 #[derive(Clone, Copy)]
@@ -1235,6 +1243,20 @@ impl Lowerer<'_> {
         arguments: &[ast::Expression],
         span: ast::Span,
     ) -> Option<hir::Expression> {
+        if let RustLowering::GeneratedWrapper {
+            wrapper_name,
+            target,
+        } = &native.lowering
+        {
+            return self.lower_generated_wrapper_call(
+                native,
+                callee,
+                arguments,
+                span,
+                wrapper_name,
+                target,
+            );
+        }
         let lowered_arguments = arguments
             .iter()
             .zip(&native.parameter_types)
@@ -1298,7 +1320,109 @@ impl Lowerer<'_> {
                     expression: Box::new(argument.clone()),
                 })
             }
+            RustLowering::GeneratedWrapper { .. } => {
+                unreachable!("generated wrappers return before direct-call lowering")
+            }
         }
+    }
+
+    fn lower_generated_wrapper_call(
+        &mut self,
+        native: &NativeCall,
+        callee: Option<&ast::Expression>,
+        arguments: &[ast::Expression],
+        span: ast::Span,
+        wrapper_name: &'static str,
+        target: &crate::interop::WrapperTarget,
+    ) -> Option<hir::Expression> {
+        let receiver = match (native.receiver, &native.receiver_type) {
+            (Some(mode), Some(ty)) => Some(hir::NativeWrapperReceiver {
+                ty: self.lower_type(ty, span)?,
+                mode,
+            }),
+            (None, None) => None,
+            _ => {
+                self.push(
+                    "HIR016",
+                    "generated wrapper has inconsistent receiver metadata".to_owned(),
+                    span,
+                );
+                return None;
+            }
+        };
+        let parameters = native
+            .parameter_types
+            .iter()
+            .zip(&native.adaptations)
+            .map(|(ty, adaptation)| {
+                Some(hir::NativeWrapperParameter {
+                    ty: self.lower_type(ty, span)?,
+                    adaptation: *adaptation,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let wrapper = hir::NativeWrapper {
+            rust_name: wrapper_name,
+            target: target.clone(),
+            receiver,
+            parameters,
+            return_type: self.lower_type(&native.return_type, span)?,
+        };
+        if let Some(previous) = self.native_wrappers.get(wrapper_name) {
+            if previous != &wrapper {
+                self.push(
+                    "HIR017",
+                    format!("generated wrapper `{wrapper_name}` has conflicting signatures"),
+                    span,
+                );
+                return None;
+            }
+        } else {
+            self.native_wrappers.insert(wrapper_name, wrapper);
+        }
+
+        let mut lowered_arguments = Vec::new();
+        if let Some(mode) = native.receiver {
+            let Some(ast::Expression {
+                kind: ExpressionKind::Field { receiver, .. },
+                ..
+            }) = callee
+            else {
+                self.push(
+                    "HIR011",
+                    "generated native method wrapper has no receiver".to_owned(),
+                    span,
+                );
+                return None;
+            };
+            let receiver_type = native
+                .receiver_type
+                .as_ref()
+                .expect("validated wrapper receiver type");
+            let lowered = match mode {
+                Receiver::Shared => self.lower_bound_expression(
+                    receiver,
+                    &TypeRef::shared_ref(receiver_type.clone()),
+                )?,
+                Receiver::Mutable => self.lower_bound_expression(
+                    receiver,
+                    &TypeRef::mutable_ref(receiver_type.clone()),
+                )?,
+                Receiver::Value => self.lower_expression(receiver, ExpressionMode::Value)?,
+            };
+            lowered_arguments.push(lowered);
+        }
+        lowered_arguments.extend(
+            arguments
+                .iter()
+                .zip(&native.parameter_types)
+                .map(|(argument, expected)| self.lower_bound_expression(argument, expected))
+                .collect::<Option<Vec<_>>>()?,
+        );
+        Some(hir::Expression::WrapperCall {
+            rust_name: wrapper_name,
+            arguments: lowered_arguments,
+        })
     }
 
     fn lower_type(&mut self, ty: &TypeRef, span: ast::Span) -> Option<hir::Type> {
@@ -1329,7 +1453,8 @@ impl Lowerer<'_> {
             TypeRef::F32 => hir::Type::Primitive("f32"),
             TypeRef::F64 => hir::Type::Primitive("f64"),
             TypeRef::Native { path, arguments } => {
-                let rust_path = native_type_path(path, span, &mut self.diagnostics)?;
+                let rust_path =
+                    native_type_path(path, self.semantics, span, &mut self.diagnostics)?;
                 hir::Type::Native {
                     rust_path,
                     arguments: arguments
@@ -1376,28 +1501,31 @@ impl Lowerer<'_> {
 
 fn native_type_path(
     path: &'static str,
+    semantics: &SemanticModel,
     span: ast::Span,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<&'static str> {
     match path {
-        "rust::String" => Some("::std::string::String"),
-        "rust::Vec" => Some("::std::vec::Vec"),
         "rust::Option" => Some("::std::option::Option"),
         "rust::Result" => Some("::std::result::Result"),
-        _ => {
-            diagnostics.push(Diagnostic::hir(
-                "HIR014",
-                format!("native type `{path}` has no Rust type lowering"),
-                span,
-            ));
-            None
-        }
+        _ => semantics
+            .native_type(path)
+            .map(|native| native.rust_path)
+            .or_else(|| {
+                diagnostics.push(Diagnostic::hir(
+                    "HIR014",
+                    format!("native type `{path}` has no Rust type lowering"),
+                    span,
+                ));
+                None
+            }),
     }
 }
 
 fn lower_rust_error_message(message: crate::resolution::RustErrorMessage) -> hir::RustErrorMessage {
     match message {
         crate::resolution::RustErrorMessage::Display => hir::RustErrorMessage::Display,
+        crate::resolution::RustErrorMessage::Debug => hir::RustErrorMessage::Debug,
         crate::resolution::RustErrorMessage::Fallback => hir::RustErrorMessage::Fallback,
     }
 }

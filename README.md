@@ -7,9 +7,9 @@ Stainless is a new C++-like language that transpiles to Rust.
 > and Rowan parser, typed CST views, compiler-owned AST lowering, structural
 > diagnostics, an initial name/type/call resolver, a typed Rust-shaped HIR, and
 > structured Rust emission for the supported function/control-flow,
-> data-only-struct, constructor, checked-exception, and `Vec`/`String` subset.
-> An initial move/borrow dataflow pass now validates that subset; classes and
-> interfaces have not started yet.
+> data-only-struct, constructor, checked-exception, `Vec`/`String`, and first
+> external-wrapper subset. An initial move/borrow dataflow pass now validates
+> that subset; classes and interfaces have not started yet.
 
 ## Project charter
 
@@ -81,14 +81,19 @@ implemented:
 - [`16_native_result_unwrap.stl`](docs/ref/16_native_result_unwrap.stl) — the
   compiler-supported explicit and target-typed native `Result<T, E>` conversion
   to checked `stainless::RustError`.
+- [`17_external_regex_wrapper.stl`](docs/ref/17_external_regex_wrapper.stl) —
+  compiler-generated, Cargo-checked wrappers for `regex::Regex::new` and
+  `Regex::is_match`.
 
 `01_basics.stl`, `02_structs_and_data_inheritance.stl`,
 `11_vec_and_string.stl`, `13_range_for.stl`, and `14_constructors.stl` are
 currently parsed, resolved, lowered to HIR, emitted as Rust, and compiled by
 `rustc` in the test suite, as is the focused
 `15_checked_exception_subset.stl` sample and the native-Result
-`16_native_result_unwrap.stl` sample. Other samples remain forward-looking and
-must become explicit parser, diagnostic, and transpilation fixtures rather than
+`16_native_result_unwrap.stl` sample. The external
+`17_external_regex_wrapper.stl` sample is compiled and executed through Cargo
+against the real `regex` crate. Other samples remain forward-looking and must
+become explicit parser, diagnostic, and transpilation fixtures rather than
 being allowed to drift from the implementation.
 
 ## Language boundaries
@@ -1419,9 +1424,11 @@ does not use unsafe inspection or unstable specialization. The original `E`
 value is consumed and dropped after the message is produced.
 
 The initial implementation proves `Display` for primitive error values and
-`rust::String`; other error types currently receive the fixed fallback.
-Generalized `Display`/`Debug` proof from external Rust binding metadata remains
-future work.
+`rust::String`, and consumes declared `Display`/`Debug` capability from
+validated native binding metadata. The first such external proof is
+`rust::regex::Error: Display`; types without a proof receive the fixed
+fallback. Loading those declarations from the external binding manifest
+remains future work.
 
 This compiler-generated match replaces Rust's panicking `Result::unwrap`,
 keeping panic unwinding outside the Stainless exception model. Crate entry
@@ -1797,7 +1804,7 @@ deferred reference-bearing-value model rather than merely placing their names
 in the registry. The semantic resolver now instantiates this metadata for
 constructors, associated functions, and methods, including receiver mode,
 argument adaptations, generic substitutions, and retained trait obligations.
-The Rust emitter is not connected yet.
+The Rust emitter uses this metadata for direct standard-library calls.
 
 Each Stainless compiler release supports one stable Rust minor release. The
 build helper compares `rustc -Vv` with the metadata version and rejects a
@@ -1868,6 +1875,18 @@ syntax; wrapper-specific adaptations such as `const rust::String&` to Rust
 `&str` are compiler-known. `error_format` may be `display` or `debug`; generated
 Rust proves the requested trait before Stainless uses it for a `RustError`
 message.
+
+The first implemented external slice hard-codes the equivalent `regex::Regex`,
+`regex::Error`, `Regex::new`, and `Regex::is_match` entries in the validated
+registry. Calls produce deterministic functions in a private
+`__stainless_bindings` Rust module. The generated `Regex::new` wrapper accepts
+`const rust::String&`, converts it to `&str` inside the wrapper, and preserves
+the real `Result<Regex, regex::Error>` return type; `is_match` similarly proves
+its shared receiver and string adaptation. A Cargo integration test compiles
+and executes these wrappers against the actual crate, then changes the target
+to a nonexistent associated item and verifies that Cargo rejects the stale
+binding. Parsing `stainless-bindings.toml`, querying Cargo metadata, and mapping
+Cargo diagnostics back to manifest spans remain the next interop layer.
 
 The initial binding subset admits safe public free functions, associated
 functions, and inherent methods with concrete signatures composed of
@@ -2079,6 +2098,8 @@ The initial `stainless_compiler::resolution` pass now provides:
   method resolution, including generic substitution, receiver mutability,
   consuming-receiver checks, Rust argument adaptations, and default
   construction;
+- retained Rust representations and generated-wrapper resolution for the first
+  opaque external types, `rust::regex::Regex` and `rust::regex::Error`;
 - `Vec<T>` range-element resolution for shared, mutable, copied, and explicitly
   consumed range loops.
 
@@ -2125,27 +2146,31 @@ defined Rust semantics, it returns no Rust. For the accepted subset it now:
   projection without `unsafe`;
 - lowers native `Result` conversion to an inline non-panicking `match` that
   constructs and propagates a checked `stainless::RustError`;
+- emits deterministic private wrappers for the selected external `regex`
+  associated function and method, with argument adaptations inside the
+  Cargo-checked boundary;
 - emits deterministic Rust with `proc-macro2` and `quote`, validates the
   generated token tree by parsing it with `syn`, and formats it with
   `prettyplease`;
-- compiles all seven supported reference files as Rust libraries in integration
-  tests and executes a generated behavior fixture covering functions, borrows,
-  loops, structs, memberwise copying, data inheritance, `Vec`, `String`, and
-  moves, plus checked-exception fixtures covering propagation, typed/base
-  catches, bare rethrow, throwing constructors, and native `Result`
-  conversion.
+- compiles the seven dependency-free supported reference files as Rust
+  libraries, compiles and executes the external `regex` reference through
+  Cargo, and executes behavior fixtures covering functions, borrows, loops,
+  structs, memberwise copying, data inheritance, `Vec`, `String`, moves,
+  checked exceptions, throwing constructors, native `Result` conversion, and
+  external-wrapper validation.
 
 This is still not full semantic validation. Classes, interfaces, access
 control, ownership pointers, cross-file modules, ownership through fields and
 future pointer types, full path-sensitive loop-exit precision, general borrow
 lifetimes, member/native returned-reference provenance, and generalized native
-trait satisfaction remain unresolved. Struct member functions and constructors
-currently lower to deterministically named Rust free functions. Member
-functions receive an explicit hidden receiver; constructors create a hidden
-mutable borrow only after assembling every field. This preserves static
-dispatch while overloaded Rust `impl` emission remains future work. Accepting
-an AST shape therefore still does not imply that all ownership or type
-semantics are valid.
+trait satisfaction remain unresolved. External manifest loading, Cargo metadata
+validation, and source-mapped wrapper diagnostics are also not implemented.
+Struct member functions and constructors currently lower to deterministically
+named Rust free functions. Member functions receive an explicit hidden
+receiver; constructors create a hidden mutable borrow only after assembling
+every field. This preserves static dispatch while overloaded Rust `impl`
+emission remains future work. Accepting an AST shape therefore still does not
+imply that all ownership or type semantics are valid.
 
 ## Cargo integration and compiler packaging
 
@@ -2261,9 +2286,11 @@ recorded inline so implemented syntax is not confused with planned work:
    first struct subsets, including checked exceptions and throwing
    constructors. Classes, interfaces, and ownership through fields remain.
 5. **In progress:** the initial `Vec` and `String` metadata is connected through
-   resolution and code generation. Next, add one explicit wrapper for a small
-   external Cargo dependency and prove that Cargo rejects a stale or incorrect
-   binding.
+   resolution and code generation. A deterministic wrapper for
+   `regex::Regex::new` and `Regex::is_match` is generated and Cargo rejects a
+   deliberately stale target. Next, load the same metadata from the versioned
+   binding manifest and validate the selected dependency through Cargo
+   metadata.
 6. **In progress:** structured Rust emission, formatting, and representative
    generated-file compile/behavior tests are implemented. Source-mapping rustc
    diagnostics back to Stainless remains.

@@ -10,6 +10,7 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
         include_str!("../../../docs/ref/13_range_for.stl"),
         include_str!("../../../docs/ref/15_checked_exception_subset.stl"),
         include_str!("../../../docs/ref/16_native_result_unwrap.stl"),
+        include_str!("../../../docs/ref/17_external_regex_wrapper.stl"),
     ] {
         let analysis = analyze(source);
 

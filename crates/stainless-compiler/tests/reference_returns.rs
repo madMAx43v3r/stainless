@@ -144,6 +144,7 @@ fn native_type(callables: Vec<CallableBinding>) -> NativeTypeBinding {
         stainless_path: TYPE_PATH,
         rust_path: "::borrow_fixture::BorrowFixture",
         type_parameters: vec![],
+        error_format: None,
         callables,
     }
 }

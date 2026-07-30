@@ -1,18 +1,134 @@
 use std::collections::BTreeSet;
 
 use stainless_compiler::interop::{
-    ArgumentAdaptation, CallStyle, Receiver, RustLowering, TypeRef, standard_bindings,
+    ArgumentAdaptation, BindingError, CallStyle, CallableBinding, NativeBindings,
+    NativeErrorFormat, NativeTypeBinding, Receiver, RustLowering, TypeRef, WrapperTarget,
+    standard_bindings,
 };
 
 #[test]
-fn standard_registry_contains_string_and_vec_in_path_order() {
+fn standard_registry_contains_builtin_and_external_types_in_path_order() {
     let bindings = standard_bindings().unwrap();
     let paths = bindings
         .types()
         .map(|binding| binding.stainless_path)
         .collect::<Vec<_>>();
 
-    assert_eq!(paths, ["rust::String", "rust::Vec"]);
+    assert_eq!(
+        paths,
+        [
+            "rust::String",
+            "rust::Vec",
+            "rust::regex::Error",
+            "rust::regex::Regex",
+        ]
+    );
+}
+
+#[test]
+fn regex_uses_generated_wrappers_and_proven_error_formatting() {
+    let bindings = standard_bindings().unwrap();
+    let regex = bindings.type_by_path("rust::regex::Regex").unwrap();
+    let error = bindings.type_by_path("rust::regex::Error").unwrap();
+    let string_ref = TypeRef::shared_ref(TypeRef::native("rust::String", vec![]));
+
+    assert_eq!(error.error_format, Some(NativeErrorFormat::Display));
+    let new = regex
+        .find_callable(
+            CallStyle::AssociatedFunction,
+            "new",
+            std::slice::from_ref(&string_ref),
+        )
+        .unwrap();
+    assert_eq!(
+        new.lowering,
+        RustLowering::GeneratedWrapper {
+            wrapper_name: "__stainless_wrapper_regex_Regex_new",
+            target: WrapperTarget::Function {
+                rust_path: "::regex::Regex::new",
+            },
+        }
+    );
+    assert_eq!(
+        new.parameters[0].adaptation,
+        ArgumentAdaptation::StringRefToStr
+    );
+
+    let is_match = regex
+        .find_callable(
+            CallStyle::Method,
+            "is_match",
+            std::slice::from_ref(&string_ref),
+        )
+        .unwrap();
+    assert_eq!(is_match.receiver, Some(Receiver::Shared));
+    assert_eq!(
+        is_match.lowering,
+        RustLowering::GeneratedWrapper {
+            wrapper_name: "__stainless_wrapper_regex_Regex_is_match",
+            target: WrapperTarget::Method {
+                rust_name: "is_match",
+            },
+        }
+    );
+}
+
+#[test]
+fn invalid_generated_wrapper_metadata_is_rejected_before_lowering() {
+    let wrapper = |source_name, style, receiver, target| CallableBinding {
+        source_name,
+        style,
+        receiver,
+        parameters: vec![],
+        return_type: TypeRef::Bool,
+        return_borrow: None,
+        requirements: vec![],
+        lowering: RustLowering::GeneratedWrapper {
+            wrapper_name: "__duplicate_wrapper",
+            target,
+        },
+    };
+    let binding = |callables| NativeTypeBinding {
+        stainless_path: "rust::fixture::Type",
+        rust_path: "::fixture::Type",
+        type_parameters: vec![],
+        error_format: None,
+        callables,
+    };
+
+    let mismatched = wrapper(
+        "bad",
+        CallStyle::Method,
+        Some(Receiver::Shared),
+        WrapperTarget::Function {
+            rust_path: "::fixture::Type::bad",
+        },
+    );
+    assert!(matches!(
+        NativeBindings::new(vec![binding(vec![mismatched])]),
+        Err(BindingError::WrapperTargetMismatch { .. })
+    ));
+
+    let first = wrapper(
+        "first",
+        CallStyle::AssociatedFunction,
+        None,
+        WrapperTarget::Function {
+            rust_path: "::fixture::Type::first",
+        },
+    );
+    let second = wrapper(
+        "second",
+        CallStyle::AssociatedFunction,
+        None,
+        WrapperTarget::Function {
+            rust_path: "::fixture::Type::second",
+        },
+    );
+    assert_eq!(
+        NativeBindings::new(vec![binding(vec![first, second])]),
+        Err(BindingError::DuplicateWrapperName("__duplicate_wrapper"))
+    );
 }
 
 #[test]

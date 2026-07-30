@@ -783,6 +783,79 @@ fn main() {{
 }
 
 #[test]
+fn cargo_validates_generated_external_regex_wrappers() {
+    let source = include_str!("../../../docs/ref/17_external_regex_wrapper.stl");
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:?}",
+        result.analysis.diagnostics
+    );
+    let regex_matches = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "regex_matches"])
+        .expect("regex_matches symbol")
+        .mangled_name
+        .clone();
+    let invalid_regex_message = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "invalid_regex_message"])
+        .expect("invalid_regex_message symbol")
+        .mangled_name
+        .clone();
+    let hir = result.hir.as_ref().expect("external wrapper HIR");
+    assert_eq!(hir.native_wrappers.len(), 2);
+    let mut rust = result.rust.expect("external wrappers should emit Rust");
+    write!(
+        rust,
+        r#"
+fn main() {{
+    let matching = ::std::string::String::from("stainless");
+    let different = ::std::string::String::from("steel");
+    assert!(__stainless_namespace_samples::{regex_matches}(&matching));
+    assert!(!__stainless_namespace_samples::{regex_matches}(&different));
+    assert!(
+        __stainless_namespace_samples::{invalid_regex_message}() > 0
+    );
+}}
+"#
+    )
+    .expect("writing to a String cannot fail");
+
+    let directory = write_external_cargo_fixture("regex-wrapper", &rust);
+    let valid = run_fixture_cargo(&directory, "run");
+    assert!(
+        valid.status.success(),
+        "Cargo rejected valid generated wrappers:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&valid.stdout),
+        String::from_utf8_lossy(&valid.stderr)
+    );
+
+    let stale = rust.replace("::regex::Regex::new", "::regex::Regex::compile");
+    assert_ne!(stale, rust, "generated wrapper target should be present");
+    fs::write(directory.join("src/main.rs"), stale)
+        .expect("stale generated fixture source should be writable");
+    let invalid = run_fixture_cargo(&directory, "check");
+    assert!(
+        !invalid.status.success(),
+        "Cargo unexpectedly accepted a stale external wrapper"
+    );
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr).contains("compile"),
+        "Cargo diagnostic should name the stale item:\n{}",
+        String::from_utf8_lossy(&invalid.stderr)
+    );
+    fs::remove_dir_all(&directory)
+        .unwrap_or_else(|error| panic!("failed to remove {}: {error}", directory.display()));
+}
+
+#[test]
 fn invalid_checked_exception_prevents_rust_emission() {
     let result = transpile(
         r"struct Failure {};
@@ -852,6 +925,44 @@ fn temporary_directory(name: &str) -> PathBuf {
         "stainless-transpilation-{}-{index}-{name}",
         std::process::id()
     ))
+}
+
+fn write_external_cargo_fixture(name: &str, source: &str) -> PathBuf {
+    let directory = temporary_directory(name);
+    let source_directory = directory.join("src");
+    fs::create_dir_all(&source_directory)
+        .unwrap_or_else(|error| panic!("failed to create {}: {error}", source_directory.display()));
+    fs::write(
+        directory.join("Cargo.toml"),
+        r#"[package]
+name = "stainless-generated-external-fixture"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+regex = "1.12.4"
+
+[lints.rust]
+warnings = "deny"
+"#,
+    )
+    .expect("external fixture manifest should be writable");
+    fs::write(source_directory.join("main.rs"), source)
+        .expect("external fixture source should be writable");
+    directory
+}
+
+fn run_fixture_cargo(directory: &Path, command: &str) -> std::process::Output {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    Command::new(cargo)
+        .arg(command)
+        .arg("--quiet")
+        .arg("--offline")
+        .arg("--manifest-path")
+        .arg(directory.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", directory.join("target"))
+        .output()
+        .unwrap_or_else(|error| panic!("failed to invoke Cargo: {error}"))
 }
 
 fn remove_temporary_parent(path: &Path) {

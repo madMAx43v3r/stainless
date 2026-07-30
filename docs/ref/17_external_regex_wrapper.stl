@@ -1,0 +1,28 @@
+// Compiler-generated wrappers for a selected external Cargo API.
+// The surrounding Rust package must declare the `regex` dependency.
+
+use rust::String;
+use rust::regex::Regex;
+
+namespace samples {
+
+bool regex_matches(const String& text) {
+    try {
+        Regex expression = Regex::new("^stainless$").unwrap();
+        return expression.is_match(text);
+    } catch (const stainless::RustError& error) {
+        return false;
+    }
+}
+
+usize invalid_regex_message() {
+    try {
+        Regex expression = Regex::new("(").unwrap();
+        return 0;
+    } catch (const stainless::RustError& error) {
+        // regex::Error is declared as Display-capable binding metadata.
+        return error.message.len();
+    }
+}
+
+} // namespace samples

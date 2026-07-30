@@ -218,6 +218,8 @@ pub struct NativeCall {
     pub source_name: &'static str,
     /// Receiver behavior for methods.
     pub receiver: Option<Receiver>,
+    /// Concrete receiver type for generated method wrappers.
+    pub receiver_type: Option<TypeRef>,
     /// Concrete parameter types.
     pub parameter_types: Vec<TypeRef>,
     /// Rust-boundary argument adaptations.
@@ -276,6 +278,8 @@ pub enum Intrinsic {
 pub enum RustErrorMessage {
     /// The native error type is known to implement Rust `Display`.
     Display,
+    /// The native error type is known to implement Rust `Debug`.
+    Debug,
     /// No formatting trait is proven, so use the specified fixed fallback.
     Fallback,
 }
@@ -289,9 +293,20 @@ pub struct RustResultAdaptation {
     pub error_message: RustErrorMessage,
 }
 
+/// Rust representation retained for one resolved native type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResolvedNativeType {
+    /// Canonical Stainless path below `rust::`.
+    pub stainless_path: &'static str,
+    /// Fully qualified Rust type path.
+    pub rust_path: &'static str,
+}
+
 /// Successfully retained semantic facts for one source file.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SemanticModel {
+    /// Native type representations copied from the validated binding registry.
+    pub native_types: Vec<ResolvedNativeType>,
     /// Resolved Stainless struct definitions.
     pub structs: Vec<StructSymbol>,
     /// Resolved user-defined and synthesized constructors.
@@ -309,6 +324,15 @@ pub struct SemanticModel {
 }
 
 impl SemanticModel {
+    /// Finds retained native type representation metadata.
+    #[must_use]
+    pub fn native_type(&self, path: &str) -> Option<&ResolvedNativeType> {
+        self.native_types
+            .binary_search_by_key(&path, |native| native.stainless_path)
+            .ok()
+            .map(|index| &self.native_types[index])
+    }
+
     /// Finds a struct by its stable semantic ID.
     #[must_use]
     pub fn structure(&self, id: StructId) -> Option<&StructSymbol> {

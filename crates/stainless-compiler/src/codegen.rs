@@ -40,6 +40,19 @@ impl Emitter {
             .iter()
             .map(Self::structure)
             .collect::<Result<Vec<_>, _>>()?;
+        let native_wrappers = program
+            .native_wrappers
+            .iter()
+            .map(Self::native_wrapper)
+            .collect::<Result<Vec<_>, _>>()?;
+        let native_wrapper_module = (!native_wrappers.is_empty()).then(|| {
+            quote! {
+                #[allow(non_snake_case)]
+                mod __stainless_bindings {
+                    #(#native_wrappers)*
+                }
+            }
+        });
         let functions = program
             .functions
             .iter()
@@ -52,9 +65,63 @@ impl Emitter {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(quote! {
             #exception_runtime
+            #native_wrapper_module
             #(#structs)*
             #(#functions)*
             #(#modules)*
+        })
+    }
+
+    fn native_wrapper(wrapper: &hir::NativeWrapper) -> Result<TokenStream, String> {
+        let name = identifier(wrapper.rust_name)?;
+        let mut parameter_declarations = Vec::new();
+        let mut call_arguments = Vec::new();
+        let receiver_name = identifier("__stainless_receiver")?;
+        if let Some(receiver) = &wrapper.receiver {
+            let receiver_type = type_tokens(&receiver.ty, None)?;
+            let receiver_type = match receiver.mode {
+                crate::interop::Receiver::Shared => quote!(&#receiver_type),
+                crate::interop::Receiver::Mutable => quote!(&mut #receiver_type),
+                crate::interop::Receiver::Value => quote!(#receiver_type),
+            };
+            parameter_declarations.push(quote!(#receiver_name: #receiver_type));
+        }
+        for (index, parameter) in wrapper.parameters.iter().enumerate() {
+            let parameter_name = identifier(&format!("__stainless_argument_{index}"))?;
+            let parameter_type = type_tokens(&parameter.ty, None)?;
+            parameter_declarations.push(quote!(#parameter_name: #parameter_type));
+            let argument = match parameter.adaptation {
+                crate::interop::ArgumentAdaptation::Identity => quote!(#parameter_name),
+                crate::interop::ArgumentAdaptation::StringRefToStr => {
+                    quote!((#parameter_name).as_str())
+                }
+            };
+            call_arguments.push(argument);
+        }
+        let return_type = type_tokens(&wrapper.return_type, None)?;
+        let call = match &wrapper.target {
+            crate::interop::WrapperTarget::Function { rust_path } => {
+                let target = path(rust_path)?;
+                quote!(#target(#(#call_arguments),*))
+            }
+            crate::interop::WrapperTarget::Method { rust_name } => {
+                if wrapper.receiver.is_none() {
+                    return Err(format!(
+                        "generated method wrapper `{}` has no receiver",
+                        wrapper.rust_name
+                    ));
+                }
+                let method = identifier(rust_name)?;
+                quote!((#receiver_name).#method(#(#call_arguments),*))
+            }
+        };
+        Ok(quote! {
+            #[allow(non_snake_case)]
+            pub(crate) fn #name(
+                #(#parameter_declarations),*
+            ) -> #return_type {
+                #call
+            }
         })
     }
 
@@ -618,6 +685,7 @@ impl Emitter {
             }
             hir::Expression::FunctionCall { .. }
             | hir::Expression::AssociatedCall { .. }
+            | hir::Expression::WrapperCall { .. }
             | hir::Expression::MethodCall { .. }
             | hir::Expression::Clone { .. }
             | hir::Expression::Cast { .. } => self.call_expression(expression),
@@ -637,6 +705,7 @@ impl Emitter {
             hir::RustErrorMessage::Display => {
                 quote!(::std::string::ToString::to_string(&#error))
             }
+            hir::RustErrorMessage::Debug => quote!(::std::format!("{:?}", &#error)),
             hir::RustErrorMessage::Fallback => quote!({
                 ::std::mem::drop(#error);
                 ::std::string::String::from("native Rust operation failed")
@@ -691,6 +760,19 @@ impl Emitter {
                     .map(|argument| self.expression(argument))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(quote!(#rust_path(#(#arguments),*)))
+            }
+            hir::Expression::WrapperCall {
+                rust_name,
+                arguments,
+            } => {
+                let rust_name = identifier(rust_name)?;
+                let arguments = arguments
+                    .iter()
+                    .map(|argument| self.expression(argument))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(quote!(crate::__stainless_bindings::#rust_name(
+                    #(#arguments),*
+                )))
             }
             hir::Expression::MethodCall {
                 receiver,
