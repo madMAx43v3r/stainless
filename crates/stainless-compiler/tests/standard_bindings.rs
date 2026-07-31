@@ -115,6 +115,7 @@ fn invalid_generated_wrapper_metadata_is_rejected_before_lowering() {
         receiver,
         parameters: vec![],
         return_type: TypeRef::Bool,
+        rust_result_error: None,
         return_borrow: None,
         requirements: vec![],
         lowering: RustLowering::GeneratedWrapper {
@@ -344,6 +345,33 @@ fn native_call_matching_uses_exact_stainless_types() {
             .find_callable(CallStyle::Method, "push", &[TypeRef::U8])
             .is_none()
     );
+}
+
+#[test]
+fn var_exposes_checked_shared_mutation_methods() {
+    let bindings = standard_bindings().unwrap();
+    let var_binding = bindings
+        .type_by_path("rust::stainless_runtime::Var")
+        .unwrap();
+    let var = TypeRef::native("rust::stainless_runtime::Var", vec![]);
+    let json_error = TypeRef::native("rust::stainless_runtime::JsonError", vec![]);
+
+    let push = var_binding
+        .find_callable(CallStyle::Method, "push", std::slice::from_ref(&var))
+        .expect("var arrays expose push");
+    assert_eq!(push.receiver, Some(Receiver::Mutable));
+    assert_eq!(push.return_type, TypeRef::Void);
+    assert_eq!(push.rust_result_error, Some(json_error.clone()));
+
+    let string_ref = TypeRef::shared_ref(TypeRef::native("rust::String", vec![]));
+    let set_field = var_binding
+        .find_callable(CallStyle::Method, "set", &[string_ref, var])
+        .expect("var objects expose dynamic member set");
+    assert_eq!(set_field.rust_result_error, Some(json_error));
+    assert!(matches!(
+        &set_field.lowering,
+        RustLowering::Method { rust_name } if rust_name == "set_field"
+    ));
 }
 
 #[test]

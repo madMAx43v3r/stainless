@@ -280,6 +280,7 @@ fn callable(
         receiver,
         parameters,
         return_type,
+        rust_result_error: None,
         return_borrow: None,
         requirements: Vec::new(),
         lowering,

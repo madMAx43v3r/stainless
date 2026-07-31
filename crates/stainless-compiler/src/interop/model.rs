@@ -334,6 +334,9 @@ pub struct CallableBinding {
     pub parameters: Vec<Parameter>,
     /// Stainless-visible return type.
     pub return_type: TypeRef,
+    /// Native error type when Rust returns `Result<return_type, E>` and the
+    /// compiler must expose the call as a checked Stainless operation.
+    pub rust_result_error: Option<TypeRef>,
     /// Provenance for a direct reference return.
     pub return_borrow: Option<ReturnBorrow>,
     /// Rust trait requirements attached to this call.

@@ -140,8 +140,8 @@ implemented:
   `stainless::FormatError` failures from string writes.
 - [`21_json_support.stl`](docs/ref/21_json_support.stl) — compiler-native `var`
   and `null`, JSON array/object literals, null-safe access, reference-counted
-  aggregate identity, parsing strings/files, serialization, scalar coercion,
-  and checked `stainless::JsonError` parse failures.
+  shared aggregate mutation, parsing strings/files, serialization, scalar
+  coercion, and checked `stainless::JsonError` failures.
 
 `01_basics.stl`, `02_structs_and_data_inheritance.stl`,
 `11_vec_and_string.stl`, `13_range_for.stl`, and `14_constructors.stl` are
@@ -180,7 +180,8 @@ constructs with direct Rust equivalents:
   reserved `rust` namespace, including `rust::Option<T>`, `rust::Result<T>`,
   `rust::Vec<T>`, and `rust::String`;
 - compiler-native `var`, `null`, and JSON literals backed by the compact
-  runtime, with checked parsing and reference-counted object/array identity;
+  runtime, with checked parsing/mutation and reference-counted object/array
+  identity;
 - direct use of safe Rust `core`, `alloc`, and `std` APIs plus generated,
   compile-checked wrappers for external Cargo dependencies, all reached through
   the reserved `rust` namespace;
@@ -1486,7 +1487,8 @@ right-hand expression type are known. The default inserted operation has
 checked effect `throws stainless::RustError`, exactly like an explicit
 `.unwrap()`, so the enclosing function must catch or declare it. A
 compiler-owned native subsystem may select a more precise checked exception:
-the JSON runtime's native error type maps to `stainless::JsonError`.
+the JSON runtime's native error type maps to `stainless::JsonError` for parsing
+and mutation.
 
 The initial rule applies to explicitly typed variable and field initialization,
 aggregate field initialization, and assignment to an existing value. It does
@@ -1905,14 +1907,13 @@ var response = {
 ```
 
 The `stainless-runtime` representation stores arrays and objects behind
-thread-safe Rust `Arc` handles. Copying, assigning, passing, or returning a
-`var` implicitly clones the handle, so aggregate copies are cheap and preserve
-identity. Scalar alternatives remain ordinary values. Equality compares
-scalars by value and arrays/objects by shared identity, matching JavaScript's
-object-reference behavior. The current surface is read-only: a binding may be
-reassigned to another `var`, but member/index mutation and collection mutation
-methods are not implemented yet. That keeps shared values race-free while the
-mutation API is designed.
+thread-safe Rust `Arc<RwLock<...>>` handles. Copying, assigning, passing, or
+returning a `var` implicitly clones the handle, so aggregate copies are cheap,
+preserve identity, and observe the same mutations. Scalar alternatives remain
+ordinary values. Equality compares scalars by value and arrays/objects by
+shared identity, matching JavaScript's object-reference behavior. Runtime read
+and write locks make access through independently owned aliases data-race-free,
+including when those aliases are transferred to different threads.
 
 Dot access and array indexing return an owned `var` handle. A missing member,
 an out-of-bounds index, or access on the wrong JSON kind returns `null`:
@@ -1925,6 +1926,39 @@ if (absent.is_null()) {
     // handle absence
 }
 ```
+
+An object member or array element may be assigned through a mutable `var`
+place. Indexed assignment extends an array with `null` values when necessary,
+matching JavaScript's sparse-index behavior:
+
+```cpp
+void update(var& response) throws stainless::JsonError {
+    response.status = 201;
+    response.values[0usize] = "updated";
+    response.values[5usize] = true;
+}
+```
+
+A `const var&` cannot be used for mutation, even though another mutable alias
+may update the same aggregate. The initial method surface is:
+
+- objects: `set(const String&, var)`, `remove(const String&)`, and
+  `contains_key(const String&)`;
+- arrays: `push(var)`, `pop()`, `insert(usize, var)`, and `remove(usize)`;
+- arrays or objects: `len()`, `is_empty()`, and `clear()`.
+
+`pop()` and object `remove()` return `null` when no value exists. Array
+`remove()` rejects an out-of-bounds index, while `insert()` accepts indices up
+to and including the current length. All of these methods retain Rust naming.
+JSON-compatible scalar arguments convert to `var` only after a unique method
+has been selected by name and arity; they never participate in overload
+resolution.
+
+Mutation is checked: using the wrong aggregate kind, passing an invalid array
+index, or inserting a value that would create a reference cycle raises
+`stainless::JsonError`. Callers must catch or declare it. Rejecting cycles is
+necessary both to prevent `Arc` cycles from leaking and to preserve the
+guarantee that every `var` remains serializable by non-throwing `to_json()`.
 
 JSON-compatible statically typed values convert implicitly when a destination
 is `var` or when they occur inside a JSON literal. Conversion in the other
@@ -1957,12 +1991,13 @@ String encode(const var& value) {
 `var::parse` and `var::parse_file` return native Rust results internally. The
 normal target-typed result adaptation converts their errors to the dedicated
 checked `stainless::JsonError`, preserving the error text in the inherited
-`message` field. Callers must catch or declare that exception. `to_json()` is
-infallible because `var` cannot contain a non-JSON value; it returns compact,
+`message` field. Compiler-described fallible `var` methods receive the same
+automatic checked conversion. `to_json()` is infallible because `var` cannot
+contain a non-JSON value or a reference cycle; it returns compact,
 deterministic JSON directly. `parse_file` opens the file and parses it through
 a buffered reader. The runtime uses `serde_json` only at the parse/serialize
-boundary; its own `Var` shape supplies Stainless's reference-counted aggregate
-semantics.
+boundary; its own `Var` shape supplies Stainless's shared, synchronized
+aggregate semantics.
 
 Each Stainless compiler release supports one stable Rust minor release. The
 build helper compares `rustc -Vv` with the metadata version and rejects a
@@ -2275,11 +2310,11 @@ compiler intrinsic(IntrinsicId, including UnwrapRustResult)
 
 The compact support runtime is limited to genuine Stainless language features,
 currently the reference-counted JSON `var` representation and its
-parse/serialization boundary. Checked-exception erasure is still emitted
-inline. The runtime is not a general standard-library facade. The ownership types are a narrow
-compiler-defined exception and lower to ordinary safe Rust ownership and
-synchronization primitives. Operations whose rules the compiler must
-understand, such as explicit `move`, guarded `require`, nullable-owner
+parse/mutation/serialization boundary. Checked-exception erasure is still
+emitted inline. The runtime is not a general standard-library facade. The
+ownership types are a narrow compiler-defined exception and lower to ordinary
+safe Rust ownership and synchronization primitives. Operations whose rules the
+compiler must understand, such as explicit `move`, guarded `require`, nullable-owner
 conversion, atomic pointer slots, data-base projection, and
 ownership-preserving interface coercions, remain intrinsics.
 
@@ -2458,9 +2493,10 @@ the accepted subset it now:
 - lowers checked functions and constructors to Rust `Result`, throws to a
   boxed compiler-private error carrier, and typed catches to safe base
   projection without `unsafe`;
-- lowers native `Result` conversion to an inline non-panicking `match` that
-  constructs and propagates a checked `stainless::RustError`, or the more
-  specific `stainless::JsonError` for native JSON parsing;
+- lowers native `Result` conversion and fallible `var` mutation to inline
+  non-panicking `match` expressions that construct and propagate a checked
+  `stainless::RustError`, or the more specific `stainless::JsonError` for
+  native JSON operations;
 - emits deterministic private wrappers for manifest-selected external
   associated functions and methods, with argument adaptations and generic
   callback trait bounds inside the Cargo-checked boundary;
@@ -2476,7 +2512,8 @@ the accepted subset it now:
   structs, memberwise copying, data inheritance, `Vec`, `String`, moves,
   checked exceptions, throwing constructors, native `Result` conversion,
   external-wrapper validation, all four initial Rust callback kinds, and
-  shared/mutable stored callable behavior, and reference-counted JSON values.
+  shared/mutable stored callable behavior, and synchronized reference-counted
+  JSON mutation.
 
 This is still not full semantic validation. Classes, interfaces, access
 control, ownership pointers, cross-file modules, ownership through fields and

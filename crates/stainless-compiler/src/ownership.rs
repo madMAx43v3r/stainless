@@ -802,6 +802,9 @@ impl Analyzer<'_> {
             if self.semantics.rust_result_adaptation(right.span).is_some() {
                 self.capture_exception_state();
             }
+            if is_json_mutation_place(left, self.semantics) {
+                self.capture_exception_state();
+            }
             self.write(left);
         } else if is_compound_assignment(operator) {
             self.expression(right, Usage::Read);
@@ -1373,6 +1376,30 @@ fn is_compound_assignment(operator: BinaryOperator) -> bool {
             | BinaryOperator::DivideAssign
             | BinaryOperator::RemainderAssign
     )
+}
+
+fn is_json_mutation_place(expression: &ast::Expression, semantics: &SemanticModel) -> bool {
+    let is_json_receiver = |receiver: &ast::Expression| {
+        semantics
+            .expression(receiver.span)
+            .is_some_and(|resolution| {
+                matches!(
+                    canonical_ref(&resolution.ty),
+                    TypeRef::Native { path, arguments }
+                        if path == "rust::stainless_runtime::Var" && arguments.is_empty()
+                )
+            })
+    };
+    match &expression.kind {
+        ExpressionKind::Field { receiver, .. } => {
+            semantics
+                .expression(expression.span)
+                .is_some_and(|resolution| resolution.field.is_none())
+                && is_json_receiver(receiver)
+        }
+        ExpressionKind::Index { receiver, .. } => is_json_receiver(receiver),
+        _ => false,
+    }
 }
 
 fn is_copyable(ty: &TypeRef) -> bool {

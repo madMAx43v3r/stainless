@@ -226,10 +226,21 @@ pub struct NativeCall {
     pub adaptations: Vec<ArgumentAdaptation>,
     /// Concrete return type.
     pub return_type: TypeRef,
+    /// Compiler-inserted checked conversion for a native Rust `Result`.
+    pub result_adaptation: Option<NativeCallResultAdaptation>,
     /// Code-generation operation supplied by the registry.
     pub lowering: RustLowering,
     /// Concrete Rust trait obligations retained for later validation.
     pub requirements: Vec<ResolvedTraitRequirement>,
+}
+
+/// Checked conversion attached directly to a fallible native callable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NativeCallResultAdaptation {
+    /// Statically selected error-message conversion.
+    pub error_message: RustErrorMessage,
+    /// Compiler-native checked exception selected from the Rust error type.
+    pub exception: NativeResultException,
 }
 
 /// A native generic obligation after substitution.
@@ -303,7 +314,7 @@ pub enum RustErrorMessage {
 pub enum NativeResultException {
     /// Generic failure from Rust interop.
     RustError,
-    /// JSON read, parse, or serialization failure.
+    /// JSON read, parse, or mutation failure.
     JsonError,
 }
 

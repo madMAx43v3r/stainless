@@ -231,3 +231,49 @@ void invalid(const String& source) {
         analysis.diagnostics
     );
 }
+
+#[test]
+fn json_mutation_is_checked_and_requires_mutable_access() {
+    let unchecked = r"void invalid(var& value) {
+    value.field = 1;
+    value.push(2);
+}
+";
+    let analysis = analyze(unchecked);
+    assert!(
+        analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "RES075" && diagnostic.message.contains("stainless::JsonError")
+        }),
+        "{:?}",
+        analysis.diagnostics
+    );
+
+    let immutable = r"void invalid(const var& value) throws stainless::JsonError {
+    value.field = 1;
+    value.push(2);
+}
+";
+    let analysis = analyze(immutable);
+    let codes = analysis
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+    assert!(codes.contains(&"RES013"), "{:?}", analysis.diagnostics);
+    assert!(codes.contains(&"RES024"), "{:?}", analysis.diagnostics);
+
+    let struct_field = r"struct Holder {
+    var value;
+};
+
+void assign(Holder& holder, var value) {
+    holder.value = value;
+}
+";
+    let analysis = analyze(struct_field);
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "a struct field of type var is an ordinary field assignment: {:?}",
+        analysis.diagnostics
+    );
+}

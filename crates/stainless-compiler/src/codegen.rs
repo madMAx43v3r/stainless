@@ -651,6 +651,25 @@ impl Emitter {
                 let index = self.expression(index)?;
                 Ok(quote!((#receiver).index(#index)))
             }
+            hir::Expression::JsonSetField {
+                receiver,
+                name,
+                value,
+            } => {
+                let receiver = self.expression(receiver)?;
+                let value = self.expression(value)?;
+                Ok(quote!((#receiver).set_field(#name, #value)))
+            }
+            hir::Expression::JsonSetIndex {
+                receiver,
+                index,
+                value,
+            } => {
+                let receiver = self.expression(receiver)?;
+                let index = self.expression(index)?;
+                let value = self.expression(value)?;
+                Ok(quote!((#receiver).set_index(#index, #value)))
+            }
             hir::Expression::JsonCast { expression, target } => {
                 let expression = self.expression(expression)?;
                 let method = identifier(json_cast_method(target)?)?;

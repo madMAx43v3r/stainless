@@ -26,6 +26,7 @@ pub fn standard_bindings() -> Result<NativeBindings, super::BindingError> {
 pub(crate) const VAR_TYPE_PATH: &str = "rust::stainless_runtime::Var";
 const JSON_ERROR_TYPE_PATH: &str = "rust::stainless_runtime::JsonError";
 
+#[allow(clippy::too_many_lines)]
 fn var_binding() -> NativeTypeBinding {
     let var = TypeRef::native(VAR_TYPE_PATH, Vec::new());
     let string = string_type();
@@ -57,6 +58,7 @@ fn var_binding() -> NativeTypeBinding {
                     ArgumentAdaptation::StringRefToStr,
                 )],
                 return_type: result_var.clone(),
+                rust_result_error: None,
                 return_borrow: None,
                 requirements: vec![],
                 lowering: RustLowering::AssociatedFunction {
@@ -69,10 +71,11 @@ fn var_binding() -> NativeTypeBinding {
                 receiver: None,
                 parameters: vec![Parameter::adapted(
                     "path",
-                    string_ref,
+                    string_ref.clone(),
                     ArgumentAdaptation::StringRefToStr,
                 )],
                 return_type: result_var,
+                rust_result_error: None,
                 return_borrow: None,
                 requirements: vec![],
                 lowering: RustLowering::AssociatedFunction {
@@ -82,6 +85,107 @@ fn var_binding() -> NativeTypeBinding {
             method("is_null", Receiver::Shared, vec![], TypeRef::Bool),
             method("clone", Receiver::Shared, vec![], var),
             method("to_json", Receiver::Shared, vec![], string),
+            fallible_method(
+                "set",
+                "set_field",
+                Receiver::Mutable,
+                vec![
+                    Parameter::adapted(
+                        "name",
+                        string_ref.clone(),
+                        ArgumentAdaptation::StringRefToStr,
+                    ),
+                    Parameter::new("value", TypeRef::native(VAR_TYPE_PATH, Vec::new())),
+                ],
+                TypeRef::Void,
+                json_error.clone(),
+            ),
+            fallible_method(
+                "push",
+                "push",
+                Receiver::Mutable,
+                vec![Parameter::new(
+                    "value",
+                    TypeRef::native(VAR_TYPE_PATH, Vec::new()),
+                )],
+                TypeRef::Void,
+                json_error.clone(),
+            ),
+            fallible_method(
+                "pop",
+                "pop",
+                Receiver::Mutable,
+                vec![],
+                TypeRef::native(VAR_TYPE_PATH, Vec::new()),
+                json_error.clone(),
+            ),
+            fallible_method(
+                "insert",
+                "insert",
+                Receiver::Mutable,
+                vec![
+                    Parameter::new("index", TypeRef::Usize),
+                    Parameter::new("value", TypeRef::native(VAR_TYPE_PATH, Vec::new())),
+                ],
+                TypeRef::Void,
+                json_error.clone(),
+            ),
+            fallible_method(
+                "remove",
+                "remove_index",
+                Receiver::Mutable,
+                vec![Parameter::new("index", TypeRef::Usize)],
+                TypeRef::native(VAR_TYPE_PATH, Vec::new()),
+                json_error.clone(),
+            ),
+            fallible_method(
+                "remove",
+                "remove_field",
+                Receiver::Mutable,
+                vec![Parameter::adapted(
+                    "name",
+                    string_ref.clone(),
+                    ArgumentAdaptation::StringRefToStr,
+                )],
+                TypeRef::native(VAR_TYPE_PATH, Vec::new()),
+                json_error.clone(),
+            ),
+            fallible_method(
+                "clear",
+                "clear",
+                Receiver::Mutable,
+                vec![],
+                TypeRef::Void,
+                json_error.clone(),
+            ),
+            fallible_method(
+                "len",
+                "len",
+                Receiver::Shared,
+                vec![],
+                TypeRef::Usize,
+                json_error.clone(),
+            ),
+            fallible_method(
+                "is_empty",
+                "is_empty",
+                Receiver::Shared,
+                vec![],
+                TypeRef::Bool,
+                json_error.clone(),
+            ),
+            fallible_method(
+                "contains_key",
+                "contains_key",
+                Receiver::Shared,
+                vec![Parameter::adapted(
+                    "name",
+                    string_ref,
+                    ArgumentAdaptation::StringRefToStr,
+                )],
+                TypeRef::Bool,
+                json_error,
+            ),
         ],
     }
 }
@@ -424,6 +528,7 @@ fn constructor(
         receiver: None,
         parameters,
         return_type,
+        rust_result_error: None,
         return_borrow: None,
         requirements: vec![],
         lowering,
@@ -442,6 +547,7 @@ fn associated(
         receiver: None,
         parameters,
         return_type,
+        rust_result_error: None,
         return_borrow: None,
         requirements: vec![],
         lowering: RustLowering::AssociatedFunction {
@@ -472,10 +578,34 @@ fn method_with_requirements(
         receiver: Some(receiver),
         parameters,
         return_type,
+        rust_result_error: None,
         return_borrow: None,
         requirements,
         lowering: RustLowering::Method {
             rust_name: source_name.to_owned(),
+        },
+    }
+}
+
+fn fallible_method(
+    source_name: &'static str,
+    rust_name: &'static str,
+    receiver: Receiver,
+    parameters: Vec<Parameter>,
+    return_type: TypeRef,
+    error_type: TypeRef,
+) -> CallableBinding {
+    CallableBinding {
+        source_name: source_name.to_owned(),
+        style: CallStyle::Method,
+        receiver: Some(receiver),
+        parameters,
+        return_type,
+        rust_result_error: Some(error_type),
+        return_borrow: None,
+        requirements: vec![],
+        lowering: RustLowering::Method {
+            rust_name: rust_name.to_owned(),
         },
     }
 }

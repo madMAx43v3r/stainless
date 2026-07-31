@@ -395,6 +395,24 @@ pub enum Expression {
         /// Array index.
         index: Box<Expression>,
     },
+    /// Checked JSON object member assignment.
+    JsonSetField {
+        /// JSON receiver.
+        receiver: Box<Expression>,
+        /// Decoded member name.
+        name: String,
+        /// New JSON value.
+        value: Box<Expression>,
+    },
+    /// Checked JSON array element assignment.
+    JsonSetIndex {
+        /// JSON receiver.
+        receiver: Box<Expression>,
+        /// Array index.
+        index: Box<Expression>,
+        /// New JSON value.
+        value: Box<Expression>,
+    },
     /// JavaScript-compatible conversion from `var` to a scalar type.
     JsonCast {
         /// JSON source value.

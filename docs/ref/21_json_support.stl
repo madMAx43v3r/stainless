@@ -18,6 +18,15 @@ String encode_json(const var& value) {
     return value.to_json();
 }
 
+bool rejects_cycle(var& value) {
+    try {
+        value.self = value;
+    } catch (const stainless::JsonError& error) {
+        return true;
+    }
+    return false;
+}
+
 i32 main() throws stainless::JsonError {
     var object = {
         field: 123,
@@ -31,6 +40,20 @@ i32 main() throws stainless::JsonError {
     var out_of_bounds = array[11111]; // JSON null
     var missing_field = object.not_found; // JSON null
 
+    // Arrays and objects use shared mutable identity. Every mutating operation
+    // is checked because wrong kinds, invalid indices, and cycles are errors.
+    var shared_object = object;
+    object.field = 321;
+    object.nested.enabled = true;
+    object.set("dynamic", "member");
+    array.push(3);
+    array.insert(1usize, 7);
+    array[6usize] = 9; // Extends with null values, like JavaScript.
+    var removed_element = array.remove(1usize);
+    var removed_member = object.remove("dynamic");
+    usize array_length = array.len();
+    bool cycle_rejected = rejects_cycle(object);
+
     // Explicit scalar conversions use JavaScript-compatible JSON coercion.
     i32 test_int = i32(object.field);
     String display_name = String(object.display_name);
@@ -40,6 +63,15 @@ i32 main() throws stainless::JsonError {
     var shared = parsed;
     String encoded = encode_json(shared);
     println!("{} {} {} {}", display_name, test_int, encoded, value);
+
+    if (i32(shared_object.field) != 321 ||
+        i32(shared_object.nested.enabled) != 1 ||
+        i32(removed_element) != 7 ||
+        String(removed_member).len() != 6usize ||
+        array_length != 6usize ||
+        !cycle_rejected) {
+        return 2;
+    }
 
     if (test_element == null && out_of_bounds == null && missing_field == null) {
         return 1;

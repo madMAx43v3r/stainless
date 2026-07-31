@@ -4,13 +4,13 @@
 //! exception: [`Var`] provides the language's dynamically typed JSON value
 //! while delegating parsing and serialization to `serde_json`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use serde_json::{Number, Value};
 
@@ -36,9 +36,11 @@ enum VarRepr {
     Bool(bool),
     Number(Number),
     String(String),
-    Array(Arc<[Var]>),
-    Object(Arc<BTreeMap<String, Var>>),
+    Array(Arc<RwLock<Vec<Var>>>),
+    Object(Arc<RwLock<BTreeMap<String, Var>>>),
 }
+
+static JSON_MUTATION: Mutex<()> = Mutex::new(());
 
 #[allow(clippy::cast_possible_truncation)]
 impl Var {
@@ -51,7 +53,9 @@ impl Var {
     /// Creates a JSON array from already converted elements.
     #[must_use]
     pub fn array(values: impl IntoIterator<Item = Self>) -> Self {
-        Self(VarRepr::Array(values.into_iter().collect()))
+        Self(VarRepr::Array(Arc::new(RwLock::new(
+            values.into_iter().collect(),
+        ))))
     }
 
     /// Creates a JSON object. A later duplicate key replaces an earlier one.
@@ -60,18 +64,18 @@ impl Var {
     where
         K: Into<String>,
     {
-        Self(VarRepr::Object(Arc::new(
+        Self(VarRepr::Object(Arc::new(RwLock::new(
             fields
                 .into_iter()
                 .map(|(key, value)| (key.into(), value))
                 .collect::<BTreeMap<_, _>>(),
-        )))
+        ))))
     }
 
     /// Creates an empty JSON object without requiring a key type annotation.
     #[must_use]
     pub fn empty_object() -> Self {
-        Self(VarRepr::Object(Arc::new(BTreeMap::new())))
+        Self(VarRepr::Object(Arc::new(RwLock::new(BTreeMap::new()))))
     }
 
     /// Parses one complete UTF-8 JSON document.
@@ -117,10 +121,9 @@ impl Var {
     #[must_use]
     pub fn field(&self, name: &str) -> Self {
         match &self.0 {
-            VarRepr::Object(object) => object.get(name),
+            VarRepr::Object(object) => read_lock(object).get(name).cloned(),
             _ => None,
         }
-        .cloned()
         .unwrap_or_else(Self::null)
     }
 
@@ -128,11 +131,185 @@ impl Var {
     #[must_use]
     pub fn index(&self, index: usize) -> Self {
         match &self.0 {
-            VarRepr::Array(array) => array.get(index),
+            VarRepr::Array(array) => read_lock(array).get(index).cloned(),
             _ => None,
         }
-        .cloned()
         .unwrap_or_else(Self::null)
+    }
+
+    /// Replaces or creates an object member.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonError`] when the receiver is not an object or inserting
+    /// `value` would create a reference cycle.
+    pub fn set_field(&mut self, name: &str, value: Self) -> Result<(), JsonError> {
+        let _mutation = mutation_lock();
+        let VarRepr::Object(object) = &self.0 else {
+            return Err(JsonError::mutation("member assignment requires an object"));
+        };
+        reject_cycle(aggregate_id(object), &value)?;
+        write_lock(object).insert(name.to_owned(), value);
+        Ok(())
+    }
+
+    /// Replaces an array element, extending the array with `null` values when
+    /// `index` is beyond its current end, like JavaScript indexed assignment.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonError`] when the receiver is not an array or inserting
+    /// `value` would create a reference cycle.
+    pub fn set_index(&mut self, index: usize, value: Self) -> Result<(), JsonError> {
+        let _mutation = mutation_lock();
+        let VarRepr::Array(array) = &self.0 else {
+            return Err(JsonError::mutation("indexed assignment requires an array"));
+        };
+        reject_cycle(aggregate_id(array), &value)?;
+        let mut array = write_lock(array);
+        if index >= array.len() {
+            let length = index
+                .checked_add(1)
+                .ok_or_else(|| JsonError::mutation("array index exceeds addressable length"))?;
+            array.resize(length, Self::null());
+        }
+        array[index] = value;
+        Ok(())
+    }
+
+    /// Appends one value to an array.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonError`] when the receiver is not an array or inserting
+    /// `value` would create a reference cycle.
+    pub fn push(&mut self, value: Self) -> Result<(), JsonError> {
+        let _mutation = mutation_lock();
+        let VarRepr::Array(array) = &self.0 else {
+            return Err(JsonError::mutation("push requires an array"));
+        };
+        reject_cycle(aggregate_id(array), &value)?;
+        write_lock(array).push(value);
+        Ok(())
+    }
+
+    /// Removes and returns the last array element, or `null` when empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonError`] when the receiver is not an array.
+    pub fn pop(&mut self) -> Result<Self, JsonError> {
+        let _mutation = mutation_lock();
+        let VarRepr::Array(array) = &self.0 else {
+            return Err(JsonError::mutation("pop requires an array"));
+        };
+        Ok(write_lock(array).pop().unwrap_or_else(Self::null))
+    }
+
+    /// Inserts one value at an existing array boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonError`] when the receiver is not an array, `index` is
+    /// greater than its length, or inserting `value` would create a cycle.
+    pub fn insert(&mut self, index: usize, value: Self) -> Result<(), JsonError> {
+        let _mutation = mutation_lock();
+        let VarRepr::Array(array) = &self.0 else {
+            return Err(JsonError::mutation("insert requires an array"));
+        };
+        reject_cycle(aggregate_id(array), &value)?;
+        let mut array = write_lock(array);
+        if index > array.len() {
+            return Err(JsonError::mutation(format!(
+                "array insert index {index} exceeds length {}",
+                array.len()
+            )));
+        }
+        array.insert(index, value);
+        Ok(())
+    }
+
+    /// Removes and returns an array element.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonError`] when the receiver is not an array or `index` is
+    /// out of bounds.
+    pub fn remove_index(&mut self, index: usize) -> Result<Self, JsonError> {
+        let _mutation = mutation_lock();
+        let VarRepr::Array(array) = &self.0 else {
+            return Err(JsonError::mutation("indexed remove requires an array"));
+        };
+        let mut array = write_lock(array);
+        if index >= array.len() {
+            return Err(JsonError::mutation(format!(
+                "array remove index {index} exceeds length {}",
+                array.len()
+            )));
+        }
+        Ok(array.remove(index))
+    }
+
+    /// Removes and returns an object member, or `null` when absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonError`] when the receiver is not an object.
+    pub fn remove_field(&mut self, name: &str) -> Result<Self, JsonError> {
+        let _mutation = mutation_lock();
+        let VarRepr::Object(object) = &self.0 else {
+            return Err(JsonError::mutation("member remove requires an object"));
+        };
+        Ok(write_lock(object).remove(name).unwrap_or_else(Self::null))
+    }
+
+    /// Removes every element or member from an array or object.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonError`] when the receiver is a scalar.
+    pub fn clear(&mut self) -> Result<(), JsonError> {
+        let _mutation = mutation_lock();
+        match &self.0 {
+            VarRepr::Array(array) => write_lock(array).clear(),
+            VarRepr::Object(object) => write_lock(object).clear(),
+            _ => return Err(JsonError::mutation("clear requires an array or object")),
+        }
+        Ok(())
+    }
+
+    /// Returns the number of array elements or object members.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonError`] when the receiver is a scalar.
+    pub fn len(&self) -> Result<usize, JsonError> {
+        match &self.0 {
+            VarRepr::Array(array) => Ok(read_lock(array).len()),
+            VarRepr::Object(object) => Ok(read_lock(object).len()),
+            _ => Err(JsonError::mutation("len requires an array or object")),
+        }
+    }
+
+    /// Returns whether an array or object has no contents.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonError`] when the receiver is a scalar.
+    pub fn is_empty(&self) -> Result<bool, JsonError> {
+        self.len().map(|length| length == 0)
+    }
+
+    /// Returns whether an object contains `name`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonError`] when the receiver is not an object.
+    pub fn contains_key(&self, name: &str) -> Result<bool, JsonError> {
+        let VarRepr::Object(object) = &self.0 else {
+            return Err(JsonError::mutation("contains_key requires an object"));
+        };
+        Ok(read_lock(object).contains_key(name))
     }
 
     /// Applies JavaScript truthiness to a JSON-compatible value.
@@ -155,7 +332,7 @@ impl Var {
             VarRepr::Bool(value) => value.to_string(),
             VarRepr::Number(value) => value.to_string(),
             VarRepr::String(value) => value.clone(),
-            VarRepr::Array(values) => values
+            VarRepr::Array(values) => read_lock(values)
                 .iter()
                 .map(js_array_element_string)
                 .collect::<Vec<_>>()
@@ -280,9 +457,11 @@ impl Var {
             VarRepr::Bool(value) => Value::Bool(*value),
             VarRepr::Number(value) => Value::Number(value.clone()),
             VarRepr::String(value) => Value::String(value.clone()),
-            VarRepr::Array(values) => Value::Array(values.iter().map(Self::to_value).collect()),
+            VarRepr::Array(values) => {
+                Value::Array(read_lock(values).iter().map(Self::to_value).collect())
+            }
             VarRepr::Object(values) => Value::Object(
-                values
+                read_lock(values)
                     .iter()
                     .map(|(key, value)| (key.clone(), value.to_value()))
                     .collect(),
@@ -387,7 +566,7 @@ impl From<f64> for Var {
     }
 }
 
-/// Failure while reading or parsing JSON.
+/// Failure while reading, parsing, or mutating JSON.
 #[derive(Debug)]
 pub struct JsonError {
     operation: JsonOperation,
@@ -404,6 +583,14 @@ impl JsonError {
         Self::new(JsonOperation::Parse, error)
     }
 
+    fn mutation(message: impl Into<String>) -> Self {
+        Self {
+            operation: JsonOperation::Mutation,
+            message: message.into(),
+            source: None,
+        }
+    }
+
     fn new(operation: JsonOperation, error: impl Error + Send + Sync + 'static) -> Self {
         Self {
             operation,
@@ -418,6 +605,7 @@ impl JsonError {
         match self.operation {
             JsonOperation::Read => "read",
             JsonOperation::Parse => "parse",
+            JsonOperation::Mutation => "mutation",
         }
     }
 }
@@ -445,6 +633,59 @@ impl Error for JsonError {
 enum JsonOperation {
     Read,
     Parse,
+    Mutation,
+}
+
+fn mutation_lock() -> MutexGuard<'static, ()> {
+    JSON_MUTATION
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn aggregate_id<T>(aggregate: &Arc<RwLock<T>>) -> usize {
+    Arc::as_ptr(aggregate).cast::<()>() as usize
+}
+
+fn reject_cycle(target: usize, value: &Var) -> Result<(), JsonError> {
+    if contains_aggregate(value, target, &mut BTreeSet::new()) {
+        Err(JsonError::mutation(
+            "mutation would create a reference cycle",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn contains_aggregate(value: &Var, target: usize, visited: &mut BTreeSet<usize>) -> bool {
+    match &value.0 {
+        VarRepr::Array(array) => {
+            let id = aggregate_id(array);
+            id == target
+                || visited.insert(id)
+                    && read_lock(array)
+                        .iter()
+                        .any(|value| contains_aggregate(value, target, visited))
+        }
+        VarRepr::Object(object) => {
+            let id = aggregate_id(object);
+            id == target
+                || visited.insert(id)
+                    && read_lock(object)
+                        .values()
+                        .any(|value| contains_aggregate(value, target, visited))
+        }
+        VarRepr::Null | VarRepr::Bool(_) | VarRepr::Number(_) | VarRepr::String(_) => false,
+    }
 }
 
 fn js_array_element_string(value: &Var) -> String {
@@ -553,5 +794,61 @@ mod tests {
         let decimal = Var::parse("1.0").expect("valid decimal");
 
         assert_eq!(integer, decimal);
+    }
+
+    #[test]
+    fn aggregate_aliases_observe_mutations() {
+        let mut object = Var::object([("items", Var::array([Var::from(1)]))]);
+        let shared_object = object.clone();
+
+        object
+            .set_field("enabled", Var::from(true))
+            .expect("object mutation succeeds");
+        let mut items = object.field("items");
+        items.push(Var::from(2)).expect("array push succeeds");
+        items
+            .set_index(4, Var::from(5))
+            .expect("indexed assignment extends with null");
+
+        assert_eq!(shared_object.field("enabled"), Var::from(true));
+        assert_eq!(shared_object.field("items").index(1), Var::from(2));
+        assert!(shared_object.field("items").index(3).is_null());
+        assert_eq!(shared_object.field("items").index(4), Var::from(5));
+    }
+
+    #[test]
+    fn mutations_reject_wrong_kinds_invalid_indices_and_cycles() {
+        let mut scalar = Var::from(1);
+        assert!(scalar.push(Var::from(2)).is_err());
+
+        let mut array = Var::array([]);
+        assert!(array.remove_index(0).is_err());
+
+        let mut object = Var::empty_object();
+        let self_reference = object.clone();
+        let error = object
+            .set_field("self", self_reference)
+            .expect_err("cycles are rejected");
+        assert_eq!(error.operation(), "mutation");
+        assert_eq!(object.to_json(), "{}");
+    }
+
+    #[test]
+    fn shared_array_mutation_is_thread_safe() {
+        let array = Var::array([]);
+        let threads = (0..8)
+            .map(|value| {
+                let mut array = array.clone();
+                std::thread::spawn(move || array.push(Var::from(value)))
+            })
+            .collect::<Vec<_>>();
+
+        for thread in threads {
+            thread
+                .join()
+                .expect("mutation thread does not panic")
+                .expect("array push succeeds");
+        }
+        assert_eq!(array.len().expect("array has a length"), 8);
     }
 }

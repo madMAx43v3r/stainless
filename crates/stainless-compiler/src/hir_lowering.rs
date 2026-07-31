@@ -887,6 +887,7 @@ impl Lowerer<'_> {
                 || is_json_type(canonical_ref(expected)))
                 && resolution.is_some_and(|value| value.category != ValueCategory::Temporary)
                 && !is_move_call(self.semantics, expression)
+                && !is_json_access(expression, self.semantics)
             {
                 Some(hir::Expression::Clone {
                     expression: Box::new(hir::Expression::Borrow {
@@ -995,19 +996,53 @@ impl Lowerer<'_> {
                 operator,
                 right,
             } => {
-                let right = if *operator == ast::BinaryOperator::Assign {
-                    if let Some(resolution) = self.semantics.expression(left.span) {
-                        self.lower_bound_expression(right, canonical_ref(&resolution.ty))?
-                    } else {
-                        self.lower_expression(right, ExpressionMode::Value)?
+                if *operator == ast::BinaryOperator::Assign
+                    && is_json_mutation_place(left, self.semantics)
+                {
+                    let json_type = TypeRef::native(VAR_TYPE_PATH, Vec::new());
+                    let value = Box::new(self.lower_bound_expression(right, &json_type)?);
+                    let mutation = match &left.kind {
+                        ExpressionKind::Field { receiver, name } => hir::Expression::JsonSetField {
+                            receiver: Box::new(
+                                self.lower_expression(receiver, ExpressionMode::Reference)?,
+                            ),
+                            name: name.segments.first()?.clone(),
+                            value,
+                        },
+                        ExpressionKind::Index { receiver, index } => {
+                            hir::Expression::JsonSetIndex {
+                                receiver: Box::new(
+                                    self.lower_expression(receiver, ExpressionMode::Reference)?,
+                                ),
+                                index: Box::new(
+                                    self.lower_expression(index, ExpressionMode::Value)?,
+                                ),
+                                value,
+                            }
+                        }
+                        _ => unreachable!("JSON assignment shape was checked"),
+                    };
+                    hir::Expression::UnwrapRustResult {
+                        expression: Box::new(mutation),
+                        exception: hir::NativeExceptionKind::JsonError,
+                        error_message: hir::RustErrorMessage::Display,
+                        target: self.exception_target.clone(),
                     }
                 } else {
-                    self.lower_expression(right, ExpressionMode::Value)?
-                };
-                hir::Expression::Binary {
-                    left: Box::new(self.lower_expression(left, ExpressionMode::Value)?),
-                    operator: *operator,
-                    right: Box::new(right),
+                    let right = if *operator == ast::BinaryOperator::Assign {
+                        if let Some(resolution) = self.semantics.expression(left.span) {
+                            self.lower_bound_expression(right, canonical_ref(&resolution.ty))?
+                        } else {
+                            self.lower_expression(right, ExpressionMode::Value)?
+                        }
+                    } else {
+                        self.lower_expression(right, ExpressionMode::Value)?
+                    };
+                    hir::Expression::Binary {
+                        left: Box::new(self.lower_expression(left, ExpressionMode::Value)?),
+                        operator: *operator,
+                        right: Box::new(right),
+                    }
                 }
             }
             ExpressionKind::Call { callee, arguments } => {
@@ -1365,6 +1400,9 @@ impl Lowerer<'_> {
         let handles_checked_effect = matches!(
             call.target,
             CallTarget::Intrinsic(Intrinsic::UnwrapRustResult { .. })
+        ) || matches!(
+            &call.target,
+            CallTarget::Native(native) if native.result_adaptation.is_some()
         );
         let lowered = match &call.target {
             CallTarget::Stainless(id) => {
@@ -1450,7 +1488,17 @@ impl Lowerer<'_> {
                 })
             }
             CallTarget::Native(native) => {
-                self.lower_native_call(native, callee, arguments, call.span)
+                let native_call = self.lower_native_call(native, callee, arguments, call.span)?;
+                if let Some(adaptation) = native.result_adaptation {
+                    Some(hir::Expression::UnwrapRustResult {
+                        expression: Box::new(native_call),
+                        exception: lower_native_result_exception(adaptation.exception),
+                        error_message: lower_rust_error_message(adaptation.error_message),
+                        target: self.exception_target.clone(),
+                    })
+                } else {
+                    Some(native_call)
+                }
             }
             CallTarget::Intrinsic(Intrinsic::Move) => {
                 let argument = arguments.first()?;
@@ -1688,6 +1736,7 @@ impl Lowerer<'_> {
             if resolution.is_some_and(|resolution| {
                 resolution.category != ValueCategory::Temporary
                     && !is_move_call(self.semantics, expression)
+                    && !is_json_access(expression, self.semantics)
             }) {
                 Some(hir::Expression::Clone {
                     expression: Box::new(hir::Expression::Borrow {
@@ -1963,6 +2012,35 @@ fn is_json_type(ty: &TypeRef) -> bool {
         TypeRef::Native { path, arguments }
             if path == VAR_TYPE_PATH && arguments.is_empty()
     )
+}
+
+fn is_json_access(expression: &ast::Expression, semantics: &SemanticModel) -> bool {
+    match &expression.kind {
+        ExpressionKind::Field { receiver, .. } | ExpressionKind::Index { receiver, .. } => {
+            semantics
+                .expression(receiver.span)
+                .is_some_and(|resolution| is_json_type(canonical_ref(&resolution.ty)))
+        }
+        ExpressionKind::Parenthesized(inner) => is_json_access(inner, semantics),
+        _ => false,
+    }
+}
+
+fn is_json_mutation_place(expression: &ast::Expression, semantics: &SemanticModel) -> bool {
+    match &expression.kind {
+        ExpressionKind::Field { receiver, .. } => {
+            semantics
+                .expression(expression.span)
+                .is_some_and(|resolution| resolution.field.is_none())
+                && semantics
+                    .expression(receiver.span)
+                    .is_some_and(|resolution| is_json_type(canonical_ref(&resolution.ty)))
+        }
+        ExpressionKind::Index { receiver, .. } => semantics
+            .expression(receiver.span)
+            .is_some_and(|resolution| is_json_type(canonical_ref(&resolution.ty))),
+        _ => false,
+    }
 }
 
 fn user_type_path(source_path: &[String]) -> String {

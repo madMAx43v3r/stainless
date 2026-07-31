@@ -113,6 +113,7 @@ fn method(
         receiver: Some(receiver),
         parameters: vec![],
         return_type,
+        rust_result_error: None,
         return_borrow: Some(return_borrow),
         requirements: vec![],
         lowering: RustLowering::Method {
@@ -133,6 +134,7 @@ fn associated(
         receiver: None,
         parameters,
         return_type,
+        rust_result_error: None,
         return_borrow: Some(return_borrow),
         requirements: vec![],
         lowering: RustLowering::AssociatedFunction {

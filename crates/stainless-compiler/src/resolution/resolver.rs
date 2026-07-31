@@ -16,10 +16,10 @@ use super::mangle;
 use super::{
     BindingResolution, CallTarget, CallbackTarget, ConstructorFieldInitialization, ConstructorId,
     ConstructorSymbol, ExpressionResolution, FieldSymbol, FunctionId, FunctionSymbol, Intrinsic,
-    LambdaCaptureMode, NativeCall, NativeResultException, ParameterSymbol, Resolution,
-    ResolvedCall, ResolvedCallback, ResolvedField, ResolvedLambdaCapture, ResolvedNativeType,
-    ResolvedTraitRequirement, RustErrorMessage, RustResultAdaptation, SemanticModel, StructId,
-    StructReceiver, StructSymbol, ValueCategory,
+    LambdaCaptureMode, NativeCall, NativeCallResultAdaptation, NativeResultException,
+    ParameterSymbol, Resolution, ResolvedCall, ResolvedCallback, ResolvedField,
+    ResolvedLambdaCapture, ResolvedNativeType, ResolvedTraitRequirement, RustErrorMessage,
+    RustResultAdaptation, SemanticModel, StructId, StructReceiver, StructSymbol, ValueCategory,
 };
 
 /// Resolves names and types using an explicit native binding registry.
@@ -121,6 +121,7 @@ struct ConcreteNativeCandidate {
     callable: CallableBinding,
     parameter_types: Vec<TypeRef>,
     return_type: TypeRef,
+    rust_result_error: Option<TypeRef>,
     requirements: Vec<ResolvedTraitRequirement>,
 }
 
@@ -1813,7 +1814,14 @@ impl Resolver<'_> {
                 let index = self.resolve_expression(index, Some(&TypeRef::Usize), context);
                 self.require_exact(&TypeRef::Usize, &index.ty, expression.span, "JSON index");
                 if is_json_var(&canonical(&receiver.ty)) {
-                    (temporary(json_var_type()), None, None)
+                    (
+                        ExpressionInfo {
+                            ty: json_var_type(),
+                            category: receiver.category,
+                        },
+                        None,
+                        None,
+                    )
                 } else {
                     if canonical(&receiver.ty) != TypeRef::Error {
                         self.push(
@@ -2365,7 +2373,13 @@ impl Resolver<'_> {
                 );
                 return (error_info(), None);
             }
-            return (temporary(json_var_type()), None);
+            return (
+                ExpressionInfo {
+                    ty: json_var_type(),
+                    category: receiver_info.category,
+                },
+                None,
+            );
         }
         let TypeRef::Struct { path } = canonical(&receiver_info.ty) else {
             if canonical(&receiver_info.ty) != TypeRef::Error {
@@ -2464,6 +2478,10 @@ impl Resolver<'_> {
             if operator == BinaryOperator::Assign {
                 right_info = self.adapt_rust_result(&left_type, right_info, right, context);
                 self.validate_binding(&left_type, &right_info, right.span, "assignment");
+                if is_json_mutation_place(left, &self.model) {
+                    let json_error = self.json_error_struct();
+                    self.validate_checked_effect(json_error, left.span, context);
+                }
             } else {
                 self.require_exact(&left_type, &right_info.ty, right.span, "assignment");
             }
@@ -3561,7 +3579,7 @@ impl Resolver<'_> {
         (info_for_return_type(return_type), Some(call))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn resolve_native_callable(
         &mut self,
         instance: &NativeInstance,
@@ -3641,11 +3659,30 @@ impl Resolver<'_> {
             })
             .cloned()
             .collect::<Vec<_>>();
-        if exact.len() != 1 {
-            let displayed_candidates = if exact.is_empty() {
+        let compatible = if exact.is_empty() && candidates.len() == 1 {
+            candidates
+                .iter()
+                .filter(|candidate| {
+                    candidate
+                        .parameter_types
+                        .iter()
+                        .zip(&actual)
+                        .all(|(expected, actual)| {
+                            canonical(expected) == canonical(&actual.ty)
+                                || is_json_var(&canonical(expected))
+                                    && is_json_compatible(&canonical(&actual.ty))
+                        })
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            exact
+        };
+        if compatible.len() != 1 {
+            let displayed_candidates = if compatible.is_empty() {
                 &candidates
             } else {
-                &exact
+                &compatible
             }
             .iter()
             .map(display_native_signature)
@@ -3663,9 +3700,12 @@ impl Resolver<'_> {
             );
             return (error_info(), None);
         }
-        let candidate = exact.into_iter().next().expect("one exact candidate");
+        let candidate = compatible
+            .into_iter()
+            .next()
+            .expect("one compatible candidate");
         self.finish_native_call(
-            instance, style, candidate, &actual, arguments, span, receiver, name,
+            instance, style, candidate, &actual, arguments, span, receiver, name, context,
         )
     }
 
@@ -3680,6 +3720,7 @@ impl Resolver<'_> {
         span: Span,
         receiver: Option<(&ExpressionInfo, Span)>,
         name: &str,
+        context: &mut FunctionContext,
     ) -> (ExpressionInfo, Option<ResolvedCall>) {
         if let Some((receiver_info, receiver_span)) = receiver {
             self.validate_receiver(
@@ -3694,6 +3735,19 @@ impl Resolver<'_> {
         {
             self.validate_binding(expected, argument, expression.span, "argument");
         }
+        let (result_adaptation, throws) = if let Some(error_type) = &candidate.rust_result_error {
+            let (exception_id, exception) = self.native_result_exception(error_type);
+            self.validate_checked_effect(exception_id, span, context);
+            (
+                Some(NativeCallResultAdaptation {
+                    error_message: self.rust_error_message(error_type),
+                    exception,
+                }),
+                vec![exception_id],
+            )
+        } else {
+            (None, Vec::new())
+        };
         let native_call = NativeCall {
             type_path: instance.type_path.clone(),
             style,
@@ -3711,6 +3765,7 @@ impl Resolver<'_> {
                 .map(|parameter| parameter.adaptation)
                 .collect(),
             return_type: candidate.return_type.clone(),
+            result_adaptation,
             lowering: candidate.callable.lowering,
             requirements: candidate.requirements,
         };
@@ -3718,7 +3773,7 @@ impl Resolver<'_> {
             span,
             target: CallTarget::Native(Box::new(native_call)),
             return_type: candidate.return_type.clone(),
-            throws: Vec::new(),
+            throws,
         };
         (info_for_return_type(candidate.return_type), Some(call))
     }
@@ -4496,6 +4551,10 @@ fn instantiate_callable(
             .map(|parameter| substitute(&parameter.ty, &substitutions))
             .collect(),
         return_type: substitute(&callable.return_type, &substitutions),
+        rust_result_error: callable
+            .rust_result_error
+            .as_ref()
+            .map(|error| substitute(error, &substitutions)),
         requirements: callable
             .requirements
             .iter()
@@ -4709,6 +4768,23 @@ fn is_json_compatible(ty: &TypeRef) -> bool {
             TypeRef::Native { path, arguments }
                 if path == "rust::String" && arguments.is_empty()
         )
+}
+
+fn is_json_mutation_place(expression: &Expression, model: &SemanticModel) -> bool {
+    match &expression.kind {
+        ExpressionKind::Field { receiver, .. } => {
+            model
+                .expression(expression.span)
+                .is_some_and(|resolution| resolution.field.is_none())
+                && model
+                    .expression(receiver.span)
+                    .is_some_and(|resolution| is_json_var(canonical_ref(&resolution.ty)))
+        }
+        ExpressionKind::Index { receiver, .. } => model
+            .expression(receiver.span)
+            .is_some_and(|resolution| is_json_var(canonical_ref(&resolution.ty))),
+        _ => false,
+    }
 }
 
 fn is_format_value(ty: &TypeRef) -> bool {
