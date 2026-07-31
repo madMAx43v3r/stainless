@@ -133,13 +133,17 @@ implemented:
   shared `function<R(A...)>` and unique move-only
   `function_mut<R(A...)>` values, including exact named-function conversion,
   owned lambda captures, invocation, copying, passing, and returning.
+- [`20_formatting_macros.stl`](docs/ref/20_formatting_macros.stl) — imported
+  `eprintln!`, `format!`, `write!`, and `writeln!`, including checked
+  `stainless::FormatError` failures from string writes.
 
 `01_basics.stl`, `02_structs_and_data_inheritance.stl`,
 `11_vec_and_string.stl`, `13_range_for.stl`, and `14_constructors.stl` are
 currently parsed, resolved, lowered to HIR, emitted as Rust, and compiled by
 `rustc` in the test suite, as is the focused
-`15_checked_exception_subset.stl` sample and the native-Result
-`16_native_result_unwrap.stl` sample. The external
+`15_checked_exception_subset.stl` sample, the native-Result
+`16_native_result_unwrap.stl` sample, and the formatting-macro
+`20_formatting_macros.stl` sample. The external
 `17_external_regex_wrapper.stl` sample is compiled and executed through Cargo
 against the real `regex` crate. The external callback sample is compiled and
 executed against a local Rust fixture crate so its generic closure bounds are
@@ -1255,12 +1259,15 @@ derive through the normal single data-inheritance chain. A struct that does not
 ultimately derive from `stainless::Exception` cannot appear in `throws`,
 `throw`, or a typed `catch`.
 
-The compiler also provides one generic native-error exception:
+The compiler also provides native-error exceptions:
 
 ```cpp
 // Conceptual compiler-provided declaration; project code cannot redeclare it.
 namespace stainless {
     struct RustError : Exception {
+    };
+
+    struct FormatError : Exception {
     };
 }
 ```
@@ -1270,6 +1277,11 @@ namespace stainless {
 human-readable message but not the native Rust error's concrete type or fields.
 Consequently project code catches `stainless::RustError`; it cannot catch or
 downcast to the Rust `E` type.
+
+`stainless::FormatError` is the narrower checked failure produced by
+`write!` and `writeln!`. Its message is obtained from Rust's
+`std::fmt::Error`. Like every checked exception, it must be caught or listed in
+the enclosing function's `throws` clause.
 
 The `throws` clause is an unordered set of canonical exception-struct types.
 Duplicate entries and entries made redundant by another listed data base are
@@ -1872,12 +1884,17 @@ accepted and Cargo still performs final validation. The repository pins that
 minor in `rust-toolchain.toml`. Supporting multiple Rust minors in one compiler
 is deferred until the metadata generator and compatibility costs are known.
 
-Rust macros do not have ordinary callable signatures. The implemented first
-slice recognizes `rust::println!`; `use rust::println;` permits its short
-spelling, including the required `!`. The first argument, when present, must be
-a string literal. Remaining arguments currently accept Stainless numeric,
-boolean, character, and `String` values, and Cargo validates the Rust format
-string. Arbitrary Rust token trees are not passed through. Other standard and
+Rust macros do not have ordinary callable signatures. The implemented
+purpose-built set is `rust::println!`, `rust::eprintln!`, `rust::format!`,
+`rust::write!`, and `rust::writeln!`; importing one from `rust` permits its
+short spelling, including the required `!`. Format arguments must be string
+literals. Formatting values currently accept Stainless numeric, boolean,
+character, and `String` values, and Cargo validates the Rust format string.
+`format!` returns `String`. The initial `write!`/`writeln!` destination is a
+mutable `String`; both return `void` in Stainless and automatically convert a
+Rust `std::fmt::Error` into checked `stainless::FormatError`, so the exception
+must be caught or declared in `throws`. `writeln!(destination)` writes only a
+newline. Arbitrary Rust token trees are not passed through. Other standard and
 external macros remain rejected until each receives purpose-built parsing and
 lowering rules.
 

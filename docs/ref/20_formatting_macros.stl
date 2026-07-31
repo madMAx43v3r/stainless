@@ -1,0 +1,24 @@
+// Purpose-built access to Rust's common formatting macros.
+use rust::{eprintln, format, write, writeln, String};
+
+String render_line(i32 value) {
+    String output = format!("value={}", value);
+
+    try {
+        // write! and writeln! mutate String and throw FormatError
+        // automatically if Rust reports std::fmt::Error.
+        write!(output, ", doubled={}", value * 2);
+        writeln!(output);
+    } catch (const stainless::FormatError& error) {
+        eprintln!("formatting failed: {}", error.message);
+        return format!("formatting failed: {}", error.message);
+    }
+
+    return move(output);
+}
+
+i32 main() {
+    String line = render_line(21);
+    eprintln!("{}", line);
+    return 0;
+}

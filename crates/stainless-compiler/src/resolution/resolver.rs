@@ -154,6 +154,17 @@ impl Resolver<'_> {
             span: Span::default(),
         });
         self.struct_by_path.insert(rust_error_path, rust_error);
+
+        let format_error = StructId(self.model.structs.len());
+        let format_error_path = vec!["stainless".to_owned(), "FormatError".to_owned()];
+        self.model.structs.push(StructSymbol {
+            id: format_error,
+            path: format_error_path.clone(),
+            base: Some(root),
+            fields: Vec::new(),
+            span: Span::default(),
+        });
+        self.struct_by_path.insert(format_error_path, format_error);
     }
 
     fn collect_struct_names(&mut self, items: &[Item], namespace: &mut Vec<String>) {
@@ -1460,6 +1471,17 @@ impl Resolver<'_> {
             .expect("installing exception builtins creates RustError")
     }
 
+    fn format_error_struct(&mut self) -> StructId {
+        if self.exception_root().is_none() {
+            self.install_exception_builtins();
+        }
+        let path = vec!["stainless".to_owned(), "FormatError".to_owned()];
+        self.struct_by_path
+            .get(&path)
+            .copied()
+            .expect("installing exception builtins creates FormatError")
+    }
+
     fn resolve_local(&mut self, local: &ast::LocalDeclaration, context: &mut FunctionContext) {
         let declared = if local.ty.is_inferred() {
             None
@@ -2504,6 +2526,7 @@ impl Resolver<'_> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn resolve_macro_call(
         &mut self,
         callee: &ast::Path,
@@ -2511,21 +2534,31 @@ impl Resolver<'_> {
         span: Span,
         context: &mut FunctionContext,
     ) -> ExpressionInfo {
-        let is_qualified = callee.segments == ["rust", "println"];
-        let is_imported = callee.segments == ["println"]
+        let macro_name = callee.segments.last().map_or("", String::as_str);
+        let supported = matches!(
+            macro_name,
+            "println" | "eprintln" | "format" | "write" | "writeln"
+        );
+        let is_qualified = matches!(
+            callee.segments.as_slice(),
+            [root, name] if root == "rust" && name == macro_name
+        );
+        let is_imported = callee.segments.len() == 1
             && self
                 .imports
-                .candidates(&context.namespace, "println")
+                .candidates(&context.namespace, macro_name)
                 .iter()
-                .any(|candidate| candidate == &["rust", "println"]);
-        if !is_qualified && !is_imported {
+                .any(|candidate| {
+                    matches!(candidate.as_slice(), [root, name] if root == "rust" && name == macro_name)
+                });
+        if !supported || (!is_qualified && !is_imported) {
             for argument in arguments {
                 self.resolve_expression(argument, None, context);
             }
             self.push(
                 "RES097",
                 format!(
-                    "unsupported macro `{}!`; use `rust::println!` or import `rust::println`",
+                    "unsupported macro `{}!`; supported Rust macros are `println!`, `eprintln!`, `format!`, `write!`, and `writeln!`",
                     callee.display()
                 ),
                 span,
@@ -2537,7 +2570,54 @@ impl Resolver<'_> {
             .iter()
             .map(|argument| self.resolve_expression(argument, None, context))
             .collect::<Vec<_>>();
-        if let Some(format) = arguments.first()
+
+        let (format_index, format_required) = match macro_name {
+            "println" | "eprintln" => (0, false),
+            "format" => (0, true),
+            "write" => (1, true),
+            "writeln" => (1, false),
+            _ => unreachable!("unsupported macros returned above"),
+        };
+        let destination_required = matches!(macro_name, "write" | "writeln");
+        if destination_required && arguments.is_empty() {
+            self.push(
+                "RES100",
+                format!("`{macro_name}!` requires a mutable `String` destination"),
+                span,
+            );
+        }
+        if format_required && arguments.get(format_index).is_none() {
+            self.push(
+                "RES100",
+                format!("`{macro_name}!` requires a format string literal"),
+                span,
+            );
+        }
+
+        if destination_required
+            && let Some((destination, info)) = arguments.first().zip(actual.first())
+        {
+            let ty = canonical_ref(&info.ty);
+            if *ty != TypeRef::Error && *ty != TypeRef::native("rust::String", Vec::new()) {
+                self.push(
+                    "RES101",
+                    format!(
+                        "`{macro_name}!` initially supports only a `String` destination, found `{}`",
+                        display_type(ty)
+                    ),
+                    destination.span,
+                );
+            }
+            if *ty != TypeRef::Error && info.category != ValueCategory::MutablePlace {
+                self.push(
+                    "RES102",
+                    format!("the `{macro_name}!` destination must be mutable"),
+                    destination.span,
+                );
+            }
+        }
+
+        if let Some(format) = arguments.get(format_index)
             && !matches!(
                 &format.kind,
                 ExpressionKind::Literal(ast::Literal {
@@ -2548,24 +2628,38 @@ impl Resolver<'_> {
         {
             self.push(
                 "RES098",
-                "the first `println!` argument must be a string literal".to_owned(),
+                format!("the format argument to `{macro_name}!` must be a string literal"),
                 format.span,
             );
         }
-        for (argument, info) in arguments.iter().skip(1).zip(actual.iter().skip(1)) {
+        for (argument, info) in arguments
+            .iter()
+            .skip(format_index + 1)
+            .zip(actual.iter().skip(format_index + 1))
+        {
             let ty = canonical_ref(&info.ty);
-            if *ty != TypeRef::Error && !is_println_value(ty) {
+            if *ty != TypeRef::Error && !is_format_value(ty) {
                 self.push(
                     "RES099",
                     format!(
-                        "type `{}` is not supported as a `println!` formatting argument",
-                        display_type(ty)
+                        "type `{}` is not supported as a `{macro_name}!` formatting argument",
+                        display_type(ty),
                     ),
                     argument.span,
                 );
             }
         }
-        temporary(TypeRef::Void)
+        let ty = match macro_name {
+            "println" | "eprintln" => TypeRef::Void,
+            "format" => TypeRef::native("rust::String", Vec::new()),
+            "write" | "writeln" => {
+                let format_error = self.format_error_struct();
+                self.validate_checked_effect(format_error, span, context);
+                TypeRef::Void
+            }
+            _ => unreachable!("unsupported macros returned above"),
+        };
+        temporary(ty)
     }
 
     fn resolve_method_call(
@@ -4371,7 +4465,7 @@ fn is_numeric(ty: &TypeRef) -> bool {
     is_integer(ty) || matches!(ty, TypeRef::F32 | TypeRef::F64)
 }
 
-fn is_println_value(ty: &TypeRef) -> bool {
+fn is_format_value(ty: &TypeRef) -> bool {
     matches!(
         ty,
         TypeRef::Bool
@@ -4689,8 +4783,12 @@ fn source_uses_exceptions(source: &SourceFile) -> bool {
                 expression_uses_exceptions(callee)
                     || arguments.iter().any(expression_uses_exceptions)
             }
-            ExpressionKind::MacroCall { arguments, .. } => {
-                arguments.iter().any(expression_uses_exceptions)
+            ExpressionKind::MacroCall { callee, arguments } => {
+                callee
+                    .segments
+                    .last()
+                    .is_some_and(|name| matches!(name.as_str(), "write" | "writeln"))
+                    || arguments.iter().any(expression_uses_exceptions)
             }
             ExpressionKind::Aggregate { initializers, .. } => {
                 initializers.iter().any(expression_uses_exceptions)
@@ -4775,7 +4873,10 @@ fn source_uses_exceptions(source: &SourceFile) -> bool {
                         base.segments.as_slice(),
                         [namespace, name]
                             if namespace == "stainless"
-                                && matches!(name.as_str(), "Exception" | "RustError")
+                                && matches!(
+                                    name.as_str(),
+                                    "Exception" | "RustError" | "FormatError"
+                                )
                     )
                 }) || structure.constructors.iter().any(|constructor| {
                     !constructor.throws.is_empty()

@@ -737,9 +737,23 @@ impl Analyzer<'_> {
                 None
             }
             ExpressionKind::Call { arguments, .. } => self.call(expression, arguments),
-            ExpressionKind::MacroCall { arguments, .. } => {
-                for argument in arguments {
-                    self.expression(argument, Usage::Read);
+            ExpressionKind::MacroCall { callee, arguments } => {
+                let writes_destination = callee
+                    .segments
+                    .last()
+                    .is_some_and(|name| matches!(name.as_str(), "write" | "writeln"));
+                for (index, argument) in arguments.iter().enumerate() {
+                    self.expression(
+                        argument,
+                        if writes_destination && index == 0 {
+                            Usage::BorrowMutable
+                        } else {
+                            Usage::Read
+                        },
+                    );
+                }
+                if writes_destination {
+                    self.capture_exception_state();
                 }
                 None
             }

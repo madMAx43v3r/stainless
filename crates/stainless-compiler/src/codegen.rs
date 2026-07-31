@@ -617,17 +617,60 @@ impl Emitter {
                 Ok(quote!(#name))
             }
             hir::Expression::Literal { kind, text } => literal(*kind, text),
-            hir::Expression::Println { format, arguments } => {
+            hir::Expression::FormatMacro {
+                kind,
+                destination,
+                format,
+                arguments,
+            } => {
                 let arguments = arguments
                     .iter()
                     .map(|argument| self.expression(argument))
                     .collect::<Result<Vec<_>, _>>()?;
-                if let Some(format) = format {
-                    let format = syn::parse_str::<syn::LitStr>(format)
-                        .map_err(|error| format!("invalid `println!` format literal: {error}"))?;
-                    Ok(quote!(::std::println!(#format #(, #arguments)*)))
-                } else {
-                    Ok(quote!(::std::println!()))
+                let format = format
+                    .as_deref()
+                    .map(syn::parse_str::<syn::LitStr>)
+                    .transpose()
+                    .map_err(|error| format!("invalid formatting macro literal: {error}"))?;
+                match kind {
+                    hir::FormatMacroKind::Println => match format {
+                        Some(format) => Ok(quote!(::std::println!(#format #(, #arguments)*))),
+                        None => Ok(quote!(::std::println!())),
+                    },
+                    hir::FormatMacroKind::Eprintln => match format {
+                        Some(format) => Ok(quote!(::std::eprintln!(#format #(, #arguments)*))),
+                        None => Ok(quote!(::std::eprintln!())),
+                    },
+                    hir::FormatMacroKind::Format => {
+                        let format = format
+                            .ok_or_else(|| "resolved `format!` has no format literal".to_owned())?;
+                        Ok(quote!(::std::format!(#format #(, #arguments)*)))
+                    }
+                    hir::FormatMacroKind::Write | hir::FormatMacroKind::Writeln => {
+                        let destination = destination
+                            .as_deref()
+                            .ok_or_else(|| "resolved write macro has no destination".to_owned())?;
+                        let destination = self.expression(destination)?;
+                        let invocation = match (kind, format) {
+                            (hir::FormatMacroKind::Write, Some(format)) => {
+                                quote!(::std::write!(#destination, #format #(, #arguments)*))
+                            }
+                            (hir::FormatMacroKind::Writeln, Some(format)) => {
+                                quote!(::std::writeln!(#destination, #format #(, #arguments)*))
+                            }
+                            (hir::FormatMacroKind::Writeln, None) => {
+                                quote!(::std::writeln!(#destination))
+                            }
+                            (hir::FormatMacroKind::Write, None) => {
+                                return Err("resolved `write!` has no format literal".to_owned());
+                            }
+                            _ => unreachable!("non-write macro handled above"),
+                        };
+                        Ok(quote!({
+                            use ::std::fmt::Write as _;
+                            #invocation
+                        }))
+                    }
                 }
             }
             hir::Expression::Parenthesized(expression) => {
@@ -656,9 +699,10 @@ impl Emitter {
             }
             hir::Expression::UnwrapRustResult {
                 expression,
+                exception,
                 error_message,
                 target,
-            } => self.unwrap_rust_result(expression, *error_message, target),
+            } => self.unwrap_rust_result(expression, *exception, *error_message, target),
             hir::Expression::Success(value) => {
                 let value = value
                     .as_deref()
@@ -805,6 +849,7 @@ impl Emitter {
     fn unwrap_rust_result(
         &mut self,
         expression: &hir::Expression,
+        exception: hir::NativeExceptionKind,
         error_message: hir::RustErrorMessage,
         target: &hir::ExceptionTarget,
     ) -> Result<TokenStream, String> {
@@ -821,12 +866,15 @@ impl Emitter {
                 ::std::string::String::from("native Rust operation failed")
             }),
         };
+        let exception = match exception {
+            hir::NativeExceptionKind::RustError => quote!(RustError),
+            hir::NativeExceptionKind::FormatError => quote!(FormatError),
+        };
         let converted = quote! {
-            Box::new(crate::__stainless_namespace_stainless::RustError {
-                __stainless_base_Exception:
-                    crate::__stainless_namespace_stainless::Exception {
-                        message: #message,
-                    },
+            Box::new(crate::__stainless_namespace_stainless::#exception {
+                __stainless_base_Exception: crate::__stainless_namespace_stainless::Exception {
+                    message: #message,
+                },
             }) as crate::__StainlessExceptionBox
         };
         let propagation = exception_propagation(target, &converted);

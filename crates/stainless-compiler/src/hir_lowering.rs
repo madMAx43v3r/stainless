@@ -33,7 +33,7 @@ pub(crate) fn lower(
             structure.path.as_slice(),
             [namespace, name]
                 if namespace == "stainless"
-                    && matches!(name.as_str(), "Exception" | "RustError")
+                    && matches!(name.as_str(), "Exception" | "RustError" | "FormatError")
         )
     }) {
         if let Some(structure) = lowerer.lower_struct_symbol(
@@ -822,6 +822,7 @@ impl Lowerer<'_> {
         if let Some(adaptation) = self.semantics.rust_result_adaptation(expression.span) {
             return Some(hir::Expression::UnwrapRustResult {
                 expression: Box::new(self.lower_expression(expression, ExpressionMode::Value)?),
+                exception: hir::NativeExceptionKind::RustError,
                 error_message: lower_rust_error_message(adaptation.error_message),
                 target: self.exception_target.clone(),
             });
@@ -996,8 +997,38 @@ impl Lowerer<'_> {
                 };
                 self.lower_resolved_call(call, Some(callee), arguments)?
             }
-            ExpressionKind::MacroCall { arguments, .. } => {
-                let format = match arguments.first() {
+            ExpressionKind::MacroCall { callee, arguments } => {
+                let macro_name = callee.segments.last().map_or("", String::as_str);
+                let (kind, destination_index, format_index, format_required) = match macro_name {
+                    "println" => (hir::FormatMacroKind::Println, None, 0, false),
+                    "eprintln" => (hir::FormatMacroKind::Eprintln, None, 0, false),
+                    "format" => (hir::FormatMacroKind::Format, None, 0, true),
+                    "write" => (hir::FormatMacroKind::Write, Some(0), 1, true),
+                    "writeln" => (hir::FormatMacroKind::Writeln, Some(0), 1, false),
+                    _ => {
+                        self.push(
+                            "HIR020",
+                            format!("resolved formatting macro `{macro_name}!` is unsupported"),
+                            expression.span,
+                        );
+                        return None;
+                    }
+                };
+                let destination = match destination_index.and_then(|index| arguments.get(index)) {
+                    Some(destination) => Some(Box::new(
+                        self.lower_expression(destination, ExpressionMode::Value)?,
+                    )),
+                    None => None,
+                };
+                if destination_index.is_some() && destination.is_none() {
+                    self.push(
+                        "HIR020",
+                        format!("resolved `{macro_name}!` has no destination"),
+                        expression.span,
+                    );
+                    return None;
+                }
+                let format = match arguments.get(format_index) {
                     Some(ast::Expression {
                         kind:
                             ExpressionKind::Literal(ast::Literal {
@@ -1006,24 +1037,46 @@ impl Lowerer<'_> {
                             }),
                         ..
                     }) => Some(text.clone()),
-                    None => None,
+                    None if !format_required => None,
+                    None => {
+                        self.push(
+                            "HIR020",
+                            format!("resolved `{macro_name}!` has no format string"),
+                            expression.span,
+                        );
+                        return None;
+                    }
                     Some(_) => {
                         self.push(
                             "HIR020",
-                            "resolved `println!` has no literal format string".to_owned(),
+                            format!("resolved `{macro_name}!` has no literal format string"),
                             expression.span,
                         );
                         return None;
                     }
                 };
-                let skip = usize::from(format.is_some());
-                hir::Expression::Println {
+                let macro_expression = hir::Expression::FormatMacro {
+                    kind,
+                    destination,
                     format,
                     arguments: arguments
                         .iter()
-                        .skip(skip)
+                        .skip(format_index + 1)
                         .map(|argument| self.lower_expression(argument, ExpressionMode::Reference))
                         .collect::<Option<Vec<_>>>()?,
+                };
+                if matches!(
+                    kind,
+                    hir::FormatMacroKind::Write | hir::FormatMacroKind::Writeln
+                ) {
+                    hir::Expression::UnwrapRustResult {
+                        expression: Box::new(macro_expression),
+                        exception: hir::NativeExceptionKind::FormatError,
+                        error_message: hir::RustErrorMessage::Display,
+                        target: self.exception_target.clone(),
+                    }
+                } else {
+                    macro_expression
                 }
             }
             ExpressionKind::Aggregate { initializers, .. } => {
@@ -1405,6 +1458,7 @@ impl Lowerer<'_> {
                 };
                 Some(hir::Expression::UnwrapRustResult {
                     expression: Box::new(self.lower_expression(receiver, ExpressionMode::Value)?),
+                    exception: hir::NativeExceptionKind::RustError,
                     error_message: lower_rust_error_message(*error_message),
                     target: self.exception_target.clone(),
                 })

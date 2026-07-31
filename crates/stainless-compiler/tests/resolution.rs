@@ -14,6 +14,7 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
         include_str!("../../../docs/ref/15_checked_exception_subset.stl"),
         include_str!("../../../docs/ref/16_native_result_unwrap.stl"),
         include_str!("../../../docs/ref/19_stored_functions.stl"),
+        include_str!("../../../docs/ref/20_formatting_macros.stl"),
     ] {
         let analysis = analyze(source);
 
@@ -109,27 +110,51 @@ i32 invoke(function<i32(const i32&)> callback, i32 value) {
 }
 
 #[test]
-fn println_macro_requires_an_import_literal_format_and_printable_values() {
+fn formatting_macros_require_imports_literal_formats_and_supported_values() {
     let valid = analyze(
-        r#"use rust::println;
+        r#"use rust::{eprintln, format, println, write, writeln, String};
 
-void hello(i32 value) {
+void macros(String& output, i32 value) throws stainless::FormatError {
     println!("value = {}", value);
-    rust::println!();
+    eprintln!();
+    String rendered = format!("rendered = {}", value);
+    write!(output, "{}", rendered);
+    writeln!(output);
 }
 "#,
     );
     assert!(valid.diagnostics.is_empty(), "{:?}", valid.diagnostics);
+    let macros = valid
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["macros"])
+        .expect("formatting macro function");
+    assert_eq!(macros.throws.len(), 1);
+    assert_eq!(
+        valid
+            .semantics
+            .structure(macros.throws[0])
+            .expect("FormatError structure")
+            .path,
+        ["stainless", "FormatError"]
+    );
 
     let invalid = analyze(
         r#"use rust::String;
 
 struct Value { i32 number; };
 
-void bad(String format, Value value) {
+void bad(const String& output, String format, Value value) {
     println!("not imported");
-    rust::println!(format, 1);
-    rust::println!("{}", value);
+    eprintln!("also not imported");
+    rust::format!();
+    rust::format!(format, 1);
+    rust::format!("{}", value);
+    rust::write!(output, "cannot mutate");
+    rust::write!(1, "not a String");
+    rust::write!(output);
+    rust::writeln!();
 }
 "#,
     );
@@ -138,7 +163,9 @@ void bad(String format, Value value) {
         .iter()
         .map(|diagnostic| diagnostic.code)
         .collect::<Vec<_>>();
-    for expected in ["RES097", "RES098", "RES099"] {
+    for expected in [
+        "RES075", "RES097", "RES098", "RES099", "RES100", "RES101", "RES102",
+    ] {
         assert!(
             codes.contains(&expected),
             "missing {expected}: {:#?}",

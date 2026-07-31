@@ -306,6 +306,15 @@ pub enum RustErrorMessage {
     Fallback,
 }
 
+/// Compiler-native checked exception selected for a Rust error conversion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeExceptionKind {
+    /// Generic failure from a native Rust `Result`.
+    RustError,
+    /// Failure while appending formatted text.
+    FormatError,
+}
+
 /// One checked-exception handler.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Catch {
@@ -362,9 +371,13 @@ pub enum Expression {
         /// Source spelling.
         text: String,
     },
-    /// A compiler-validated Rust `println!` invocation.
-    Println {
-        /// Format string source spelling, absent for a blank line.
+    /// A compiler-validated Rust formatting macro invocation.
+    FormatMacro {
+        /// Purpose-built macro operation.
+        kind: FormatMacroKind,
+        /// Mutable output destination for `write!` and `writeln!`.
+        destination: Option<Box<Expression>>,
+        /// Format string source spelling, absent for a blank output line.
         format: Option<String>,
         /// Formatting values after the format string.
         arguments: Vec<Expression>,
@@ -387,6 +400,8 @@ pub enum Expression {
     UnwrapRustResult {
         /// Native `Result<T, E>` expression.
         expression: Box<Expression>,
+        /// Concrete compiler-native exception created for `Err`.
+        exception: NativeExceptionKind,
         /// Statically selected error-message conversion.
         error_message: RustErrorMessage,
         /// Active checked boundary.
@@ -518,4 +533,19 @@ pub enum Expression {
         /// Destination type.
         target: Type,
     },
+}
+
+/// Supported Rust formatting macro with statically defined Stainless syntax.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FormatMacroKind {
+    /// Write a line to standard output.
+    Println,
+    /// Write a line to standard error.
+    Eprintln,
+    /// Produce a new Rust `String`.
+    Format,
+    /// Append formatted text to a mutable `String`.
+    Write,
+    /// Append formatted text and a newline to a mutable `String`.
+    Writeln,
 }

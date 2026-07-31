@@ -231,12 +231,16 @@ fn parses_stored_function_signatures_losslessly() {
 }
 
 #[test]
-fn parses_imported_and_qualified_println_macros_losslessly() {
-    let source = r#"use rust::println;
+fn parses_supported_formatting_macros_losslessly() {
+    let source = r#"use rust::{eprintln, format, println, write, writeln, String};
 
-void hello(i32 value) {
+void macros(String& output, i32 value) {
     println!("Hello, {}!", value);
     rust::println!();
+    eprintln!("error: {}", value);
+    String text = format!("value={}", value);
+    write!(output, "{}", text);
+    writeln!(output);
 }
 "#;
     let parsed = parse(source);
@@ -245,7 +249,7 @@ void hello(i32 value) {
     assert_eq!(parsed.syntax().to_string(), source);
     assert_eq!(
         count_kind(&parsed.syntax(), SyntaxKind::MacroCallExpression),
-        2
+        6
     );
 }
 

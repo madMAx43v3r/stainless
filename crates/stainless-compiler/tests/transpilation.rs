@@ -212,6 +212,10 @@ fn transpiles_and_compiles_resolved_reference_programs() {
             "native-result-unwrap",
             include_str!("../../../docs/ref/16_native_result_unwrap.stl"),
         ),
+        (
+            "formatting-macros",
+            include_str!("../../../docs/ref/20_formatting_macros.stl"),
+        ),
     ] {
         let result = transpile(source);
         assert!(
@@ -978,6 +982,63 @@ void say_hello(i32 value) {
         .expect("generated println binary should run");
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "Hello, 7!\n\n");
+    remove_temporary_parent(&binary);
+}
+
+#[test]
+fn generated_formatting_and_string_write_macros_execute() {
+    let source = r#"use rust::{eprintln, format, write, writeln, String};
+
+String render(i32 value) {
+    String output = format!("value={}, next={}", value, value + 1);
+    try {
+        write!(output, "!");
+        writeln!(output);
+    } catch (const stainless::FormatError& error) {
+        return format!("formatting failed: {}", error.message);
+    }
+    return move(output);
+}
+
+void report(const String& value) {
+    eprintln!("report: {}", value);
+}
+"#;
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:?}",
+        result.analysis.diagnostics
+    );
+    let find_name = |name: &str| {
+        result
+            .analysis
+            .semantics
+            .functions
+            .iter()
+            .find(|function| function.path == [name])
+            .unwrap_or_else(|| panic!("missing `{name}`"))
+            .mangled_name
+            .clone()
+    };
+    let render = find_name("render");
+    let report = find_name("report");
+    let mut rust = result.rust.expect("formatting macros should emit Rust");
+    assert!(rust.contains("FormatError"));
+    write!(
+        rust,
+        "\nfn main() {{\n    let rendered = {render}(7);\n    assert_eq!(rendered, \"value=7, next=8!\\n\");\n    {report}(&rendered);\n}}\n"
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("formatting_macros", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .expect("generated formatting macro binary should run");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "report: value=7, next=8!\n\n"
+    );
     remove_temporary_parent(&binary);
 }
 
