@@ -13,11 +13,14 @@ Stainless is a new C++-like language that transpiles to Rust.
 
 ## Hello World
 
-Run the checked-in starter project:
+Run the checked-in Stainless program directly:
 
 ```sh
-cargo run -p stainless-hello-world
+cargo run -p stainlessc -- --run examples/hello-world/main.stl
 ```
+
+After installing `stainlessc`, the same command is simply
+`stainlessc --run main.stl` from a project directory.
 
 Output:
 
@@ -30,25 +33,21 @@ Its Stainless source is intentionally small:
 ```cpp
 use rust::println;
 
-namespace hello {
-
-void run() {
+i32 main() {
     println!("Hello, world!");
-}
-
+    return 0;
 }
 ```
 
 See [`examples/hello-world`](examples/hello-world/) for the complete
-boilerplate. It uses `stainless-build` from Cargo's `build.rs`, includes the
-generated Rust from `OUT_DIR`, and exposes `hello::run` under one stable name
-for the Rust `main`.
+program. It contains no Rust `main.rs`, `build.rs`, or generated source file;
+`stainlessc --run` supplies the small Rust entry point and invokes `rustc`.
 
 For standalone checking or Rust generation:
 
 ```sh
-cargo run -p stainlessc -- --check examples/hello-world/src/hello.stl
-cargo run -p stainlessc -- examples/hello-world/src/hello.stl -o hello.rs
+cargo run -p stainlessc -- --check examples/hello-world/main.stl
+cargo run -p stainlessc -- examples/hello-world/main.stl -o hello.rs
 ```
 
 ## Project charter
@@ -2411,10 +2410,10 @@ The repository currently contains `stainless-syntax`, `stainless-compiler`,
 `stainless-build`, and `stainlessc`. Generated checked-exception support is
 still emitted inline; a separate `stainless-runtime` crate remains deferred.
 
-An existing Rust package integrates Stainless explicitly:
-
-Until the crates are published, a package in this workspace uses a path build
-dependency:
+The `stainless-build` crate is an optional bridge for the separate case where
+hand-written Rust code embeds Stainless functions. Normal standalone Stainless
+programs do not use it. Until the crates are published, an embedding package in
+this workspace uses a path build dependency:
 
 ```toml
 [build-dependencies]
@@ -2449,17 +2448,25 @@ module. Generated files are rebuildable artifacts and are never written into
 `src`. Multi-file compilation, binding-manifest selection through the builder,
 overload-signature export selectors, and runtime ABI versioning are deferred.
 
-The standalone CLI has the same compiler semantics:
+Standalone Stainless programs need only a `.stl` source file with one root,
+non-overloaded `i32 main()` function. They do not need a Rust package,
+`build.rs`, or `main.rs`:
 
 ```sh
 stainlessc --check src/lib.stl
 stainlessc src/lib.stl -o generated.rs
 stainlessc src/lib.stl > generated.rs
+stainlessc --build -o hello main.stl
+stainlessc --run main.stl
 ```
 
 `--check` validates without emitting Rust. Without `-o`, generated Rust is
-written to stdout. Diagnostics go to stderr and use byte spans until richer
-source rendering is added.
+written to stdout. `--build` writes an executable to the required `-o` path.
+`--run` generates a private Rust entry point, compiles it in a temporary
+directory, runs it with inherited standard streams, and removes the temporary
+files. Diagnostics go to stderr and use byte spans until richer source
+rendering is added. The initial direct build/run path supports the built-in
+Rust bindings; external Cargo dependency orchestration remains deferred.
 
 ## Rust library survey
 

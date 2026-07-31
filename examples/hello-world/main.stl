@@ -1,0 +1,7 @@
+// This is a complete Stainless program; no Rust glue files are required.
+use rust::println;
+
+i32 main() {
+    println!("Hello, world!");
+    return 0;
+}

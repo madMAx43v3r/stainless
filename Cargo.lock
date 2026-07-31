@@ -226,13 +226,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "stainless-hello-world"
-version = "0.1.0"
-dependencies = [
- "stainless-build",
-]
-
-[[package]]
 name = "stainless-syntax"
 version = "0.1.0"
 dependencies = [

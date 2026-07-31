@@ -1,9 +1,11 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{Command as ProcessCommand, ExitCode};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const USAGE: &str = "\
 Usage: stainlessc [OPTIONS] <INPUT.stl>
@@ -12,7 +14,9 @@ Transpile Stainless source to Rust.
 
 Options:
     --check              Validate without emitting Rust
-    -o, --output <PATH>  Write Rust to PATH instead of stdout; use - for stdout
+    --build              Compile a root `i32 main()` into an executable
+    --run                Compile and run a root `i32 main()` function
+    -o, --output <PATH>  Write emitted Rust or the built executable to PATH
     -h, --help           Print help
     -V, --version        Print version
 ";
@@ -22,6 +26,8 @@ struct Options {
     input: PathBuf,
     output: Option<PathBuf>,
     check: bool,
+    build: bool,
+    run: bool,
 }
 
 enum Command {
@@ -52,12 +58,16 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Comman
     let mut input = None;
     let mut output = None;
     let mut check = false;
+    let mut build = false;
+    let mut run = false;
     let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
         match argument.to_str() {
             Some("-h" | "--help") => return Ok(Command::Help),
             Some("-V" | "--version") => return Ok(Command::Version),
             Some("--check") => check = true,
+            Some("--build") => build = true,
+            Some("--run") => run = true,
             Some("-o" | "--output") => {
                 if output.is_some() {
                     return Err("the output option may be provided only once".to_owned());
@@ -77,13 +87,27 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Comman
         }
     }
     let input = input.ok_or_else(|| "missing Stainless input file".to_owned())?;
+    if usize::from(check) + usize::from(build) + usize::from(run) > 1 {
+        return Err("--check, --build, and --run are mutually exclusive".to_owned());
+    }
+    if run && output.is_some() {
+        return Err("--run cannot be combined with --output".to_owned());
+    }
     if check && output.is_some() {
         return Err("--check cannot be combined with --output".to_owned());
+    }
+    if build && output.is_none() {
+        return Err("--build requires --output <PROGRAM>".to_owned());
+    }
+    if build && output.as_ref() == Some(&input) {
+        return Err("the executable output cannot overwrite the Stainless input".to_owned());
     }
     Ok(Command::Compile(Options {
         input,
         output,
         check,
+        build,
+        run,
     }))
 }
 
@@ -116,6 +140,18 @@ fn compile(options: &Options) -> ExitCode {
     if options.check {
         return ExitCode::SUCCESS;
     }
+    if options.run {
+        return run_program(&result);
+    }
+    if options.build {
+        return build_program(
+            &result,
+            options
+                .output
+                .as_deref()
+                .expect("--build was validated to have an output"),
+        );
+    }
     let Some(rust) = result.rust else {
         eprintln!("error: Stainless produced no Rust without a diagnostic");
         return ExitCode::FAILURE;
@@ -138,9 +174,168 @@ fn compile(options: &Options) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn run_program(result: &stainless_compiler::TranspileResult) -> ExitCode {
+    let rust = match executable_source(result) {
+        Ok(rust) => rust,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let directory = match temporary_directory() {
+        Ok(directory) => directory,
+        Err(error) => {
+            eprintln!("error: failed to create a temporary build directory: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let source = directory.join("generated.rs");
+    let executable = directory.join(format!("stainless-program{}", env::consts::EXE_SUFFIX));
+    let outcome = compile_executable(&rust, &source, &executable).and_then(|()| {
+        ProcessCommand::new(&executable)
+            .status()
+            .map_err(|error| format!("failed to run `{}`: {error}", executable.display()))
+    });
+    if let Err(error) = fs::remove_dir_all(&directory) {
+        eprintln!(
+            "warning: failed to remove temporary directory `{}`: {error}",
+            directory.display()
+        );
+    }
+    match outcome {
+        Ok(status) if status.success() => ExitCode::SUCCESS,
+        Ok(status) => status
+            .code()
+            .and_then(|code| u8::try_from(code).ok())
+            .map_or(ExitCode::FAILURE, ExitCode::from),
+        Err(message) => {
+            eprintln!("error: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn build_program(
+    result: &stainless_compiler::TranspileResult,
+    output: &std::path::Path,
+) -> ExitCode {
+    let rust = match executable_source(result) {
+        Ok(rust) => rust,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let directory = match temporary_directory() {
+        Ok(directory) => directory,
+        Err(error) => {
+            eprintln!("error: failed to create a temporary build directory: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let source = directory.join("generated.rs");
+    let outcome = compile_executable(&rust, &source, output);
+    if let Err(error) = fs::remove_dir_all(&directory) {
+        eprintln!(
+            "warning: failed to remove temporary directory `{}`: {error}",
+            directory.display()
+        );
+    }
+    match outcome {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(message) => {
+            eprintln!("error: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn compile_executable(
+    rust: &str,
+    source: &std::path::Path,
+    output: &std::path::Path,
+) -> Result<(), String> {
+    fs::write(source, rust)
+        .map_err(|error| format!("failed to write `{}`: {error}", source.display()))?;
+    let rustc = env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
+    let status = ProcessCommand::new(rustc)
+        .arg("--edition=2024")
+        .arg("--crate-name")
+        .arg("stainless_program")
+        .arg(source)
+        .arg("-o")
+        .arg(output)
+        .status()
+        .map_err(|error| format!("failed to invoke rustc: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("rustc rejected the generated program".to_owned())
+    }
+}
+
+fn executable_source(result: &stainless_compiler::TranspileResult) -> Result<String, String> {
+    let program = result
+        .hir
+        .as_ref()
+        .ok_or_else(|| "Stainless produced no executable HIR".to_owned())?;
+    let entries = program
+        .functions
+        .iter()
+        .filter(|function| function.source_path == ["main"])
+        .collect::<Vec<_>>();
+    let entry = match entries.as_slice() {
+        [entry] => *entry,
+        [] => return Err("a runnable program must define root `i32 main()`".to_owned()),
+        _ => return Err("the root `main` function cannot be overloaded".to_owned()),
+    };
+    if !entry.parameters.is_empty()
+        || entry.return_type != stainless_compiler::hir::Type::Primitive("i32")
+    {
+        return Err("the program entry point must have the signature `i32 main()`".to_owned());
+    }
+    let mut rust = result
+        .rust
+        .clone()
+        .ok_or_else(|| "Stainless produced no generated Rust".to_owned())?;
+    if entry.throws {
+        write!(
+            rust,
+            "\nfn main() {{\n    let code = match {}() {{\n        Ok(code) => code,\n        Err(error) => {{\n            ::std::eprintln!(\"Unhandled Stainless exception: {{error}}\");\n            1\n        }}\n    }};\n    ::std::process::exit(code);\n}}\n",
+            entry.rust_name
+        )
+        .expect("writing generated Rust to a String cannot fail");
+    } else {
+        write!(
+            rust,
+            "\nfn main() {{\n    ::std::process::exit({}());\n}}\n",
+            entry.rust_name
+        )
+        .expect("writing generated Rust to a String cannot fail");
+    }
+    Ok(rust)
+}
+
+fn temporary_directory() -> io::Result<PathBuf> {
+    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..100 {
+        let index = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+        let directory = env::temp_dir().join(format!("stainlessc-{}-{index}", std::process::id()));
+        match fs::create_dir(&directory) {
+            Ok(()) => return Ok(directory),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique temporary directory",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Command, Options, parse_options};
+    use super::{Command, Options, executable_source, parse_options};
     use std::ffi::OsString;
     use std::path::PathBuf;
 
@@ -157,6 +352,8 @@ mod tests {
                 input: PathBuf::from("input.stl"),
                 output: None,
                 check: true,
+                build: false,
+                run: false,
             }
         );
 
@@ -176,5 +373,44 @@ mod tests {
         );
         assert!(parse_options(["--wat"].map(OsString::from)).is_err());
         assert!(parse_options(std::iter::empty()).is_err());
+    }
+
+    #[test]
+    fn parses_run_and_rejects_conflicting_output_modes() {
+        let Command::Compile(run) =
+            parse_options(["--run", "main.stl"].map(OsString::from)).expect("run arguments")
+        else {
+            panic!("expected compile command");
+        };
+        assert!(run.run);
+        assert!(parse_options(["--run", "--check", "main.stl"].map(OsString::from)).is_err());
+        assert!(parse_options(["--run", "-o", "program", "main.stl"].map(OsString::from)).is_err());
+    }
+
+    #[test]
+    fn build_requires_a_distinct_executable_output() {
+        let Command::Compile(build) =
+            parse_options(["--build", "-o", "hello", "main.stl"].map(OsString::from))
+                .expect("build arguments")
+        else {
+            panic!("expected compile command");
+        };
+        assert!(build.build);
+        assert!(parse_options(["--build", "main.stl"].map(OsString::from)).is_err());
+        assert!(
+            parse_options(["--build", "-o", "main.stl", "main.stl"].map(OsString::from)).is_err()
+        );
+    }
+
+    #[test]
+    fn creates_a_rust_entry_point_for_stainless_main() {
+        let result = stainless_compiler::transpile("i32 main() { return 0; }");
+        let rust = executable_source(&result).expect("valid executable source");
+
+        assert!(rust.contains("fn main()"));
+        assert!(rust.contains("::std::process::exit("));
+
+        let missing = stainless_compiler::transpile("i32 helper() { return 0; }");
+        assert!(executable_source(&missing).is_err());
     }
 }
