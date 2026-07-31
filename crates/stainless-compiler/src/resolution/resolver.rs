@@ -7,8 +7,8 @@ use crate::ast::{
     TypeKind,
 };
 use crate::interop::{
-    CallStyle, CallableBinding, CallbackKind, CallbackType, NativeBindings, NativeErrorFormat,
-    NativeTypeBinding, Receiver, TypeRef,
+    CallStyle, CallableBinding, CallbackKind, NativeBindings, NativeErrorFormat, NativeTypeBinding,
+    Receiver, StoredFunctionKind, TypeRef,
 };
 
 use super::imports::ImportTable;
@@ -238,6 +238,14 @@ impl Resolver<'_> {
                                 self.push(
                                     "RES043",
                                     "references are not allowed as data fields".to_owned(),
+                                    field.ty.span,
+                                );
+                            }
+                            if contains_unique_function_storage(&ty) {
+                                self.push(
+                                    "RES092",
+                                    "a move-only `function_mut` cannot be stored in an implicitly copyable struct"
+                                        .to_owned(),
                                     field.ty.span,
                                 );
                             }
@@ -1641,13 +1649,13 @@ impl Resolver<'_> {
     ) -> ExpressionInfo {
         let (info, call, field) = match &expression.kind {
             ExpressionKind::Name(path) => {
-                if let Some(TypeRef::Callback(callback)) = expected
+                if matches!(expected, Some(TypeRef::Callback(_) | TypeRef::Function(_)))
                     && !self.value_name_resolves(path, context)
                 {
                     (
                         self.resolve_callback_function_name(
                             path,
-                            callback,
+                            expected.expect("callable expectation was matched"),
                             expression.span,
                             context,
                         ),
@@ -1817,10 +1825,12 @@ impl Resolver<'_> {
     fn resolve_callback_function_name(
         &mut self,
         path: &ast::Path,
-        callback: &CallbackType,
+        expected: &TypeRef,
         span: Span,
         context: &FunctionContext,
     ) -> ExpressionInfo {
+        let (parameters, return_type) = callable_signature(expected)
+            .expect("named function conversion is only requested for callable expectations");
         let signature_candidates = self
             .function_candidates(path, &context.namespace)
             .into_iter()
@@ -1830,9 +1840,9 @@ impl Resolver<'_> {
                     && function
                         .parameters
                         .iter()
-                        .map(|parameter| canonical(&parameter.ty))
-                        .eq(callback.parameters.iter().map(canonical))
-                    && canonical(&function.return_type) == canonical(&callback.return_type)
+                        .map(|parameter| &parameter.ty)
+                        .eq(parameters.iter())
+                    && &function.return_type == return_type
             })
             .collect::<Vec<_>>();
         if signature_candidates.len() != 1 {
@@ -1841,13 +1851,12 @@ impl Resolver<'_> {
                 format!(
                     "callback function `{}` must resolve to exactly one non-member overload with signature ({}) -> {}",
                     path.display(),
-                    callback
-                        .parameters
+                    parameters
                         .iter()
                         .map(display_type)
                         .collect::<Vec<_>>()
                         .join(", "),
-                    display_type(&callback.return_type)
+                    display_type(return_type)
                 ),
                 span,
             );
@@ -1869,12 +1878,12 @@ impl Resolver<'_> {
         if !function.throws.is_empty() {
             self.push(
                 "RES085",
-                "a callback passed to an ordinary Rust closure parameter cannot throw".to_owned(),
+                "a stored or ordinary Rust callback cannot throw".to_owned(),
                 span,
             );
             return error_info();
         }
-        let ty = TypeRef::Callback(Box::new(callback.clone()));
+        let ty = expected.clone();
         self.model.callbacks.push(ResolvedCallback {
             span,
             ty: ty.clone(),
@@ -1894,30 +1903,58 @@ impl Resolver<'_> {
         span: Span,
         outer: &mut FunctionContext,
     ) -> ExpressionInfo {
-        let Some(TypeRef::Callback(callback)) = expected else {
+        let Some(expected) = expected else {
             self.push(
                 "RES082",
-                "a lambda is only valid as a contextually typed native callback argument"
-                    .to_owned(),
+                "a lambda requires a contextual callback or stored function type".to_owned(),
                 span,
             );
             return error_info();
         };
-        if callback.escape != crate::interop::CallbackEscape::Call {
-            self.push(
-                "RES082",
-                "only non-escaping callback lambdas are implemented".to_owned(),
-                span,
-            );
-            return error_info();
-        }
-        if callback.kind == CallbackKind::FunctionPointer && !captures.is_empty() {
-            self.push(
-                "RES086",
-                "`fn_ptr` callbacks require a captureless lambda or named function".to_owned(),
-                span,
-            );
-        }
+        let (callback_parameters, callback_return, stored_kind) = match expected {
+            TypeRef::Callback(callback) => {
+                if callback.escape != crate::interop::CallbackEscape::Call {
+                    self.push(
+                        "RES082",
+                        "only non-escaping callback lambdas are implemented".to_owned(),
+                        span,
+                    );
+                    return error_info();
+                }
+                if callback.kind == CallbackKind::FunctionPointer && !captures.is_empty() {
+                    self.push(
+                        "RES086",
+                        "`fn_ptr` callbacks require a captureless lambda or named function"
+                            .to_owned(),
+                        span,
+                    );
+                }
+                (&callback.parameters, callback.return_type.as_ref(), None)
+            }
+            TypeRef::Function(function) => {
+                if function.kind == StoredFunctionKind::Shared && is_mutable {
+                    self.push(
+                        "RES093",
+                        "a `mutable` lambda requires `function_mut`, not shared `function`"
+                            .to_owned(),
+                        span,
+                    );
+                }
+                (
+                    &function.parameters,
+                    function.return_type.as_ref(),
+                    Some(function.kind),
+                )
+            }
+            _ => {
+                self.push(
+                    "RES082",
+                    "a lambda requires a contextual callback or stored function type".to_owned(),
+                    span,
+                );
+                return error_info();
+            }
+        };
 
         let mut lambda_scope = BTreeMap::new();
         let mut resolved_captures = Vec::new();
@@ -1976,6 +2013,15 @@ impl Resolver<'_> {
                     ))
                 }
                 LambdaCaptureKind::Borrow => {
+                    if stored_kind.is_some() {
+                        self.push(
+                            "RES094",
+                            "a stored function must own every capture; reference captures are not allowed"
+                                .to_owned(),
+                            capture.span,
+                        );
+                        continue;
+                    }
                     let Some(outer_variable) = outer
                         .scopes
                         .iter()
@@ -2057,12 +2103,12 @@ impl Resolver<'_> {
             });
         }
 
-        if parameters.len() != callback.parameters.len() {
+        if parameters.len() != callback_parameters.len() {
             self.push(
                 "RES091",
                 format!(
                     "callback requires {} lambda parameter(s), found {}",
-                    callback.parameters.len(),
+                    callback_parameters.len(),
                     parameters.len()
                 ),
                 span,
@@ -2070,8 +2116,20 @@ impl Resolver<'_> {
         }
         for (index, parameter) in parameters.iter().enumerate() {
             let resolved = self.resolve_type(&parameter.ty, &outer.namespace, false);
-            if let Some(expected) = callback.parameters.get(index) {
-                self.require_exact(expected, &resolved, parameter.ty.span, "lambda parameter");
+            if let Some(expected) = callback_parameters.get(index)
+                && *expected != resolved
+                && *expected != TypeRef::Error
+                && resolved != TypeRef::Error
+            {
+                self.push(
+                    "RES028",
+                    format!(
+                        "lambda parameter requires exact type `{}`, found `{}`",
+                        display_type(expected),
+                        display_type(&resolved)
+                    ),
+                    parameter.ty.span,
+                );
             }
             let variable = Variable {
                 mutable: parameter_mutability(parameter, &resolved),
@@ -2082,7 +2140,7 @@ impl Resolver<'_> {
 
         let mut context = FunctionContext {
             namespace: outer.namespace.clone(),
-            return_type: callback.return_type.as_ref().clone(),
+            return_type: callback_return.clone(),
             scopes: vec![lambda_scope],
             receiver: None,
             declared_throws: Vec::new(),
@@ -2092,7 +2150,7 @@ impl Resolver<'_> {
         };
         self.resolve_block(body, &mut context, false);
 
-        let ty = TypeRef::Callback(callback.clone());
+        let ty = expected.clone();
         self.model.callbacks.push(ResolvedCallback {
             span,
             ty: ty.clone(),
@@ -2307,6 +2365,7 @@ impl Resolver<'_> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn resolve_call(
         &mut self,
         callee: &Expression,
@@ -2322,9 +2381,41 @@ impl Resolver<'_> {
                 self.resolve_move(arguments, span, context)
             }
             ExpressionKind::Field { receiver, name } => {
-                self.resolve_method_call(receiver, name, arguments, span, context)
+                let receiver_info = self.resolve_expression(receiver, None, context);
+                if let TypeRef::Struct { path } = canonical(&receiver_info.ty)
+                    && let Some(structure) = self.struct_by_path.get(&path).copied()
+                    && let Some((ty @ TypeRef::Function(_), access_path)) =
+                        self.lookup_struct_field(structure, name)
+                {
+                    let callee_info = ExpressionInfo {
+                        ty,
+                        category: receiver_info.category,
+                    };
+                    self.record_expression(
+                        callee.span,
+                        callee_info.clone(),
+                        None,
+                        Some(ResolvedField { access_path }),
+                    );
+                    return self.resolve_stored_function_call(
+                        &callee_info,
+                        arguments,
+                        span,
+                        context,
+                    );
+                }
+                self.resolve_method_call(receiver, name, arguments, span, context, &receiver_info)
             }
             ExpressionKind::Name(path) => {
+                if self.value_name_resolves(path, context) {
+                    let callee_info = self.resolve_expression(callee, None, context);
+                    return self.resolve_stored_function_call(
+                        &callee_info,
+                        arguments,
+                        span,
+                        context,
+                    );
+                }
                 if let Some(target) = primitive_type(&path.segments) {
                     return self.resolve_primitive_cast(target, arguments, span, context);
                 }
@@ -2386,7 +2477,15 @@ impl Resolver<'_> {
                 self.resolve_stainless_call(path, arguments, span, context)
             }
             _ => {
-                self.resolve_expression(callee, None, context);
+                let callee_info = self.resolve_expression(callee, None, context);
+                if matches!(canonical_ref(&callee_info.ty), TypeRef::Function(_)) {
+                    return self.resolve_stored_function_call(
+                        &callee_info,
+                        arguments,
+                        span,
+                        context,
+                    );
+                }
                 for argument in arguments {
                     self.resolve_expression(argument, None, context);
                 }
@@ -2407,8 +2506,8 @@ impl Resolver<'_> {
         arguments: &[Expression],
         span: Span,
         context: &mut FunctionContext,
+        receiver_info: &ExpressionInfo,
     ) -> (ExpressionInfo, Option<ResolvedCall>) {
-        let receiver_info = self.resolve_expression(receiver, None, context);
         match canonical(&receiver_info.ty) {
             TypeRef::Struct { path } => {
                 let Some(structure) = self.struct_by_path.get(&path).copied() else {
@@ -2416,7 +2515,7 @@ impl Resolver<'_> {
                 };
                 self.resolve_struct_method(
                     structure,
-                    &receiver_info,
+                    receiver_info,
                     receiver.span,
                     name,
                     arguments,
@@ -2431,7 +2530,7 @@ impl Resolver<'_> {
                 if path == "rust::Result" && name.segments[0] == "unwrap" {
                     return self.resolve_rust_result_unwrap(
                         receiver,
-                        &receiver_info,
+                        receiver_info,
                         &type_arguments,
                         arguments,
                         span,
@@ -2448,7 +2547,7 @@ impl Resolver<'_> {
                     &name.segments[0],
                     arguments,
                     span,
-                    Some((&receiver_info, receiver.span)),
+                    Some((receiver_info, receiver.span)),
                     context,
                 )
             }
@@ -2470,6 +2569,60 @@ impl Resolver<'_> {
                 (error_info(), None)
             }
         }
+    }
+
+    fn resolve_stored_function_call(
+        &mut self,
+        callee: &ExpressionInfo,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        let TypeRef::Function(function) = canonical_ref(&callee.ty) else {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            if callee.ty != TypeRef::Error {
+                self.push(
+                    "RES014",
+                    format!("type `{}` is not callable", display_type(&callee.ty)),
+                    span,
+                );
+            }
+            return (error_info(), None);
+        };
+        let function = function.as_ref().clone();
+        if arguments.len() != function.parameters.len() {
+            self.push(
+                "RES095",
+                format!(
+                    "stored function requires {} argument(s), found {}",
+                    function.parameters.len(),
+                    arguments.len()
+                ),
+                span,
+            );
+        }
+        let actual = self.resolve_arguments(arguments, Some(&function.parameters), context);
+        for ((expected, actual), syntax) in function.parameters.iter().zip(&actual).zip(arguments) {
+            self.validate_binding(expected, actual, syntax.span, "stored function argument");
+        }
+        let mutable = function.kind == StoredFunctionKind::Mutable;
+        if mutable && callee.category != ValueCategory::MutablePlace {
+            self.push(
+                "RES096",
+                "calling `function_mut` requires a mutable callable binding".to_owned(),
+                span,
+            );
+        }
+        let return_type = function.return_type.as_ref().clone();
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::StoredFunctionCall { mutable }),
+            return_type: return_type.clone(),
+            throws: Vec::new(),
+        };
+        (info_for_return_type(return_type), Some(call))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3555,6 +3708,7 @@ impl Resolver<'_> {
         NativeInstanceLookup::Invalid
     }
 
+    #[allow(clippy::too_many_lines)]
     fn resolve_type(&mut self, ty: &ast::Type, namespace: &[String], allow_auto: bool) -> TypeRef {
         let value = match &ty.kind {
             TypeKind::Inferred if allow_auto => TypeRef::Error,
@@ -3567,6 +3721,42 @@ impl Resolver<'_> {
                 TypeRef::Error
             }
             TypeKind::Error => TypeRef::Error,
+            TypeKind::Function {
+                mutable,
+                parameters,
+                return_type,
+            } => {
+                let resolved_parameters = parameters
+                    .iter()
+                    .map(|parameter| self.resolve_type(parameter, namespace, false))
+                    .collect::<Vec<_>>();
+                for (parameter, resolved) in parameters.iter().zip(&resolved_parameters) {
+                    if canonical(resolved) == TypeRef::Void {
+                        self.push(
+                            "RES092",
+                            "`void` is not a valid stored function parameter type".to_owned(),
+                            parameter.span,
+                        );
+                    }
+                }
+                let return_type = self.resolve_type(return_type, namespace, false);
+                if return_type.is_reference() || return_type.contains_reference() {
+                    self.push(
+                        "RES092",
+                        "stored function return references are not supported".to_owned(),
+                        ty.span,
+                    );
+                }
+                TypeRef::function(
+                    if *mutable {
+                        StoredFunctionKind::Mutable
+                    } else {
+                        StoredFunctionKind::Shared
+                    },
+                    resolved_parameters,
+                    return_type,
+                )
+            }
             TypeKind::Named(named) => {
                 let segments = &named.path.segments;
                 if let Some(primitive) = primitive_type(segments) {
@@ -3884,6 +4074,7 @@ impl Resolver<'_> {
             TypeRef::Void
             | TypeRef::Parameter(_)
             | TypeRef::Callback(_)
+            | TypeRef::Function(_)
             | TypeRef::Struct { .. }
             | TypeRef::Reference { .. }
             | TypeRef::Error => false,
@@ -3953,6 +4144,15 @@ fn substitute(ty: &TypeRef, substitutions: &BTreeMap<String, TypeRef>) -> TypeRe
                 .map(|parameter| substitute(parameter, substitutions))
                 .collect(),
             substitute(&callback.return_type, substitutions),
+        ),
+        TypeRef::Function(function) => TypeRef::function(
+            function.kind,
+            function
+                .parameters
+                .iter()
+                .map(|parameter| substitute(parameter, substitutions))
+                .collect(),
+            substitute(&function.return_type, substitutions),
         ),
         TypeRef::Struct { .. } => ty.clone(),
         TypeRef::Reference { mutable, target } => TypeRef::Reference {
@@ -4123,7 +4323,27 @@ fn is_copyable(ty: &TypeRef) -> bool {
             | TypeRef::F64
             | TypeRef::Struct { .. }
             | TypeRef::Reference { .. }
+    ) || matches!(
+        ty,
+        TypeRef::Function(function) if function.kind == StoredFunctionKind::Shared
     )
+}
+
+fn callable_signature(ty: &TypeRef) -> Option<(&[TypeRef], &TypeRef)> {
+    match ty {
+        TypeRef::Callback(callback) => Some((&callback.parameters, &callback.return_type)),
+        TypeRef::Function(function) => Some((&function.parameters, &function.return_type)),
+        _ => None,
+    }
+}
+
+fn contains_unique_function_storage(ty: &TypeRef) -> bool {
+    match ty {
+        TypeRef::Function(function) => function.kind == StoredFunctionKind::Mutable,
+        TypeRef::Native { arguments, .. } => arguments.iter().any(contains_unique_function_storage),
+        TypeRef::Reference { target, .. } => contains_unique_function_storage(target),
+        _ => false,
+    }
 }
 
 fn is_assignment(operator: BinaryOperator) -> bool {
@@ -4210,6 +4430,21 @@ fn display_type(ty: &TypeRef) -> String {
                 .collect::<Vec<_>>()
                 .join(", "),
             display_type(&callback.return_type)
+        ),
+        TypeRef::Function(function) => format!(
+            "{}<{}({})>",
+            if function.kind == StoredFunctionKind::Shared {
+                "function"
+            } else {
+                "function_mut"
+            },
+            display_type(&function.return_type),
+            function
+                .parameters
+                .iter()
+                .map(display_type)
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         TypeRef::Struct { path } => display_path(path),
         TypeRef::Reference { mutable, target } => {

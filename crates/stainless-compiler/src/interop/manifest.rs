@@ -378,6 +378,11 @@ fn lower_manifest_type(
                 "recovered type errors are not valid in binding signatures",
             ));
         }
+        TypeKind::Function { .. } => {
+            return Err(ManifestError::message(
+                "stored Stainless function types are not valid in native binding signatures",
+            ));
+        }
         TypeKind::Named(named) => {
             let path = named.path.display();
             if let Some(primitive) = manifest_primitive(&path) {

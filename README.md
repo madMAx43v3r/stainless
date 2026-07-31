@@ -90,6 +90,10 @@ implemented:
   explicit-copy, borrow, and move captures passed to Rust `Fn`, `FnMut`,
   `FnOnce`, and function-pointer parameters selected by
   [`18_external_callbacks.bindings.toml`](docs/ref/18_external_callbacks.bindings.toml).
+- [`19_stored_functions.stl`](docs/ref/19_stored_functions.stl) — non-null
+  shared `function<R(A...)>` and unique move-only
+  `function_mut<R(A...)>` values, including exact named-function conversion,
+  owned lambda captures, invocation, copying, passing, and returning.
 
 `01_basics.stl`, `02_structs_and_data_inheritance.stl`,
 `11_vec_and_string.stl`, `13_range_for.stl`, and `14_constructors.stl` are
@@ -100,7 +104,8 @@ currently parsed, resolved, lowered to HIR, emitted as Rust, and compiled by
 `17_external_regex_wrapper.stl` sample is compiled and executed through Cargo
 against the real `regex` crate. The external callback sample is compiled and
 executed against a local Rust fixture crate so its generic closure bounds are
-checked by Cargo. Other samples remain forward-looking and must become explicit
+checked by Cargo. The stored-function sample is compiled and executed directly
+with `rustc`. Other samples remain forward-looking and must become explicit
 parser, diagnostic, and transpilation fixtures rather than being allowed to
 drift from the implementation.
 
@@ -175,10 +180,12 @@ The first compiler uses the following conservative grammar policy:
   semantics, and `[&value]` creates a non-escaping borrow. A non-copy value in
   an initializer therefore requires `move(value)`. C++-positioned `mutable`
   permits the body to modify by-value captures. Default captures are rejected.
-  The first implemented callback slice accepts only an imported
+  A lambda may be stored only in an exact `function<R(A...)>` or
+  `function_mut<R(A...)>` context; every stored capture must be owned. The
+  native-callback slice accepts only an imported
   `escape = "call"` contract, so every callback finishes before its native call
-  returns. Escaping and thread callbacks need a later ownership model; a
-  borrowed capture will not satisfy their eventual `'static` requirement.
+  returns. Thread callbacks need a later ownership model; a borrowed capture
+  cannot satisfy stored callable storage's `'static` requirement.
 - User-defined destructors and `Drop` implementations are not accepted.
   Generated Rust automatically drops locals and fields using Rust scope and
   field-declaration order. Resource-owning native Rust fields retain their
@@ -1882,6 +1889,45 @@ parameters = ["const rust::String&"]
 return = "bool"
 ```
 
+### Stored callables
+
+Stainless has two built-in, non-null stored callable types with exact
+signatures:
+
+```cpp
+function<i32(i32)> transform = [](i32 value) {
+    return value + 1;
+};
+
+function_mut<i32()> next = [count = 0]() mutable {
+    count += 1;
+    return count;
+};
+```
+
+`function<R(A...)>` is a shared immutable callable handle. It maps to
+`Arc<dyn Fn(A...) -> R + 'static>`, is implicitly copied by cloning the `Arc`,
+and may be invoked through either a const or mutable binding. The handle is
+shared, but it is not automatically thread-transferable: Rust continues to
+require `Send` and `Sync` at any native thread boundary.
+
+`function_mut<R(A...)>` maps to
+`Box<dyn FnMut(A...) -> R + 'static>`. It is uniquely owned and move-only;
+passing or assigning an existing value therefore requires `move(...)` unless
+the destination is a mutable reference. Invocation requires a mutable binding
+or mutable reference because it may modify captured state.
+
+Both types have no null state and no default constructor. Their parameter and
+return types are exact, named Stainless free-function overloads must resolve
+uniquely, and throwing targets are rejected. Stored lambdas may use copy or
+initializer captures, but may not borrow captures. A `mutable` lambda requires
+`function_mut`; an ordinary lambda can initialize either type. Stored callable
+reference returns are deferred. A move-only `function_mut` cannot be a field of
+an implicitly copyable struct. Nullable or thread-safe callable wrappers, if
+needed, will be separate types rather than weakening these guarantees.
+
+### Native callback parameters
+
 Callback parameters use a structured entry because their Rust invocation and
 retention contracts are not ordinary Stainless value types:
 
@@ -1907,7 +1953,7 @@ return = "i32"
 `Fn`, `FnMut`, `FnOnce`, or `fn(...) -> ...`. The implemented
 `escape = "call"` contract guarantees that the Rust target does not retain the
 callback after returning. `static` and `thread` are reserved manifest values
-but rejected until escaping callback ownership is implemented.
+but rejected until escaping native-callback wrapper interop is implemented.
 
 The callback expression is contextually typed by that exact manifest
 signature. It may be a uniquely resolved exact, non-throwing Stainless
@@ -1941,11 +1987,11 @@ must be explicitly moved, which invalidates their source. Temporaries are owned
 directly. A reference-producing initializer is rejected. Without `mutable`,
 by-value captures are const inside the lambda; reference captures retain the
 mutability of their referent. Reference bindings cannot themselves be captured;
-capture the owner instead. A lambda cannot be stored, returned, or used without
-a native callback context, and an ordinary Rust callback cannot throw or return
-a reference. Callback kinds and escape policy are not overload discriminators:
-two native bindings otherwise having the same signature may not differ only in
-those contracts.
+capture the owner instead. Outside a stored-function or native callback
+context, a lambda has no inferred type. An ordinary Rust callback cannot throw
+or return a reference. Callback kinds and escape policy are not overload
+discriminators: two native bindings otherwise having the same signature may
+not differ only in those contracts.
 
 Generated wrappers use a deterministic generic type parameter and the declared
 Rust closure bound; `fn_ptr` uses a Rust function-pointer parameter directly.
@@ -2155,7 +2201,8 @@ The current recursive-descent grammar handles:
   indexing, ordinary and explicitly base-qualified struct fields,
   prefix/postfix operators, assignment, precedence-aware binary expressions,
   and typed lambdas with explicit capture lists, arbitrary owned initializer
-  captures, and C++-positioned `mutable`.
+  captures, C++-positioned `mutable`, and exact
+  `function<R(A...)>`/`function_mut<R(A...)>` signature types.
 
 `stainless_compiler::lowering::lower` converts the typed CST into a
 compiler-owned AST with source spans and explicit recovery forms.
@@ -2213,6 +2260,9 @@ The initial `stainless_compiler::resolution` pass now provides:
 - contextual native callbacks with exact signatures, non-throwing named
   function targets, inferred initializer-capture types, mutable by-value
   captures, and `Fn`/`FnMut`/`FnOnce`/`fn` invocation contracts;
+- owning stored callables with exact signature checking, shared `function`
+  copies, move-only `function_mut`, owned captures, mutable invocation, and
+  non-throwing named-function conversion;
 - `Vec<T>` range-element resolution for shared, mutable, copied, and explicitly
   consumed range loops.
 
@@ -2236,6 +2286,9 @@ resolution and before HIR construction. For the implemented subset it:
   read their source, arbitrary initializers follow normal expression
   copy/move rules, and borrow captures create a temporary loan lasting through
   the native call;
+- applies owned lambda captures when constructing a stored callable, treats
+  shared `function` handles as implicit copies, and tracks `function_mut` as a
+  move-only value;
 - verifies that a direct reference return ultimately originates from the
   function's single reference parameter.
 
@@ -2268,6 +2321,9 @@ the accepted subset it now:
 - emits deterministic private wrappers for manifest-selected external
   associated functions and methods, with argument adaptations and generic
   callback trait bounds inside the Cargo-checked boundary;
+- lowers stored `function` to `Arc<dyn Fn + 'static>` and `function_mut` to
+  `Box<dyn FnMut + 'static>`, with explicit trait-object coercions and direct
+  invocation;
 - emits deterministic Rust with `proc-macro2` and `quote`, validates the
   generated token tree by parsing it with `syn`, and formats it with
   `prettyplease`;
@@ -2276,14 +2332,15 @@ the accepted subset it now:
   Cargo, and executes behavior fixtures covering functions, borrows, loops,
   structs, memberwise copying, data inheritance, `Vec`, `String`, moves,
   checked exceptions, throwing constructors, native `Result` conversion,
-  external-wrapper validation, and all four initial Rust callback kinds.
+  external-wrapper validation, all four initial Rust callback kinds, and
+  shared/mutable stored callable behavior.
 
 This is still not full semantic validation. Classes, interfaces, access
 control, ownership pointers, cross-file modules, ownership through fields and
 future pointer types, full path-sensitive loop-exit precision, general borrow
 lifetimes, member/native returned-reference provenance, and generalized native
-trait satisfaction remain unresolved. Stored, returned, escaping, threaded,
-throwing, reference-returning, async, and FFI callbacks are also deferred.
+trait satisfaction remain unresolved. Thread-transferable, throwing,
+reference-returning, async, and FFI callback forms are also deferred.
 Cargo metadata validation and source-mapped wrapper diagnostics are not
 implemented.
 Struct member functions and constructors currently lower to deterministically
@@ -2401,12 +2458,14 @@ recorded inline so implemented syntax is not confused with planned work:
    local bindings, struct constructors and initializer lists, blocks, calls,
    arithmetic, `return`, `throw`, `try`/`catch`, `if`/`else`, and classic/range
    `for` loops plus typed lambdas with explicit, initializer, and mutable
-   captures into a Rowan CST with recoverable error nodes.
+   captures and stored callable signatures into a Rowan CST with recoverable
+   error nodes.
 4. **In progress:** typed CST views, AST lowering, structural validation, the
    initial single-file name/type/call resolver, move/borrow analysis, and
    resolved HIR construction are implemented for the function/control-flow and
    first struct subsets, including checked exceptions and throwing
-   constructors. Classes, interfaces, and ownership through fields remain.
+   constructors plus shared `function` and move-only `function_mut` values.
+   Classes, interfaces, and general ownership through fields remain.
 5. **In progress:** the initial `Vec` and `String` metadata is connected through
    resolution and code generation. The versioned package binding manifest is
    parsed and merged with compiler built-ins; deterministic wrappers for its

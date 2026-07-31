@@ -1,0 +1,65 @@
+// Non-null, owning stored callables.
+// `function` is a shared immutable handle; `function_mut` is unique and move-only.
+
+namespace samples {
+
+struct Transformer {
+    function<i32(i32)> callback;
+};
+
+i32 add_one(i32 value) {
+    return value + 1;
+}
+
+i32 read_ref(const i32& value) {
+    return value;
+}
+
+i32 invoke_mut(function_mut<i32()>& callback) {
+    return callback();
+}
+
+i32 invoke_shared(function<i32(i32)> callback, i32 value) {
+    return callback(value);
+}
+
+i32 invoke_owned(function_mut<i32()> callback) {
+    return callback();
+}
+
+function<i32(i32)> make_adder(i32 offset) {
+    return [offset](i32 value) {
+        return offset + value;
+    };
+}
+
+i32 stored_functions() {
+    i32 initial = 2;
+
+    function<i32(i32)> add = [offset = initial](i32 value) {
+        return offset + value;
+    };
+
+    // A shared function handle is copied implicitly.
+    function<i32(i32)> copied = add;
+    function<i32(i32)> named = add_one;
+    function<i32(const i32&)> reader = read_ref;
+    Transformer holder = Transformer{add};
+    Transformer holder_copy = holder;
+
+    // A mutable callable owns mutable captured state and must be invoked through
+    // a mutable binding or mutable reference.
+    function_mut<i32()> next = [count = initial]() mutable {
+        count += 1;
+        return count;
+    };
+
+    i32 first = next();
+    i32 second = invoke_mut(next);
+    i32 third = invoke_owned(move(next));
+    function<i32(i32)> produced = make_adder(10);
+    return copied(3) + add(4) + named(7) + first + second + third + produced(5)
+        + holder_copy.callback(1) + invoke_shared(add, 1) + reader(initial);
+}
+
+}

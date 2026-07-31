@@ -216,6 +216,21 @@ fn rejects_borrowed_lambda_capture_initializers() {
 }
 
 #[test]
+fn parses_stored_function_signatures_losslessly() {
+    let source = r"function<i32(i32, const String&)> transform(
+    function_mut<void()> callback);
+";
+    let parsed = parse(source);
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(parsed.syntax().to_string(), source);
+    assert_eq!(
+        count_kind(&parsed.syntax(), SyntaxKind::FunctionTypeSignature),
+        2
+    );
+}
+
+#[test]
 fn parser_recovers_and_parses_the_following_function() {
     let source = r"i32 broken(i32 value) {
     i32 missing = ;

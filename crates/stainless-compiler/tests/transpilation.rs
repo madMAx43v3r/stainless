@@ -915,6 +915,38 @@ fn main() {{
 }
 
 #[test]
+fn rustc_validates_stored_function_and_function_mut_behavior() {
+    let source = include_str!("../../../docs/ref/19_stored_functions.stl");
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:?}",
+        result.analysis.diagnostics
+    );
+    let function = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "stored_functions"])
+        .expect("stored function sample symbol")
+        .mangled_name
+        .clone();
+    let mut rust = result.rust.expect("stored callables should emit Rust");
+    write!(
+        rust,
+        "\nfn main() {{ assert_eq!(__stainless_namespace_samples::{function}(), 54); }}\n"
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("stored-functions", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .expect("generated stored-function binary should run");
+    assert!(output.status.success());
+    remove_temporary_parent(&binary);
+}
+
+#[test]
 fn invalid_checked_exception_prevents_rust_emission() {
     let result = transpile(
         r"struct Failure {};

@@ -1,7 +1,9 @@
 //! Typed, Rust-shaped intermediate representation used by the backend.
 
 use crate::ast::{BinaryOperator, LiteralKind, PrefixOperator, Span};
-use crate::interop::{ArgumentAdaptation, CallbackKind, Receiver, WrapperTarget};
+use crate::interop::{
+    ArgumentAdaptation, CallbackKind, Receiver, StoredFunctionKind, WrapperTarget,
+};
 
 /// A source file after successful semantic resolution and backend lowering.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -154,6 +156,15 @@ pub enum Type {
         /// Exact callback parameter types.
         parameters: Vec<Type>,
         /// Exact value-semantic callback return type.
+        return_type: Box<Type>,
+    },
+    /// A non-null owning callable represented by a Rust trait object.
+    Function {
+        /// Shared `Fn` or unique `FnMut` storage.
+        kind: StoredFunctionKind,
+        /// Exact parameter types.
+        parameters: Vec<Type>,
+        /// Exact return type.
         return_type: Box<Type>,
     },
     /// A user-defined Stainless struct.
@@ -437,6 +448,22 @@ pub enum Expression {
         modules: Vec<String>,
         /// Deterministically mangled target.
         function: String,
+    },
+    /// Allocate a lambda or function item into a stored callable trait object.
+    StoreFunction {
+        /// Shared or unique storage representation.
+        kind: StoredFunctionKind,
+        /// Complete target trait-object type used for coercion.
+        ty: Type,
+        /// Concrete closure or function item.
+        callable: Box<Expression>,
+    },
+    /// Invoke a stored callable value.
+    CallableCall {
+        /// Callable expression.
+        callable: Box<Expression>,
+        /// Lowered arguments.
+        arguments: Vec<Expression>,
     },
     /// A resolved Stainless free-function call.
     FunctionCall {

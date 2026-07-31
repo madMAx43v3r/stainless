@@ -11,6 +11,7 @@ pub use manifest::{
 };
 pub use model::{
     ArgumentAdaptation, BindingError, CallStyle, CallableBinding, CallbackEscape, CallbackKind,
-    CallbackType, NativeBindings, NativeErrorFormat, NativeTypeBinding, Parameter, Receiver,
-    ReturnBorrow, ReturnBorrowError, RustLowering, TraitRequirement, TypeRef, WrapperTarget,
+    CallbackType, FunctionType, NativeBindings, NativeErrorFormat, NativeTypeBinding, Parameter,
+    Receiver, ReturnBorrow, ReturnBorrowError, RustLowering, StoredFunctionKind, TraitRequirement,
+    TypeRef, WrapperTarget,
 };

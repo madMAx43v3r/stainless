@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::Diagnostic;
 use crate::ast::{self, ExpressionKind, ForClause, Item, StatementKind};
 use crate::hir;
-use crate::interop::{ArgumentAdaptation, Receiver, RustLowering, TypeRef};
+use crate::interop::{ArgumentAdaptation, Receiver, RustLowering, StoredFunctionKind, TypeRef};
 use crate::resolution::{
     CallTarget, CallbackTarget, FunctionSymbol, Intrinsic, LambdaCaptureMode, NativeCall,
     ResolvedCall, ResolvedLambdaCapture, SemanticModel, StructSymbol, ValueCategory,
@@ -865,7 +865,12 @@ impl Lowerer<'_> {
             }
         } else {
             let lowered = self.lower_expression(expression, ExpressionMode::Value)?;
-            if matches!(canonical_ref(expected), TypeRef::Struct { .. })
+            if (matches!(canonical_ref(expected), TypeRef::Struct { .. })
+                || matches!(
+                    canonical_ref(expected),
+                    TypeRef::Function(function)
+                        if function.kind == StoredFunctionKind::Shared
+                ))
                 && resolution.is_some_and(|value| value.category != ValueCategory::Temporary)
                 && !is_move_call(self.semantics, expression)
             {
@@ -899,13 +904,14 @@ impl Lowerer<'_> {
                     && let CallbackTarget::Function(id) = callback.target
                 {
                     let function = self.semantics.function(id)?;
-                    return Some(hir::Expression::FunctionItem {
+                    let item = hir::Expression::FunctionItem {
                         modules: function_module_path(function, self.semantics)
                             .iter()
                             .map(|name| module_name(name))
                             .collect(),
                         function: function.mangled_name.clone(),
-                    });
+                    };
+                    return self.store_function_if_needed(item, &callback.ty, expression.span);
                 }
                 if path.segments.len() != 1 {
                     self.push(
@@ -1068,13 +1074,23 @@ impl Lowerer<'_> {
         body: &ast::Block,
     ) -> Option<hir::Expression> {
         let callback = self.semantics.callback(span)?;
-        let TypeRef::Callback(callback_type) = &callback.ty else {
-            self.push(
-                "HIR018",
-                "resolved lambda has no callback type".to_owned(),
-                span,
-            );
-            return None;
+        let (callback_parameters, callback_return) = match &callback.ty {
+            TypeRef::Callback(callback_type) => (
+                callback_type.parameters.as_slice(),
+                callback_type.return_type.as_ref(),
+            ),
+            TypeRef::Function(function_type) => (
+                function_type.parameters.as_slice(),
+                function_type.return_type.as_ref(),
+            ),
+            _ => {
+                self.push(
+                    "HIR018",
+                    "resolved lambda has no callable type".to_owned(),
+                    span,
+                );
+                return None;
+            }
         };
         let CallbackTarget::Lambda { captures } = &callback.target else {
             self.push(
@@ -1086,7 +1102,7 @@ impl Lowerer<'_> {
         };
         let lowered_captures =
             self.lower_lambda_captures(captures, syntax_captures, is_mutable, span)?;
-        if syntax_parameters.len() != callback_type.parameters.len() {
+        if syntax_parameters.len() != callback_parameters.len() {
             self.push(
                 "HIR018",
                 "resolved callback parameters do not match lambda syntax".to_owned(),
@@ -1096,7 +1112,7 @@ impl Lowerer<'_> {
         }
         let parameters = syntax_parameters
             .iter()
-            .zip(&callback_type.parameters)
+            .zip(callback_parameters)
             .map(|(syntax, ty)| {
                 Some(hir::Parameter {
                     source_name: syntax.name.clone(),
@@ -1108,9 +1124,7 @@ impl Lowerer<'_> {
             })
             .collect::<Option<Vec<_>>>()?;
 
-        let previous_return_type = self
-            .current_return_type
-            .replace(callback_type.return_type.as_ref().clone());
+        let previous_return_type = self.current_return_type.replace(callback_return.clone());
         let previous_fluent = self.current_fluent_receiver;
         let previous_constructor = self.current_constructor;
         let previous_throwing = self.current_throwing;
@@ -1132,10 +1146,27 @@ impl Lowerer<'_> {
         self.caught_error = previous_caught;
         self.loop_labels = previous_loops;
 
-        Some(hir::Expression::Lambda {
+        let lambda = hir::Expression::Lambda {
             captures: lowered_captures,
             parameters,
             body: lowered_body?,
+        };
+        self.store_function_if_needed(lambda, &callback.ty, span)
+    }
+
+    fn store_function_if_needed(
+        &mut self,
+        callable: hir::Expression,
+        ty: &TypeRef,
+        span: ast::Span,
+    ) -> Option<hir::Expression> {
+        let TypeRef::Function(function) = ty else {
+            return Some(callable);
+        };
+        Some(hir::Expression::StoreFunction {
+            kind: function.kind,
+            ty: self.lower_type(ty, span)?,
+            callable: Box::new(callable),
         })
     }
 
@@ -1304,6 +1335,30 @@ impl Lowerer<'_> {
                 Some(hir::Expression::Move(Box::new(
                     self.lower_expression(argument, ExpressionMode::Value)?,
                 )))
+            }
+            CallTarget::Intrinsic(Intrinsic::StoredFunctionCall { .. }) => {
+                let callee = callee?;
+                let TypeRef::Function(function) = self
+                    .semantics
+                    .expression(callee.span)
+                    .map(|resolution| canonical_ref(&resolution.ty))?
+                else {
+                    self.push(
+                        "HIR019",
+                        "stored call has no function-typed callee".to_owned(),
+                        call.span,
+                    );
+                    return None;
+                };
+                let arguments = arguments
+                    .iter()
+                    .zip(&function.parameters)
+                    .map(|(argument, expected)| self.lower_bound_expression(argument, expected))
+                    .collect::<Option<Vec<_>>>()?;
+                Some(hir::Expression::CallableCall {
+                    callable: Box::new(self.lower_expression(callee, ExpressionMode::Reference)?),
+                    arguments,
+                })
             }
             CallTarget::Intrinsic(Intrinsic::UnwrapRustResult { error_message }) => {
                 let Some(ast::Expression {
@@ -1633,6 +1688,15 @@ impl Lowerer<'_> {
                     .map(|parameter| self.lower_type(parameter, span))
                     .collect::<Option<Vec<_>>>()?,
                 return_type: Box::new(self.lower_type(&callback.return_type, span)?),
+            },
+            TypeRef::Function(function) => hir::Type::Function {
+                kind: function.kind,
+                parameters: function
+                    .parameters
+                    .iter()
+                    .map(|parameter| self.lower_type(parameter, span))
+                    .collect::<Option<Vec<_>>>()?,
+                return_type: Box::new(self.lower_type(&function.return_type, span)?),
             },
             TypeRef::Struct { path } => hir::Type::User {
                 rust_path: user_type_path(path),

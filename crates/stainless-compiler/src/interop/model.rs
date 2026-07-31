@@ -52,6 +52,8 @@ pub enum TypeRef {
     },
     /// A contextual callback accepted by a selected native Rust callable.
     Callback(Box<CallbackType>),
+    /// A non-null, owning Stainless stored callable.
+    Function(Box<FunctionType>),
     /// A Stainless data-only struct.
     Struct {
         /// Fully qualified Stainless path.
@@ -110,6 +112,16 @@ impl TypeRef {
         }))
     }
 
+    /// Creates an owning stored callable type.
+    #[must_use]
+    pub fn function(kind: StoredFunctionKind, parameters: Vec<Self>, return_type: Self) -> Self {
+        Self::Function(Box::new(FunctionType {
+            kind,
+            parameters,
+            return_type: Box::new(return_type),
+        }))
+    }
+
     /// Returns whether this type contains a reference at its outermost level.
     #[must_use]
     pub const fn is_reference(&self) -> bool {
@@ -131,6 +143,26 @@ impl TypeRef {
     pub const fn is_callback(&self) -> bool {
         matches!(self, Self::Callback(_))
     }
+}
+
+/// Ownership and invocation behavior of a stored callable.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum StoredFunctionKind {
+    /// Shared, implicitly cloned `Fn` storage.
+    Shared,
+    /// Unique, move-only `FnMut` storage.
+    Mutable,
+}
+
+/// Exact signature of a stored Stainless callable.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct FunctionType {
+    /// Storage and invocation behavior.
+    pub kind: StoredFunctionKind,
+    /// Exact Stainless-visible parameters.
+    pub parameters: Vec<TypeRef>,
+    /// Exact value-semantic return type.
+    pub return_type: Box<TypeRef>,
 }
 
 /// Rust callback invocation capability required by a native binding.
@@ -500,6 +532,15 @@ fn callback_resolution_type(ty: &TypeRef) -> TypeRef {
                 .map(callback_resolution_type)
                 .collect(),
             callback_resolution_type(&callback.return_type),
+        ),
+        TypeRef::Function(function) => TypeRef::function(
+            function.kind,
+            function
+                .parameters
+                .iter()
+                .map(callback_resolution_type)
+                .collect(),
+            callback_resolution_type(&function.return_type),
         ),
         TypeRef::Native { path, arguments } => TypeRef::native(
             path,

@@ -764,7 +764,21 @@ impl Emitter {
                 let target = path(&target)?;
                 Ok(quote!(#target))
             }
+            hir::Expression::StoreFunction { kind, ty, callable } => {
+                let callable = self.expression(callable)?;
+                let ty = type_tokens(ty, None)?;
+                let allocation = match kind {
+                    crate::interop::StoredFunctionKind::Shared => {
+                        quote!(::std::sync::Arc::new(#callable))
+                    }
+                    crate::interop::StoredFunctionKind::Mutable => {
+                        quote!(::std::boxed::Box::new(#callable))
+                    }
+                };
+                Ok(quote!((#allocation as #ty)))
+            }
             hir::Expression::FunctionCall { .. }
+            | hir::Expression::CallableCall { .. }
             | hir::Expression::AssociatedCall { .. }
             | hir::Expression::WrapperCall { .. }
             | hir::Expression::MethodCall { .. }
@@ -814,6 +828,17 @@ impl Emitter {
 
     fn call_expression(&mut self, expression: &hir::Expression) -> Result<TokenStream, String> {
         match expression {
+            hir::Expression::CallableCall {
+                callable,
+                arguments,
+            } => {
+                let callable = self.expression(callable)?;
+                let arguments = arguments
+                    .iter()
+                    .map(|argument| self.expression(argument))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(quote!((#callable)(#(#arguments),*)))
+            }
             hir::Expression::FunctionCall {
                 modules,
                 function,
@@ -927,6 +952,29 @@ fn type_tokens(ty: &hir::Type, lifetime: Option<&syn::Lifetime>) -> Result<Token
         }
         hir::Type::Callback { .. } => {
             Err("callback type escaped its generated-wrapper parameter boundary".to_owned())
+        }
+        hir::Type::Function {
+            kind,
+            parameters,
+            return_type,
+        } => {
+            let parameters = parameters
+                .iter()
+                .map(|parameter| type_tokens(parameter, None))
+                .collect::<Result<Vec<_>, _>>()?;
+            let return_type = type_tokens(return_type, None)?;
+            Ok(match kind {
+                crate::interop::StoredFunctionKind::Shared => quote!(
+                    ::std::sync::Arc<
+                        dyn ::core::ops::Fn(#(#parameters),*) -> #return_type + 'static
+                    >
+                ),
+                crate::interop::StoredFunctionKind::Mutable => quote!(
+                    ::std::boxed::Box<
+                        dyn ::core::ops::FnMut(#(#parameters),*) -> #return_type + 'static
+                    >
+                ),
+            })
         }
         hir::Type::User { rust_path } => {
             let path = path(rust_path)?;

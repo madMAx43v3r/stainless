@@ -41,6 +41,19 @@ fn encode_type(ty: &TypeRef, output: &mut String) {
                 encode_type(canonical(argument), output);
             }
         }
+        TypeRef::Function(function) => {
+            output.push_str(match function.kind {
+                crate::interop::StoredFunctionKind::Shared => "fn_",
+                crate::interop::StoredFunctionKind::Mutable => "fnmut_",
+            });
+            output.push_str(&function.parameters.len().to_string());
+            for parameter in &function.parameters {
+                output.push('_');
+                encode_signature_type(parameter, output);
+            }
+            output.push_str("_r_");
+            encode_type(&function.return_type, output);
+        }
         TypeRef::Reference { target, .. } => encode_type(target, output),
         TypeRef::Parameter(name) => {
             output.push_str("t_");
@@ -50,6 +63,15 @@ fn encode_type(ty: &TypeRef, output: &mut String) {
         }
         TypeRef::Error => output.push_str("error"),
         _ => output.push_str("unknown"),
+    }
+}
+
+fn encode_signature_type(ty: &TypeRef, output: &mut String) {
+    if let TypeRef::Reference { mutable, target } = ty {
+        output.push_str(if *mutable { "mr_" } else { "sr_" });
+        encode_type(target, output);
+    } else {
+        encode_type(ty, output);
     }
 }
 

@@ -172,6 +172,21 @@ fn lower_type(ty: &cst::TypeReference) -> ast::Type {
     let path = path_from_tokens(ty.path_tokens());
     let kind = if ty.is_auto() {
         TypeKind::Inferred
+    } else if matches!(path.segments.as_slice(), [name] if name == "function" || name == "function_mut")
+    {
+        if let Some(signature) = ty.function_signature() {
+            let mut types = signature.types();
+            let return_type = types
+                .next()
+                .map_or_else(|| error_type(span(&signature)), |ty| lower_type(&ty));
+            TypeKind::Function {
+                mutable: path.segments[0] == "function_mut",
+                parameters: types.map(|parameter| lower_type(&parameter)).collect(),
+                return_type: Box::new(return_type),
+            }
+        } else {
+            TypeKind::Error
+        }
     } else if path.segments.is_empty() {
         TypeKind::Error
     } else {

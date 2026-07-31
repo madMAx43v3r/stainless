@@ -212,6 +212,15 @@ pub enum TypeKind {
     Inferred,
     /// A named type with explicit generic arguments.
     Named(NamedType),
+    /// A non-null stored callable with an exact signature.
+    Function {
+        /// Whether invocation may mutate captured state.
+        mutable: bool,
+        /// Exact parameter types.
+        parameters: Vec<Type>,
+        /// Exact value-semantic return type.
+        return_type: Box<Type>,
+    },
     /// A missing or malformed type retained after parser recovery.
     Error,
 }

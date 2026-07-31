@@ -114,6 +114,7 @@ define_syntax_kinds! {
     Parameter,
     TypeReference,
     GenericArgumentList,
+    FunctionTypeSignature,
     ThrowsClause,
     Block,
     LocalDeclaration,

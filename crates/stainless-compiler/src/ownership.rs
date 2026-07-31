@@ -700,7 +700,13 @@ impl Analyzer<'_> {
                 self.check_usage(id, usage, expression.span);
                 Some(id)
             }
-            ExpressionKind::Literal(_) | ExpressionKind::Lambda { .. } | ExpressionKind::Error => {
+            ExpressionKind::Literal(_) | ExpressionKind::Error => None,
+            ExpressionKind::Lambda { .. } => {
+                let mut loans = Vec::new();
+                self.callback_argument(expression, &mut loans);
+                for loan in loans.into_iter().rev() {
+                    self.state.release(loan);
+                }
                 None
             }
             ExpressionKind::Parenthesized(inner) => self.expression(inner, usage),
@@ -825,6 +831,21 @@ impl Analyzer<'_> {
                 } else {
                     self.mark_moved(id, expression.span);
                 }
+                None
+            }
+            CallTarget::Intrinsic(Intrinsic::StoredFunctionCall { mutable }) => {
+                let ExpressionKind::Call { callee, .. } = &expression.kind else {
+                    return None;
+                };
+                self.expression(callee, if *mutable { Usage::Mutate } else { Usage::Read });
+                let TypeRef::Function(function) = self
+                    .semantics
+                    .expression(callee.span)
+                    .map(|resolution| canonical_ref(&resolution.ty))?
+                else {
+                    return None;
+                };
+                self.call_arguments(arguments, function.parameters.iter());
                 None
             }
             CallTarget::Intrinsic(Intrinsic::UnwrapRustResult { .. }) => {
@@ -1339,7 +1360,18 @@ fn is_copyable(ty: &TypeRef) -> bool {
             | TypeRef::F32
             | TypeRef::F64
             | TypeRef::Struct { .. }
+    ) || matches!(
+        ty,
+        TypeRef::Function(function)
+            if function.kind == crate::interop::StoredFunctionKind::Shared
     )
+}
+
+fn canonical_ref(ty: &TypeRef) -> &TypeRef {
+    match ty {
+        TypeRef::Reference { target, .. } => target,
+        _ => ty,
+    }
 }
 
 fn collect_last_uses(source: &ast::SourceFile) -> BTreeMap<ast::Span, ast::Span> {
@@ -1519,9 +1551,7 @@ impl UseCollector {
                 self.expression(right);
             }
             ExpressionKind::Call { callee, arguments } => {
-                if !matches!(callee.kind, ExpressionKind::Name(_)) {
-                    self.expression(callee);
-                }
+                self.expression(callee);
                 for argument in arguments {
                     self.expression(argument);
                 }

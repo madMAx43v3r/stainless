@@ -13,6 +13,7 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
         include_str!("../../../docs/ref/13_range_for.stl"),
         include_str!("../../../docs/ref/15_checked_exception_subset.stl"),
         include_str!("../../../docs/ref/16_native_result_unwrap.stl"),
+        include_str!("../../../docs/ref/19_stored_functions.stl"),
     ] {
         let analysis = analyze(source);
 
@@ -22,6 +23,89 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
             analysis.diagnostics
         );
     }
+}
+
+#[test]
+fn stored_function_resolution_enforces_ownership_and_signature_rules() {
+    let analysis = analyze(
+        r#"struct InvalidHolder {
+    function_mut<i32()> callback;
+};
+
+struct Failure : stainless::Exception {};
+
+i32 throwing_target() throws Failure {
+    throw Failure{stainless::Exception("failed")};
+}
+
+i32 by_value(i32 value) {
+    return value;
+}
+
+void takes_reference_return(function<const i32&()> callback) {}
+
+void invalid_stored_functions(const i32& borrowed) {
+    function<i32()> missing;
+    function<i32()> captures_borrow = [&borrowed]() { return borrowed; };
+    function<i32()> mutable_shared = [count = 0]() mutable {
+        count += 1;
+        return count;
+    };
+    function_mut<i32()> unique = []() { return 1; };
+    function_mut<i32()> copied = unique;
+    const function_mut<i32()> frozen = []() { return 1; };
+    frozen();
+    function<i32()> throwing = throwing_target;
+    function<i32(const i32&)> wrong_function = by_value;
+    function<i32(const i32&)> wrong_lambda = [](i32 value) { return value; };
+    missing(1);
+}
+"#,
+    );
+    let codes = analysis
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+
+    for expected in [
+        "RES027", "RES028", "RES065", "RES084", "RES085", "RES092", "RES093", "RES094", "RES095",
+        "RES096",
+    ] {
+        assert!(
+            codes.contains(&expected),
+            "missing {expected}: {:#?}",
+            analysis.diagnostics
+        );
+    }
+}
+
+#[test]
+fn stored_function_signature_overloads_have_distinct_deterministic_names() {
+    let analysis = analyze(
+        r"i32 invoke(function<i32(i32)> callback, i32 value) {
+    return callback(value);
+}
+
+i32 invoke(function<i32(const i32&)> callback, i32 value) {
+    return callback(value);
+}
+",
+    );
+
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:?}",
+        analysis.diagnostics
+    );
+    let overloads = analysis
+        .semantics
+        .functions
+        .iter()
+        .filter(|function| function.path == ["invoke"])
+        .collect::<Vec<_>>();
+    assert_eq!(overloads.len(), 2);
+    assert_ne!(overloads[0].mangled_name, overloads[1].mangled_name);
 }
 
 #[test]

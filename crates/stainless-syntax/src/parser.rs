@@ -371,11 +371,20 @@ impl Parser<'_> {
         }
 
         if self.at(SyntaxKind::Identifier) {
+            let is_function_type = matches!(self.current_text(), Some("function" | "function_mut"));
             self.bump();
             while self.eat(SyntaxKind::ColonColon) {
                 self.expect(SyntaxKind::Identifier, "expected a type path segment");
             }
-            if self.at(SyntaxKind::Less) {
+            if is_function_type {
+                if self.at(SyntaxKind::Less) {
+                    self.parse_function_type_arguments();
+                } else {
+                    self.error(
+                        "expected `<return_type(parameter_types...)>` after stored function type",
+                    );
+                }
+            } else if self.at(SyntaxKind::Less) {
                 self.parse_generic_arguments();
             }
         } else {
@@ -403,6 +412,33 @@ impl Parser<'_> {
             }
         }
         self.expect(SyntaxKind::Greater, "expected `>` after generic arguments");
+        self.finish();
+    }
+
+    fn parse_function_type_arguments(&mut self) {
+        self.start(SyntaxKind::GenericArgumentList);
+        self.bump();
+        self.start(SyntaxKind::FunctionTypeSignature);
+        self.parse_type(false);
+        self.expect(
+            SyntaxKind::LParen,
+            "expected `(` before stored function parameter types",
+        );
+        while !self.at_end() && !self.at(SyntaxKind::RParen) {
+            self.parse_type(false);
+            if !self.eat(SyntaxKind::Comma) {
+                break;
+            }
+        }
+        self.expect(
+            SyntaxKind::RParen,
+            "expected `)` after stored function parameter types",
+        );
+        self.finish();
+        self.expect(
+            SyntaxKind::Greater,
+            "expected `>` after stored function signature",
+        );
         self.finish();
     }
 

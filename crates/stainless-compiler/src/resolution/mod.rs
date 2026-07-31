@@ -246,6 +246,11 @@ pub struct ResolvedTraitRequirement {
 pub enum Intrinsic {
     /// Explicitly consume a named value.
     Move,
+    /// Invoke a non-null stored `function` or `function_mut` value.
+    StoredFunctionCall {
+        /// Whether invocation requires mutable access to the callable.
+        mutable: bool,
+    },
     /// A constructor-style primitive numeric conversion.
     PrimitiveCast {
         /// Destination primitive type.

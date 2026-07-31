@@ -71,6 +71,7 @@ ast_node!(ParameterList, ParameterList);
 ast_node!(Parameter, Parameter);
 ast_node!(TypeReference, TypeReference);
 ast_node!(GenericArgumentList, GenericArgumentList);
+ast_node!(FunctionTypeSignature, FunctionTypeSignature);
 ast_node!(ThrowsClause, ThrowsClause);
 ast_node!(Block, Block);
 ast_node!(LocalDeclaration, LocalDeclaration);
@@ -767,9 +768,21 @@ impl TypeReference {
             .into_iter()
             .flat_map(|arguments| arguments.types().collect::<Vec<_>>())
     }
+
+    #[must_use]
+    pub fn function_signature(&self) -> Option<FunctionTypeSignature> {
+        child::<GenericArgumentList>(self.syntax()).and_then(|arguments| child(arguments.syntax()))
+    }
 }
 
 impl GenericArgumentList {
+    #[must_use]
+    pub fn types(&self) -> AstChildren<TypeReference> {
+        children(self.syntax())
+    }
+}
+
+impl FunctionTypeSignature {
     #[must_use]
     pub fn types(&self) -> AstChildren<TypeReference> {
         children(self.syntax())

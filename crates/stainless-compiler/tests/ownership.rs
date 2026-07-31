@@ -29,6 +29,20 @@ String invalid(String value, bool condition) {
 }
 
 #[test]
+fn moving_function_mut_invalidates_the_source_binding() {
+    let analysis = analyze(
+        r"void invalid() {
+    function_mut<i32()> source = []() { return 1; };
+    function_mut<i32()> destination = move(source);
+    source();
+}
+",
+    );
+
+    assert_codes(&analysis, &["OWN001"]);
+}
+
+#[test]
 fn assignment_reinitializes_a_moved_binding_on_all_continuing_paths() {
     let source = r#"use rust::String;
 
