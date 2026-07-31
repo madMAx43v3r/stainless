@@ -951,6 +951,46 @@ fn rustc_validates_stored_function_and_function_mut_behavior() {
 }
 
 #[test]
+fn cargo_executes_native_json_support_and_json_error_conversion() {
+    let source = include_str!("../../../docs/ref/21_json_support.stl");
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:?}",
+        result.analysis.diagnostics
+    );
+    let entry = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["main"])
+        .expect("JSON sample main symbol")
+        .mangled_name
+        .clone();
+    let mut rust = result.rust.expect("JSON sample should emit Rust");
+    assert!(rust.contains("::stainless_runtime::Var::object"));
+    assert!(rust.contains("::stainless_runtime::Var::parse"));
+    assert!(rust.contains("__stainless_namespace_stainless::JsonError"));
+    write!(
+        rust,
+        "\nfn main() {{ assert_eq!({entry}().expect(\"valid JSON\"), 0); }}\n"
+    )
+    .expect("writing to a String cannot fail");
+
+    let directory = write_runtime_cargo_fixture("json-runtime", &rust);
+    let output = run_fixture_cargo(&directory, "run");
+    assert!(
+        output.status.success(),
+        "Cargo rejected generated JSON support:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(&directory)
+        .unwrap_or_else(|error| panic!("failed to remove {}: {error}", directory.display()));
+}
+
+#[test]
 fn generated_println_macro_executes_with_stainless_values() {
     let source = r#"use rust::println;
 
@@ -1221,6 +1261,35 @@ impl Processor {
     .expect("callback dependency source should be writable");
     fs::write(source_directory.join("main.rs"), source)
         .expect("callback fixture source should be writable");
+    directory
+}
+
+fn write_runtime_cargo_fixture(name: &str, source: &str) -> PathBuf {
+    let directory = temporary_directory(name);
+    let source_directory = directory.join("src");
+    fs::create_dir_all(&source_directory)
+        .unwrap_or_else(|error| panic!("failed to create {}: {error}", source_directory.display()));
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../stainless-runtime");
+    fs::write(
+        directory.join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "stainless-generated-json-fixture"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+stainless-runtime = {{ path = "{}" }}
+
+[lints.rust]
+warnings = "deny"
+"#,
+            runtime.display()
+        ),
+    )
+    .expect("JSON fixture manifest should be writable");
+    fs::write(source_directory.join("main.rs"), source)
+        .expect("JSON fixture source should be writable");
     directory
 }
 

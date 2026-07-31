@@ -8,7 +8,7 @@ use crate::ast::{
 };
 use crate::interop::{
     CallStyle, CallableBinding, CallbackKind, NativeBindings, NativeErrorFormat, NativeTypeBinding,
-    Receiver, StoredFunctionKind, TypeRef,
+    Receiver, StoredFunctionKind, TypeRef, VAR_TYPE_PATH,
 };
 
 use super::imports::ImportTable;
@@ -16,10 +16,10 @@ use super::mangle;
 use super::{
     BindingResolution, CallTarget, CallbackTarget, ConstructorFieldInitialization, ConstructorId,
     ConstructorSymbol, ExpressionResolution, FieldSymbol, FunctionId, FunctionSymbol, Intrinsic,
-    LambdaCaptureMode, NativeCall, ParameterSymbol, Resolution, ResolvedCall, ResolvedCallback,
-    ResolvedField, ResolvedLambdaCapture, ResolvedNativeType, ResolvedTraitRequirement,
-    RustErrorMessage, RustResultAdaptation, SemanticModel, StructId, StructReceiver, StructSymbol,
-    ValueCategory,
+    LambdaCaptureMode, NativeCall, NativeResultException, ParameterSymbol, Resolution,
+    ResolvedCall, ResolvedCallback, ResolvedField, ResolvedLambdaCapture, ResolvedNativeType,
+    ResolvedTraitRequirement, RustErrorMessage, RustResultAdaptation, SemanticModel, StructId,
+    StructReceiver, StructSymbol, ValueCategory,
 };
 
 /// Resolves names and types using an explicit native binding registry.
@@ -165,6 +165,17 @@ impl Resolver<'_> {
             span: Span::default(),
         });
         self.struct_by_path.insert(format_error_path, format_error);
+
+        let json_error = StructId(self.model.structs.len());
+        let json_error_path = vec!["stainless".to_owned(), "JsonError".to_owned()];
+        self.model.structs.push(StructSymbol {
+            id: json_error,
+            path: json_error_path.clone(),
+            base: Some(root),
+            fields: Vec::new(),
+            span: Span::default(),
+        });
+        self.struct_by_path.insert(json_error_path, json_error);
     }
 
     fn collect_struct_names(&mut self, items: &[Item], namespace: &mut Vec<String>) {
@@ -1482,6 +1493,32 @@ impl Resolver<'_> {
             .expect("installing exception builtins creates FormatError")
     }
 
+    fn json_error_struct(&mut self) -> StructId {
+        if self.exception_root().is_none() {
+            self.install_exception_builtins();
+        }
+        let path = vec!["stainless".to_owned(), "JsonError".to_owned()];
+        self.struct_by_path
+            .get(&path)
+            .copied()
+            .expect("installing exception builtins creates JsonError")
+    }
+
+    fn native_result_exception(
+        &mut self,
+        error_type: &TypeRef,
+    ) -> (StructId, NativeResultException) {
+        if matches!(
+            canonical_ref(error_type),
+            TypeRef::Native { path, arguments }
+                if path == "rust::stainless_runtime::JsonError" && arguments.is_empty()
+        ) {
+            (self.json_error_struct(), NativeResultException::JsonError)
+        } else {
+            (self.rust_error_struct(), NativeResultException::RustError)
+        }
+    }
+
     fn resolve_local(&mut self, local: &ast::LocalDeclaration, context: &mut FunctionContext) {
         let declared = if local.ty.is_inferred() {
             None
@@ -1555,13 +1592,14 @@ impl Resolver<'_> {
             );
             return error_info();
         }
-        let rust_error = self.rust_error_struct();
-        self.validate_checked_effect(rust_error, expression.span, context);
+        let (exception_id, exception) = self.native_result_exception(error_type);
+        self.validate_checked_effect(exception_id, expression.span, context);
         self.model
             .rust_result_adaptations
             .push(RustResultAdaptation {
                 span: expression.span,
                 error_message: self.rust_error_message(error_type),
+                exception,
             });
         temporary(canonical(expected))
     }
@@ -1697,6 +1735,28 @@ impl Resolver<'_> {
                 None,
                 None,
             ),
+            ExpressionKind::JsonArray { elements } => (
+                self.resolve_json_values(elements.iter(), context),
+                None,
+                None,
+            ),
+            ExpressionKind::JsonObject { members } => {
+                let mut keys = BTreeSet::new();
+                for (key, _) in members {
+                    if !keys.insert(key) {
+                        self.push(
+                            "RES103",
+                            format!("duplicate JSON object key `{key}`"),
+                            expression.span,
+                        );
+                    }
+                }
+                (
+                    self.resolve_json_values(members.iter().map(|(_, value)| value), context),
+                    None,
+                    None,
+                )
+            }
             ExpressionKind::Parenthesized(inner) => (
                 self.resolve_expression(inner, expected, context),
                 None,
@@ -1749,14 +1809,24 @@ impl Resolver<'_> {
                 (info, None, field)
             }
             ExpressionKind::Index { receiver, index } => {
-                self.resolve_expression(receiver, None, context);
-                self.resolve_expression(index, Some(&TypeRef::Usize), context);
-                self.push(
-                    "RES011",
-                    "indexing is not exposed by the initial Vec/String bindings".to_owned(),
-                    expression.span,
-                );
-                (error_info(), None, None)
+                let receiver = self.resolve_expression(receiver, None, context);
+                let index = self.resolve_expression(index, Some(&TypeRef::Usize), context);
+                self.require_exact(&TypeRef::Usize, &index.ty, expression.span, "JSON index");
+                if is_json_var(&canonical(&receiver.ty)) {
+                    (temporary(json_var_type()), None, None)
+                } else {
+                    if canonical(&receiver.ty) != TypeRef::Error {
+                        self.push(
+                            "RES011",
+                            format!(
+                                "indexing requires `var`, found `{}`",
+                                display_type(&receiver.ty)
+                            ),
+                            expression.span,
+                        );
+                    }
+                    (error_info(), None, None)
+                }
             }
             ExpressionKind::Lambda {
                 captures,
@@ -1785,6 +1855,37 @@ impl Resolver<'_> {
         }
         self.record_expression(expression.span, info.clone(), call, field);
         info
+    }
+
+    fn resolve_json_values<'a>(
+        &mut self,
+        values: impl IntoIterator<Item = &'a Expression>,
+        context: &mut FunctionContext,
+    ) -> ExpressionInfo {
+        for value in values {
+            let actual = self.resolve_expression(value, None, context);
+            let ty = canonical(&actual.ty);
+            if !is_json_compatible(&ty) && ty != TypeRef::Error {
+                self.push(
+                    "RES103",
+                    format!(
+                        "JSON values must be `var`, String, bool, char, or numeric; found `{}`",
+                        display_type(&ty)
+                    ),
+                    value.span,
+                );
+            } else if !is_copyable(&ty) && actual.category != ValueCategory::Temporary {
+                self.push(
+                    "RES027",
+                    format!(
+                        "JSON value of non-copy type `{}` requires `move(...)`",
+                        display_type(&ty)
+                    ),
+                    value.span,
+                );
+            }
+        }
+        temporary(json_var_type())
     }
 
     fn resolve_value_name(
@@ -2255,6 +2356,17 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
     ) -> (ExpressionInfo, Option<ResolvedField>) {
         let receiver_info = self.resolve_expression(receiver, None, context);
+        if is_json_var(&canonical(&receiver_info.ty)) {
+            if name.segments.len() != 1 {
+                self.push(
+                    "RES010",
+                    "a JSON member name cannot use explicit-base qualification".to_owned(),
+                    span,
+                );
+                return (error_info(), None);
+            }
+            return (temporary(json_var_type()), None);
+        }
         let TypeRef::Struct { path } = canonical(&receiver_info.ty) else {
             if canonical(&receiver_info.ty) != TypeRef::Error {
                 self.push(
@@ -2381,6 +2493,11 @@ impl Resolver<'_> {
         let left_type = canonical(&left_info.ty);
         let right_info = self.resolve_expression(right, Some(&left_type), context);
         self.require_exact(&left_type, &right_info.ty, right.span, "binary operand");
+        if is_json_var(&left_type)
+            && matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual)
+        {
+            return temporary(TypeRef::Bool);
+        }
         if !is_numeric(&left_type) {
             self.invalid_operand(binary_name(operator), &left_type, left.span);
             return error_info();
@@ -2406,6 +2523,9 @@ impl Resolver<'_> {
                 if path.segments.len() == 1 && path.segments[0] == "move" =>
             {
                 self.resolve_move(arguments, span, context)
+            }
+            ExpressionKind::Name(path) if matches!(path.segments.as_slice(), [name] if name == "var") => {
+                self.resolve_json_wrap(arguments, span, context)
             }
             ExpressionKind::Field { receiver, name } => {
                 let receiver_info = self.resolve_expression(receiver, None, context);
@@ -2828,14 +2948,15 @@ impl Resolver<'_> {
             );
             return (error_info(), None);
         }
-        let rust_error = self.rust_error_struct();
+        let (exception_id, exception) = self.native_result_exception(error_type);
         let call = ResolvedCall {
             span,
             target: CallTarget::Intrinsic(Intrinsic::UnwrapRustResult {
                 error_message: self.rust_error_message(error_type),
+                exception,
             }),
             return_type: value_type.clone(),
-            throws: vec![rust_error],
+            throws: vec![exception_id],
         };
         (temporary(value_type.clone()), Some(call))
     }
@@ -3012,6 +3133,17 @@ impl Resolver<'_> {
             return (error_info(), None);
         }
         let argument = self.resolve_expression(&arguments[0], None, context);
+        if is_json_var(&canonical(&argument.ty)) && is_numeric(&target) {
+            let call = ResolvedCall {
+                span,
+                target: CallTarget::Intrinsic(Intrinsic::JsonCast {
+                    target: target.clone(),
+                }),
+                return_type: target.clone(),
+                throws: Vec::new(),
+            };
+            return (temporary(target), Some(call));
+        }
         if !is_numeric(&canonical(&argument.ty)) || !is_numeric(&target) {
             self.push(
                 "RES016",
@@ -3029,6 +3161,59 @@ impl Resolver<'_> {
             target: CallTarget::Intrinsic(Intrinsic::PrimitiveCast {
                 target: target.clone(),
             }),
+            return_type: target.clone(),
+            throws: Vec::new(),
+        };
+        (temporary(target), Some(call))
+    }
+
+    fn resolve_json_wrap(
+        &mut self,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        if arguments.is_empty() {
+            let instance = NativeInstance {
+                type_path: VAR_TYPE_PATH.to_owned(),
+                arguments: Vec::new(),
+            };
+            return self.resolve_native_callable(
+                &instance,
+                CallStyle::Constructor,
+                "Var",
+                arguments,
+                span,
+                None,
+                context,
+            );
+        }
+        if arguments.len() != 1 {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES103",
+                "`var` conversion requires zero or one argument".to_owned(),
+                span,
+            );
+            return (error_info(), None);
+        }
+        let actual = self.resolve_expression(&arguments[0], None, context);
+        let ty = canonical(&actual.ty);
+        if !is_json_compatible(&ty) {
+            self.push(
+                "RES103",
+                format!("cannot convert `{}` to `var`", display_type(&ty)),
+                arguments[0].span,
+            );
+            return (error_info(), None);
+        }
+        self.validate_value_use(&ty, &actual, arguments[0].span, "var conversion");
+        let target = json_var_type();
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::JsonWrap),
             return_type: target.clone(),
             throws: Vec::new(),
         };
@@ -3428,6 +3613,23 @@ impl Resolver<'_> {
                 .collect::<Vec<_>>()
         });
         let actual = self.resolve_arguments(arguments, contextual.as_deref(), context);
+        if instance.type_path == "rust::String"
+            && style == CallStyle::Constructor
+            && name == "String"
+            && actual.len() == 1
+            && is_json_var(&canonical(&actual[0].ty))
+        {
+            let target = TypeRef::native("rust::String", Vec::new());
+            let call = ResolvedCall {
+                span,
+                target: CallTarget::Intrinsic(Intrinsic::JsonCast {
+                    target: target.clone(),
+                }),
+                return_type: target.clone(),
+                throws: Vec::new(),
+            };
+            return (temporary(target), Some(call));
+        }
         let exact = candidates
             .iter()
             .filter(|candidate| {
@@ -3591,6 +3793,14 @@ impl Resolver<'_> {
         span: Span,
         description: &str,
     ) {
+        if !expected.is_reference()
+            && is_json_var(&canonical(expected))
+            && is_json_compatible(&canonical(&actual.ty))
+        {
+            let actual_type = canonical(&actual.ty);
+            self.validate_value_use(&actual_type, actual, span, description);
+            return;
+        }
         if !self.is_derived_reference_binding(expected, &actual.ty) {
             self.require_exact(expected, &actual.ty, span, description);
         }
@@ -3922,7 +4132,16 @@ impl Resolver<'_> {
             }
             TypeKind::Named(named) => {
                 let segments = &named.path.segments;
-                if let Some(primitive) = primitive_type(segments) {
+                if matches!(segments.as_slice(), [name] if name == "var") {
+                    if !named.arguments.is_empty() {
+                        self.push(
+                            "RES033",
+                            "native type `var` cannot have type arguments".to_owned(),
+                            ty.span,
+                        );
+                    }
+                    json_var_type()
+                } else if let Some(primitive) = primitive_type(segments) {
                     if !named.arguments.is_empty() {
                         self.push(
                             "RES033",
@@ -4007,6 +4226,9 @@ impl Resolver<'_> {
         diagnose_unknown: bool,
         span: Span,
     ) -> Option<String> {
+        if matches!(segments, [name] if name == "var") {
+            return Some(VAR_TYPE_PATH.to_owned());
+        }
         let candidates = if segments.first().is_some_and(|segment| segment == "rust") {
             vec![segments.to_vec()]
         } else if segments.len() == 1 {
@@ -4385,6 +4607,7 @@ fn primitive_type(segments: &[String]) -> Option<TypeRef> {
 
 fn literal_type(kind: LiteralKind, text: &str, expected: Option<&TypeRef>) -> TypeRef {
     match kind {
+        LiteralKind::Null => json_var_type(),
         LiteralKind::Boolean => TypeRef::Bool,
         LiteralKind::Character => TypeRef::Char,
         LiteralKind::String => TypeRef::native("rust::String", vec![]),
@@ -4465,6 +4688,29 @@ fn is_numeric(ty: &TypeRef) -> bool {
     is_integer(ty) || matches!(ty, TypeRef::F32 | TypeRef::F64)
 }
 
+fn json_var_type() -> TypeRef {
+    TypeRef::native(VAR_TYPE_PATH, Vec::new())
+}
+
+fn is_json_var(ty: &TypeRef) -> bool {
+    matches!(
+        ty,
+        TypeRef::Native { path, arguments }
+            if path == VAR_TYPE_PATH && arguments.is_empty()
+    )
+}
+
+fn is_json_compatible(ty: &TypeRef) -> bool {
+    is_json_var(ty)
+        || is_numeric(ty)
+        || matches!(ty, TypeRef::Bool | TypeRef::Char)
+        || matches!(
+            ty,
+            TypeRef::Native { path, arguments }
+                if path == "rust::String" && arguments.is_empty()
+        )
+}
+
 fn is_format_value(ty: &TypeRef) -> bool {
     matches!(
         ty,
@@ -4484,11 +4730,12 @@ fn is_format_value(ty: &TypeRef) -> bool {
             | TypeRef::Usize
             | TypeRef::F32
             | TypeRef::F64
-    ) || matches!(
-        ty,
-        TypeRef::Native { path, arguments }
-            if path == "rust::String" && arguments.is_empty()
-    )
+    ) || is_json_var(ty)
+        || matches!(
+            ty,
+            TypeRef::Native { path, arguments }
+                if path == "rust::String" && arguments.is_empty()
+        )
 }
 
 fn is_copyable(ty: &TypeRef) -> bool {
@@ -4512,10 +4759,11 @@ fn is_copyable(ty: &TypeRef) -> bool {
             | TypeRef::F64
             | TypeRef::Struct { .. }
             | TypeRef::Reference { .. }
-    ) || matches!(
-        ty,
-        TypeRef::Function(function) if function.kind == StoredFunctionKind::Shared
-    )
+    ) || is_json_var(ty)
+        || matches!(
+            ty,
+            TypeRef::Function(function) if function.kind == StoredFunctionKind::Shared
+        )
 }
 
 fn callable_signature(ty: &TypeRef) -> Option<(&[TypeRef], &TypeRef)> {
@@ -4793,6 +5041,12 @@ fn source_uses_exceptions(source: &SourceFile) -> bool {
             ExpressionKind::Aggregate { initializers, .. } => {
                 initializers.iter().any(expression_uses_exceptions)
             }
+            ExpressionKind::JsonArray { elements } => {
+                elements.iter().any(expression_uses_exceptions)
+            }
+            ExpressionKind::JsonObject { members } => members
+                .iter()
+                .any(|(_, value)| expression_uses_exceptions(value)),
             ExpressionKind::Field { receiver, .. } => expression_uses_exceptions(receiver),
             ExpressionKind::Index { receiver, index } => {
                 expression_uses_exceptions(receiver) || expression_uses_exceptions(index)
@@ -4875,7 +5129,7 @@ fn source_uses_exceptions(source: &SourceFile) -> bool {
                             if namespace == "stainless"
                                 && matches!(
                                     name.as_str(),
-                                    "Exception" | "RustError" | "FormatError"
+                                    "Exception" | "RustError" | "FormatError" | "JsonError"
                                 )
                     )
                 }) || structure.constructors.iter().any(|constructor| {

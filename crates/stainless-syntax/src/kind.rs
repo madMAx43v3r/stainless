@@ -43,6 +43,7 @@ define_syntax_kinds! {
     AutoKw,
     TrueKw,
     FalseKw,
+    NullKw,
     MoveKw,
     MutableKw,
     StructKw,
@@ -142,6 +143,9 @@ define_syntax_kinds! {
     ArgumentList,
     AggregateExpression,
     InitializerList,
+    JsonArrayExpression,
+    JsonObjectExpression,
+    JsonMember,
     FieldExpression,
     IndexExpression,
     LambdaExpression,
@@ -171,6 +175,7 @@ impl SyntaxKind {
                 | Self::Character
                 | Self::TrueKw
                 | Self::FalseKw
+                | Self::NullKw
         )
     }
 }

@@ -617,6 +617,45 @@ impl Emitter {
                 Ok(quote!(#name))
             }
             hir::Expression::Literal { kind, text } => literal(*kind, text),
+            hir::Expression::JsonNull => Ok(quote!(::stainless_runtime::Var::null())),
+            hir::Expression::JsonArray(elements) => {
+                let elements = elements
+                    .iter()
+                    .map(|element| self.expression(element))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(quote!(::stainless_runtime::Var::array([#(#elements),*])))
+            }
+            hir::Expression::JsonObject(members) => {
+                if members.is_empty() {
+                    return Ok(quote!(::stainless_runtime::Var::empty_object()));
+                }
+                let members = members
+                    .iter()
+                    .map(|(name, value)| {
+                        let value = self.expression(value)?;
+                        Ok(quote!((#name, #value)))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(quote!(::stainless_runtime::Var::object([#(#members),*])))
+            }
+            hir::Expression::JsonFrom(expression) => {
+                let expression = self.expression(expression)?;
+                Ok(quote!(::stainless_runtime::Var::from(#expression)))
+            }
+            hir::Expression::JsonField { receiver, name } => {
+                let receiver = self.expression(receiver)?;
+                Ok(quote!((#receiver).field(#name)))
+            }
+            hir::Expression::JsonIndex { receiver, index } => {
+                let receiver = self.expression(receiver)?;
+                let index = self.expression(index)?;
+                Ok(quote!((#receiver).index(#index)))
+            }
+            hir::Expression::JsonCast { expression, target } => {
+                let expression = self.expression(expression)?;
+                let method = identifier(json_cast_method(target)?)?;
+                Ok(quote!((#expression).#method()))
+            }
             hir::Expression::FormatMacro {
                 kind,
                 destination,
@@ -869,6 +908,7 @@ impl Emitter {
         let exception = match exception {
             hir::NativeExceptionKind::RustError => quote!(RustError),
             hir::NativeExceptionKind::FormatError => quote!(FormatError),
+            hir::NativeExceptionKind::JsonError => quote!(JsonError),
         };
         let converted = quote! {
             Box::new(crate::__stainless_namespace_stainless::#exception {
@@ -1080,6 +1120,32 @@ fn literal(kind: LiteralKind, text: &str) -> Result<TokenStream, String> {
         }
         LiteralKind::Boolean => TokenStream::from_str(text)
             .map_err(|error| format!("invalid boolean literal `{text}`: {error}")),
+        LiteralKind::Null => Err("JSON null reached scalar literal emission".to_owned()),
+    }
+}
+
+fn json_cast_method(target: &hir::Type) -> Result<&'static str, String> {
+    match target {
+        hir::Type::Primitive("bool") => Ok("to_bool"),
+        hir::Type::Primitive("i8") => Ok("to_i8"),
+        hir::Type::Primitive("i16") => Ok("to_i16"),
+        hir::Type::Primitive("i32") => Ok("to_i32"),
+        hir::Type::Primitive("i64") => Ok("to_i64"),
+        hir::Type::Primitive("i128") => Ok("to_i128"),
+        hir::Type::Primitive("isize") => Ok("to_isize"),
+        hir::Type::Primitive("u8") => Ok("to_u8"),
+        hir::Type::Primitive("u16") => Ok("to_u16"),
+        hir::Type::Primitive("u32") => Ok("to_u32"),
+        hir::Type::Primitive("u64") => Ok("to_u64"),
+        hir::Type::Primitive("u128") => Ok("to_u128"),
+        hir::Type::Primitive("usize") => Ok("to_usize"),
+        hir::Type::Primitive("f32") => Ok("to_f32"),
+        hir::Type::Primitive("f64") => Ok("to_f64"),
+        hir::Type::Native {
+            rust_path,
+            arguments,
+        } if rust_path == "::std::string::String" && arguments.is_empty() => Ok("to_string_value"),
+        _ => Err("unsupported JSON scalar conversion reached code generation".to_owned()),
     }
 }
 

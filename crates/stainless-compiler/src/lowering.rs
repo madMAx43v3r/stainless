@@ -420,6 +420,28 @@ fn lower_expression(expression: cst::Expression) -> Expression {
                     .collect(),
             }
         }
+        cst::Expression::JsonArray(array) => ExpressionKind::JsonArray {
+            elements: array.elements().map(lower_expression).collect(),
+        },
+        cst::Expression::JsonObject(object) => ExpressionKind::JsonObject {
+            members: object
+                .members()
+                .map(|member| {
+                    let value = member
+                        .value()
+                        .map_or_else(|| error_expression(span(&member)), lower_expression);
+                    let key = member.key_token().map_or_else(missing_name, |token| {
+                        if token.kind() == SyntaxKind::String {
+                            syn::parse_str::<syn::LitStr>(token.text())
+                                .map_or_else(|_| token.text().to_owned(), |literal| literal.value())
+                        } else {
+                            token.text().to_owned()
+                        }
+                    });
+                    (key, value)
+                })
+                .collect(),
+        },
         cst::Expression::Field(field) => {
             let Some(receiver) = field.receiver() else {
                 return error_expression(expression_span);
@@ -510,6 +532,7 @@ fn lower_literal(literal: &cst::LiteralExpression) -> Option<ExpressionKind> {
         SyntaxKind::String => LiteralKind::String,
         SyntaxKind::Character => LiteralKind::Character,
         SyntaxKind::TrueKw | SyntaxKind::FalseKw => LiteralKind::Boolean,
+        SyntaxKind::NullKw => LiteralKind::Null,
         _ => return None,
     };
     Some(ExpressionKind::Literal(ast::Literal {

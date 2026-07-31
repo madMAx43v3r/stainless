@@ -313,6 +313,8 @@ pub enum NativeExceptionKind {
     RustError,
     /// Failure while appending formatted text.
     FormatError,
+    /// Failure while reading, parsing, or serializing JSON.
+    JsonError,
 }
 
 /// One checked-exception handler.
@@ -370,6 +372,35 @@ pub enum Expression {
         kind: LiteralKind,
         /// Source spelling.
         text: String,
+    },
+    /// JSON `null`.
+    JsonNull,
+    /// Construct a JSON array.
+    JsonArray(Vec<Expression>),
+    /// Construct a JSON object.
+    JsonObject(Vec<(String, Expression)>),
+    /// Convert a statically typed JSON-compatible value into `var`.
+    JsonFrom(Box<Expression>),
+    /// Null-safe JSON object member access.
+    JsonField {
+        /// JSON receiver.
+        receiver: Box<Expression>,
+        /// Decoded member name.
+        name: String,
+    },
+    /// Null-safe JSON array indexing.
+    JsonIndex {
+        /// JSON receiver.
+        receiver: Box<Expression>,
+        /// Array index.
+        index: Box<Expression>,
+    },
+    /// JavaScript-compatible conversion from `var` to a scalar type.
+    JsonCast {
+        /// JSON source value.
+        expression: Box<Expression>,
+        /// Destination primitive or String type.
+        target: Type,
     },
     /// A compiler-validated Rust formatting macro invocation.
     FormatMacro {

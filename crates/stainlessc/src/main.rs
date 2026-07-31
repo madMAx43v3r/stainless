@@ -255,6 +255,9 @@ fn compile_executable(
     source: &std::path::Path,
     output: &std::path::Path,
 ) -> Result<(), String> {
+    if rust.contains("::stainless_runtime::") {
+        return compile_executable_with_runtime(rust, source, output);
+    }
     fs::write(source, rust)
         .map_err(|error| format!("failed to write `{}`: {error}", source.display()))?;
     let rustc = env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
@@ -272,6 +275,77 @@ fn compile_executable(
     } else {
         Err("rustc rejected the generated program".to_owned())
     }
+}
+
+fn compile_executable_with_runtime(
+    rust: &str,
+    source: &std::path::Path,
+    output: &std::path::Path,
+) -> Result<(), String> {
+    let directory = source
+        .parent()
+        .ok_or_else(|| "temporary generated source has no parent directory".to_owned())?;
+    let source_directory = directory.join("src");
+    fs::create_dir(&source_directory).map_err(|error| {
+        format!(
+            "failed to create hidden Cargo source directory `{}`: {error}",
+            source_directory.display()
+        )
+    })?;
+    let main_source = source_directory.join("main.rs");
+    fs::write(&main_source, rust)
+        .map_err(|error| format!("failed to write `{}`: {error}", main_source.display()))?;
+
+    let runtime_source = PathBuf::from(stainless_runtime::CRATE_SOURCE_DIR);
+    let dependency = if runtime_source.join("Cargo.toml").is_file() {
+        format!(
+            "stainless-runtime = {{ path = \"{}\" }}",
+            toml_escape_path(&runtime_source)
+        )
+    } else {
+        format!("stainless-runtime = \"={}\"", env!("CARGO_PKG_VERSION"))
+    };
+    let manifest = format!(
+        "[package]\nname = \"stainless-program\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\n{dependency}\n"
+    );
+    let manifest_path = directory.join("Cargo.toml");
+    fs::write(&manifest_path, manifest).map_err(|error| {
+        format!(
+            "failed to write hidden Cargo manifest `{}`: {error}",
+            manifest_path.display()
+        )
+    })?;
+
+    let target_directory = directory.join("target");
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let status = ProcessCommand::new(cargo)
+        .arg("build")
+        .arg("--quiet")
+        .current_dir(directory)
+        .env("CARGO_TARGET_DIR", &target_directory)
+        .status()
+        .map_err(|error| format!("failed to invoke Cargo for the Stainless runtime: {error}"))?;
+    if !status.success() {
+        return Err("Cargo rejected the generated program or its Stainless runtime".to_owned());
+    }
+
+    let built = target_directory
+        .join("debug")
+        .join(format!("stainless-program{}", env::consts::EXE_SUFFIX));
+    fs::copy(&built, output).map_err(|error| {
+        format!(
+            "failed to copy built executable `{}` to `{}`: {error}",
+            built.display(),
+            output.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn toml_escape_path(path: &std::path::Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
 }
 
 fn executable_source(result: &stainless_compiler::TranspileResult) -> Result<String, String> {

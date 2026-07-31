@@ -486,6 +486,16 @@ pub enum ExpressionKind {
         /// Initializers in direct layout order.
         initializers: Vec<Expression>,
     },
+    /// A dynamically typed JSON array literal.
+    JsonArray {
+        /// Element expressions in source order.
+        elements: Vec<Expression>,
+    },
+    /// A dynamically typed JSON object literal.
+    JsonObject {
+        /// Decoded member keys and their value expressions.
+        members: Vec<(String, Expression)>,
+    },
     /// A dot member access.
     Field {
         /// Receiver.
@@ -532,6 +542,8 @@ pub enum LiteralKind {
     String,
     Character,
     Boolean,
+    /// JSON `null`.
+    Null,
 }
 
 /// Prefix operators.

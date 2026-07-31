@@ -1,0 +1,48 @@
+// `var` is the compiler-native, owned JSON value type. `null`, JSON arrays,
+// and JSON objects are language syntax rather than Rust interop syntax.
+use rust::{println, String};
+
+var read_json(const String& source) throws stainless::JsonError {
+    // Assigning Result<var, JsonError> to var performs the normal implicit
+    // native Result unwrap and converts the error to stainless::JsonError.
+    var parsed = var::parse(source);
+    return move(parsed);
+}
+
+var read_json_file(const String& path) throws stainless::JsonError {
+    var parsed = var::parse_file(path);
+    return move(parsed);
+}
+
+String encode_json(const var& value) {
+    return value.to_json();
+}
+
+i32 main() throws stainless::JsonError {
+    var object = {
+        field: 123,
+        "display_name": "Stainless",
+        nested: {},
+    };
+    var array = [1, 2, "text", {}, null];
+    var value = 1.23;
+
+    var test_element = array[2];
+    var out_of_bounds = array[11111]; // JSON null
+    var missing_field = object.not_found; // JSON null
+
+    // Explicit scalar conversions use JavaScript-compatible JSON coercion.
+    i32 test_int = i32(object.field);
+    String display_name = String(object.display_name);
+
+    var parsed = read_json("{\"web\":true,\"port\":8080}");
+    // `var` copies are cheap. Objects and arrays keep shared Arc identity.
+    var shared = parsed;
+    String encoded = encode_json(shared);
+    println!("{} {} {} {}", display_name, test_int, encoded, value);
+
+    if (test_element == null && out_of_bounds == null && missing_field == null) {
+        return 1;
+    }
+    return 0;
+}

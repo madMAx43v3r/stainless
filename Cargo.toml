@@ -2,6 +2,7 @@
 members = [
     "crates/stainless-build",
     "crates/stainless-compiler",
+    "crates/stainless-runtime",
     "crates/stainless-syntax",
     "crates/stainlessc",
 ]
@@ -20,6 +21,7 @@ quote = "1.0.47"
 regex = "1.12.4"
 rowan = "0.16.1"
 serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["arbitrary_precision"] }
 syn = { version = "2.0.119", features = ["full"] }
 toml = "1.1.2"
 

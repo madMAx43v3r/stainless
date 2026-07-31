@@ -254,6 +254,25 @@ void macros(String& output, i32 value) {
 }
 
 #[test]
+fn parses_json_literals_without_confusing_arrays_with_lambdas() {
+    let source = r#"void json() {
+    var value = {name: "Stainless", "items": [1, null, {}]};
+    var item = value.items[0];
+    auto callback = [value](i32 input) { return input; };
+}
+"#;
+    let parsed = parse(source);
+    let root = parsed.syntax();
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(root.to_string(), source);
+    assert_eq!(count_kind(&root, SyntaxKind::JsonObjectExpression), 2);
+    assert_eq!(count_kind(&root, SyntaxKind::JsonArrayExpression), 1);
+    assert_eq!(count_kind(&root, SyntaxKind::JsonMember), 2);
+    assert_eq!(count_kind(&root, SyntaxKind::LambdaExpression), 1);
+}
+
+#[test]
 fn parser_recovers_and_parses_the_following_function() {
     let source = r"i32 broken(i32 value) {
     i32 missing = ;

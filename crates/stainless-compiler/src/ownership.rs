@@ -770,6 +770,18 @@ impl Analyzer<'_> {
                 }
                 None
             }
+            ExpressionKind::JsonArray { elements } => {
+                for element in elements {
+                    self.expression(element, Usage::Read);
+                }
+                None
+            }
+            ExpressionKind::JsonObject { members } => {
+                for (_, value) in members {
+                    self.expression(value, Usage::Read);
+                }
+                None
+            }
             ExpressionKind::Field { receiver, .. } => self.expression(receiver, usage),
             ExpressionKind::Index { receiver, index } => {
                 self.expression(receiver, usage);
@@ -878,7 +890,10 @@ impl Analyzer<'_> {
                 None
             }
             CallTarget::Intrinsic(
-                Intrinsic::PrimitiveCast { .. } | Intrinsic::ExceptionRoot { .. },
+                Intrinsic::PrimitiveCast { .. }
+                | Intrinsic::JsonCast { .. }
+                | Intrinsic::JsonWrap
+                | Intrinsic::ExceptionRoot { .. },
             ) => {
                 if let Some(argument) = arguments.first() {
                     self.expression(argument, Usage::Read);
@@ -1382,6 +1397,10 @@ fn is_copyable(ty: &TypeRef) -> bool {
             | TypeRef::Struct { .. }
     ) || matches!(
         ty,
+        TypeRef::Native { path, arguments }
+            if path == "rust::stainless_runtime::Var" && arguments.is_empty()
+    ) || matches!(
+        ty,
         TypeRef::Function(function)
             if function.kind == crate::interop::StoredFunctionKind::Shared
     )
@@ -1584,6 +1603,16 @@ impl UseCollector {
             ExpressionKind::Aggregate { initializers, .. } => {
                 for initializer in initializers {
                     self.expression(initializer);
+                }
+            }
+            ExpressionKind::JsonArray { elements } => {
+                for element in elements {
+                    self.expression(element);
+                }
+            }
+            ExpressionKind::JsonObject { members } => {
+                for (_, value) in members {
+                    self.expression(value);
                 }
             }
             ExpressionKind::Field { receiver, .. } => self.expression(receiver),

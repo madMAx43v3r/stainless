@@ -169,3 +169,65 @@ void invalid() {
     assert!(codes.contains(&"SEM012"), "{:?}", analysis.diagnostics);
     assert!(codes.contains(&"SEM013"), "{:?}", analysis.diagnostics);
 }
+
+#[test]
+fn lowers_json_literals_and_reports_json_specific_errors() {
+    let source = r#"var valid() {
+    var value = {name: "Stainless", values: [1, null, {}]};
+    return move(value);
+}
+
+struct Unsupported {
+    i32 value;
+};
+
+var invalid() {
+    var duplicate = {field: 1, field: 2};
+    var unsupported = [Unsupported{1}];
+    return move(duplicate);
+}
+"#;
+    let analysis = analyze(source);
+
+    assert!(
+        analysis.parse.errors().is_empty(),
+        "{:?}",
+        analysis.parse.errors()
+    );
+    let Item::Function(valid) = &analysis.ast.items[0] else {
+        panic!("expected valid function");
+    };
+    let body = valid.body.as_ref().expect("valid body");
+    let StatementKind::Local(value) = &body.statements[0].kind else {
+        panic!("expected JSON local");
+    };
+    assert!(matches!(
+        value.initializer.as_ref().map(|value| &value.kind),
+        Some(ExpressionKind::JsonObject { members }) if members.len() == 2
+    ));
+    assert!(analysis.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "RES103" && diagnostic.message.contains("duplicate JSON object key")
+    }));
+    assert!(analysis.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "RES103" && diagnostic.message.contains("JSON values must be")
+    }));
+}
+
+#[test]
+fn json_native_results_require_stainless_json_error() {
+    let source = r"use rust::String;
+
+void invalid(const String& source) {
+    var value = var::parse(source);
+}
+";
+    let analysis = analyze(source);
+
+    assert!(
+        analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "RES075" && diagnostic.message.contains("stainless::JsonError")
+        }),
+        "{:?}",
+        analysis.diagnostics
+    );
+}

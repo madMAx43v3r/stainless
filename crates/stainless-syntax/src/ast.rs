@@ -99,6 +99,9 @@ ast_node!(MacroCallExpression, MacroCallExpression);
 ast_node!(ArgumentList, ArgumentList);
 ast_node!(AggregateExpression, AggregateExpression);
 ast_node!(InitializerList, InitializerList);
+ast_node!(JsonArrayExpression, JsonArrayExpression);
+ast_node!(JsonObjectExpression, JsonObjectExpression);
+ast_node!(JsonMember, JsonMember);
 ast_node!(FieldExpression, FieldExpression);
 ast_node!(IndexExpression, IndexExpression);
 ast_node!(LambdaExpression, LambdaExpression);
@@ -338,6 +341,8 @@ pub enum Expression {
     Call(CallExpression),
     MacroCall(MacroCallExpression),
     Aggregate(AggregateExpression),
+    JsonArray(JsonArrayExpression),
+    JsonObject(JsonObjectExpression),
     Field(FieldExpression),
     Index(IndexExpression),
     Lambda(LambdaExpression),
@@ -357,6 +362,8 @@ impl AstNode for Expression {
                 | SyntaxKind::CallExpression
                 | SyntaxKind::MacroCallExpression
                 | SyntaxKind::AggregateExpression
+                | SyntaxKind::JsonArrayExpression
+                | SyntaxKind::JsonObjectExpression
                 | SyntaxKind::FieldExpression
                 | SyntaxKind::IndexExpression
                 | SyntaxKind::LambdaExpression
@@ -381,6 +388,12 @@ impl AstNode for Expression {
             SyntaxKind::AggregateExpression => {
                 AggregateExpression::cast(syntax).map(Self::Aggregate)
             }
+            SyntaxKind::JsonArrayExpression => {
+                JsonArrayExpression::cast(syntax).map(Self::JsonArray)
+            }
+            SyntaxKind::JsonObjectExpression => {
+                JsonObjectExpression::cast(syntax).map(Self::JsonObject)
+            }
             SyntaxKind::FieldExpression => FieldExpression::cast(syntax).map(Self::Field),
             SyntaxKind::IndexExpression => IndexExpression::cast(syntax).map(Self::Index),
             SyntaxKind::LambdaExpression => LambdaExpression::cast(syntax).map(Self::Lambda),
@@ -400,6 +413,8 @@ impl AstNode for Expression {
             Self::Call(node) => node.syntax(),
             Self::MacroCall(node) => node.syntax(),
             Self::Aggregate(node) => node.syntax(),
+            Self::JsonArray(node) => node.syntax(),
+            Self::JsonObject(node) => node.syntax(),
             Self::Field(node) => node.syntax(),
             Self::Index(node) => node.syntax(),
             Self::Lambda(node) => node.syntax(),
@@ -1089,6 +1104,36 @@ impl AggregateExpression {
 impl InitializerList {
     pub fn initializers(&self) -> impl Iterator<Item = Expression> + '_ {
         expression_children(self.syntax())
+    }
+}
+
+impl JsonArrayExpression {
+    /// JSON element expressions in source order.
+    pub fn elements(&self) -> impl Iterator<Item = Expression> + '_ {
+        expression_children(self.syntax())
+    }
+}
+
+impl JsonObjectExpression {
+    /// JSON object members in source order.
+    #[must_use]
+    pub fn members(&self) -> AstChildren<JsonMember> {
+        children(self.syntax())
+    }
+}
+
+impl JsonMember {
+    /// Identifier or string-literal key token.
+    #[must_use]
+    pub fn key_token(&self) -> Option<SyntaxToken> {
+        direct_tokens(self.syntax())
+            .find(|token| matches!(token.kind(), SyntaxKind::Identifier | SyntaxKind::String))
+    }
+
+    /// Member value expression.
+    #[must_use]
+    pub fn value(&self) -> Option<Expression> {
+        expression_children(self.syntax()).next()
     }
 }
 

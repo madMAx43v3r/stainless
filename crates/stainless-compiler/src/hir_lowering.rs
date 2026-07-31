@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use crate::Diagnostic;
 use crate::ast::{self, ExpressionKind, ForClause, Item, StatementKind};
 use crate::hir;
-use crate::interop::{ArgumentAdaptation, Receiver, RustLowering, StoredFunctionKind, TypeRef};
+use crate::interop::{
+    ArgumentAdaptation, Receiver, RustLowering, StoredFunctionKind, TypeRef, VAR_TYPE_PATH,
+};
 use crate::resolution::{
     CallTarget, CallbackTarget, FunctionSymbol, Intrinsic, LambdaCaptureMode, NativeCall,
     ResolvedCall, ResolvedLambdaCapture, SemanticModel, StructSymbol, ValueCategory,
@@ -33,7 +35,10 @@ pub(crate) fn lower(
             structure.path.as_slice(),
             [namespace, name]
                 if namespace == "stainless"
-                    && matches!(name.as_str(), "Exception" | "RustError" | "FormatError")
+                    && matches!(
+                        name.as_str(),
+                        "Exception" | "RustError" | "FormatError" | "JsonError"
+                    )
         )
     }) {
         if let Some(structure) = lowerer.lower_struct_symbol(
@@ -822,12 +827,19 @@ impl Lowerer<'_> {
         if let Some(adaptation) = self.semantics.rust_result_adaptation(expression.span) {
             return Some(hir::Expression::UnwrapRustResult {
                 expression: Box::new(self.lower_expression(expression, ExpressionMode::Value)?),
-                exception: hir::NativeExceptionKind::RustError,
+                exception: lower_native_result_exception(adaptation.exception),
                 error_message: lower_rust_error_message(adaptation.error_message),
                 target: self.exception_target.clone(),
             });
         }
         let resolution = self.semantics.expression(expression.span);
+        if is_json_type(canonical_ref(expected))
+            && resolution.is_some_and(|value| !is_json_type(canonical_ref(&value.ty)))
+        {
+            return Some(hir::Expression::JsonFrom(Box::new(
+                self.lower_expression(expression, ExpressionMode::Value)?,
+            )));
+        }
         if let TypeRef::Reference {
             mutable,
             target: expected_target,
@@ -871,7 +883,8 @@ impl Lowerer<'_> {
                     canonical_ref(expected),
                     TypeRef::Function(function)
                         if function.kind == StoredFunctionKind::Shared
-                ))
+                )
+                || is_json_type(canonical_ref(expected)))
                 && resolution.is_some_and(|value| value.category != ValueCategory::Temporary)
                 && !is_move_call(self.semantics, expression)
             {
@@ -940,10 +953,25 @@ impl Lowerer<'_> {
                     hir::Expression::Name(binding_name(&path.segments[0]))
                 }
             }
+            ExpressionKind::Literal(literal) if literal.kind == ast::LiteralKind::Null => {
+                hir::Expression::JsonNull
+            }
             ExpressionKind::Literal(literal) => hir::Expression::Literal {
                 kind: literal.kind,
                 text: literal.text.clone(),
             },
+            ExpressionKind::JsonArray { elements } => hir::Expression::JsonArray(
+                elements
+                    .iter()
+                    .map(|element| self.lower_json_value(element))
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+            ExpressionKind::JsonObject { members } => hir::Expression::JsonObject(
+                members
+                    .iter()
+                    .map(|(name, value)| Some((name.clone(), self.lower_json_value(value)?)))
+                    .collect::<Option<Vec<_>>>()?,
+            ),
             ExpressionKind::Prefix { operator, operand } => match operator {
                 ast::PrefixOperator::Increment | ast::PrefixOperator::Decrement => {
                     hir::Expression::Increment {
@@ -1096,31 +1124,42 @@ impl Lowerer<'_> {
             }
             ExpressionKind::Parenthesized(_) => unreachable!("handled above"),
             ExpressionKind::Field { receiver, .. } => {
-                let Some(field) = self
+                let field = self
                     .semantics
                     .expression(expression.span)
-                    .and_then(|resolution| resolution.field.as_ref())
-                else {
+                    .and_then(|resolution| resolution.field.as_ref());
+                if let Some(field) = field {
+                    hir::Expression::Field {
+                        receiver: Box::new(self.lower_expression(receiver, ExpressionMode::Value)?),
+                        access_path: field.access_path.clone(),
+                    }
+                } else if self
+                    .semantics
+                    .expression(receiver.span)
+                    .is_some_and(|resolution| is_json_type(canonical_ref(&resolution.ty)))
+                {
+                    let ExpressionKind::Field { name, .. } = &expression.kind else {
+                        unreachable!("field branch has a field expression");
+                    };
+                    hir::Expression::JsonField {
+                        receiver: Box::new(
+                            self.lower_expression(receiver, ExpressionMode::Reference)?,
+                        ),
+                        name: name.segments.first()?.clone(),
+                    }
+                } else {
                     self.push(
                         "HIR009",
                         "resolved struct field is missing".to_owned(),
                         expression.span,
                     );
                     return None;
-                };
-                hir::Expression::Field {
-                    receiver: Box::new(self.lower_expression(receiver, ExpressionMode::Value)?),
-                    access_path: field.access_path.clone(),
                 }
             }
-            ExpressionKind::Index { .. } => {
-                self.push(
-                    "HIR009",
-                    "unresolved field or index expression reached HIR lowering".to_owned(),
-                    expression.span,
-                );
-                return None;
-            }
+            ExpressionKind::Index { receiver, index } => hir::Expression::JsonIndex {
+                receiver: Box::new(self.lower_expression(receiver, ExpressionMode::Reference)?),
+                index: Box::new(self.lower_expression(index, ExpressionMode::Value)?),
+            },
             ExpressionKind::Lambda {
                 captures,
                 parameters,
@@ -1443,7 +1482,10 @@ impl Lowerer<'_> {
                     arguments,
                 })
             }
-            CallTarget::Intrinsic(Intrinsic::UnwrapRustResult { error_message }) => {
+            CallTarget::Intrinsic(Intrinsic::UnwrapRustResult {
+                error_message,
+                exception,
+            }) => {
                 let Some(ast::Expression {
                     kind: ExpressionKind::Field { receiver, .. },
                     ..
@@ -1458,7 +1500,7 @@ impl Lowerer<'_> {
                 };
                 Some(hir::Expression::UnwrapRustResult {
                     expression: Box::new(self.lower_expression(receiver, ExpressionMode::Value)?),
-                    exception: hir::NativeExceptionKind::RustError,
+                    exception: lower_native_result_exception(*exception),
                     error_message: lower_rust_error_message(*error_message),
                     target: self.exception_target.clone(),
                 })
@@ -1469,6 +1511,18 @@ impl Lowerer<'_> {
                     expression: Box::new(self.lower_expression(expression, ExpressionMode::Value)?),
                     target: self.lower_type(target, call.span)?,
                 })
+            }
+            CallTarget::Intrinsic(Intrinsic::JsonCast { target }) => {
+                let expression = arguments.first()?;
+                Some(hir::Expression::JsonCast {
+                    expression: Box::new(
+                        self.lower_expression(expression, ExpressionMode::Reference)?,
+                    ),
+                    target: self.lower_type(target, call.span)?,
+                })
+            }
+            CallTarget::Intrinsic(Intrinsic::JsonWrap) => {
+                Some(self.lower_json_value(arguments.first()?)?)
             }
             CallTarget::Intrinsic(Intrinsic::ValueInitialization { target }) => {
                 let expression = arguments.first()?;
@@ -1623,6 +1677,29 @@ impl Lowerer<'_> {
             RustLowering::GeneratedWrapper { .. } => {
                 unreachable!("generated wrappers return before direct-call lowering")
             }
+        }
+    }
+
+    fn lower_json_value(&mut self, expression: &ast::Expression) -> Option<hir::Expression> {
+        let lowered = self.lower_expression(expression, ExpressionMode::Value)?;
+        let resolution = self.semantics.expression(expression.span);
+        let ty = resolution.map(|resolution| canonical_ref(&resolution.ty));
+        if ty.is_some_and(is_json_type) {
+            if resolution.is_some_and(|resolution| {
+                resolution.category != ValueCategory::Temporary
+                    && !is_move_call(self.semantics, expression)
+            }) {
+                Some(hir::Expression::Clone {
+                    expression: Box::new(hir::Expression::Borrow {
+                        mutable: false,
+                        expression: Box::new(lowered),
+                    }),
+                })
+            } else {
+                Some(lowered)
+            }
+        } else {
+            Some(hir::Expression::JsonFrom(Box::new(lowered)))
         }
     }
 
@@ -1849,6 +1926,15 @@ fn lower_rust_error_message(message: crate::resolution::RustErrorMessage) -> hir
     }
 }
 
+fn lower_native_result_exception(
+    exception: crate::resolution::NativeResultException,
+) -> hir::NativeExceptionKind {
+    match exception {
+        crate::resolution::NativeResultException::RustError => hir::NativeExceptionKind::RustError,
+        crate::resolution::NativeResultException::JsonError => hir::NativeExceptionKind::JsonError,
+    }
+}
+
 fn binding_name(source_name: &str) -> String {
     format!("__stainless_local_{source_name}")
 }
@@ -1869,6 +1955,14 @@ fn canonical_ref(ty: &TypeRef) -> &TypeRef {
         TypeRef::Reference { target, .. } => target,
         _ => ty,
     }
+}
+
+fn is_json_type(ty: &TypeRef) -> bool {
+    matches!(
+        ty,
+        TypeRef::Native { path, arguments }
+            if path == VAR_TYPE_PATH && arguments.is_empty()
+    )
 }
 
 fn user_type_path(source_path: &[String]) -> String {

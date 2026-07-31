@@ -2,7 +2,9 @@ use stainless_compiler::interop::{
     ArgumentAdaptation, CallStyle, Receiver, RustLowering, TypeRef, parse_bindings_manifest,
     standard_bindings,
 };
-use stainless_compiler::resolution::{CallTarget, Intrinsic, RustErrorMessage};
+use stainless_compiler::resolution::{
+    CallTarget, Intrinsic, NativeResultException, RustErrorMessage,
+};
 use stainless_compiler::{analyze, analyze_with_bindings};
 
 #[test]
@@ -688,6 +690,7 @@ i32 unwrap_value(Result<i32, String> result) throws stainless::RustError {
         call.target,
         CallTarget::Intrinsic(Intrinsic::UnwrapRustResult {
             error_message: RustErrorMessage::Display,
+            exception: NativeResultException::RustError,
         })
     );
 }

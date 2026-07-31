@@ -87,6 +87,8 @@ enum RawToken {
     TrueKw,
     #[token("false")]
     FalseKw,
+    #[token("null")]
+    NullKw,
     #[token("move")]
     MoveKw,
     #[token("mutable")]
@@ -236,6 +238,7 @@ impl From<RawToken> for SyntaxKind {
             RawToken::AutoKw => Self::AutoKw,
             RawToken::TrueKw => Self::TrueKw,
             RawToken::FalseKw => Self::FalseKw,
+            RawToken::NullKw => Self::NullKw,
             RawToken::MoveKw => Self::MoveKw,
             RawToken::MutableKw => Self::MutableKw,
             RawToken::StructKw => Self::StructKw,

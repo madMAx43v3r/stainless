@@ -256,6 +256,13 @@ pub enum Intrinsic {
         /// Destination primitive type.
         target: TypeRef,
     },
+    /// Convert a JSON `var` through its JavaScript-compatible scalar rules.
+    JsonCast {
+        /// Destination primitive or `rust::String` type.
+        target: TypeRef,
+    },
+    /// Convert one JSON-compatible statically typed value into `var`.
+    JsonWrap,
     /// Aggregate construction of a user-defined struct.
     StructAggregate {
         /// Constructed struct.
@@ -275,6 +282,8 @@ pub enum Intrinsic {
     UnwrapRustResult {
         /// Statically selected error-message conversion.
         error_message: RustErrorMessage,
+        /// Compiler-native checked exception chosen from the native error type.
+        exception: NativeResultException,
     },
 }
 
@@ -289,6 +298,15 @@ pub enum RustErrorMessage {
     Fallback,
 }
 
+/// Checked Stainless exception selected for a native `Result` error type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NativeResultException {
+    /// Generic failure from Rust interop.
+    RustError,
+    /// JSON read, parse, or serialization failure.
+    JsonError,
+}
+
 /// One compiler-inserted exact `Result<T, E>` to `T` conversion.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RustResultAdaptation {
@@ -296,6 +314,8 @@ pub struct RustResultAdaptation {
     pub span: Span,
     /// Statically selected error-message conversion.
     pub error_message: RustErrorMessage,
+    /// Checked exception raised by the inserted unwrap.
+    pub exception: NativeResultException,
 }
 
 /// One callback-valued expression selected through contextual binding metadata.

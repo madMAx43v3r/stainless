@@ -690,7 +690,11 @@ impl Parser<'_> {
                 self.expect(SyntaxKind::RParen, "expected `)`");
                 self.finish();
             }
-            Some(SyntaxKind::LBracket) => self.parse_lambda_expression(),
+            Some(SyntaxKind::LBracket) if self.looks_like_lambda() => {
+                self.parse_lambda_expression();
+            }
+            Some(SyntaxKind::LBracket) => self.parse_json_array_expression(),
+            Some(SyntaxKind::LBrace) => self.parse_json_object_expression(),
             _ => {
                 self.start(SyntaxKind::Error);
                 self.error("expected an expression");
@@ -717,6 +721,43 @@ impl Parser<'_> {
         self.parse_parameter_list();
         self.eat(SyntaxKind::MutableKw);
         self.parse_block();
+        self.finish();
+    }
+
+    fn parse_json_array_expression(&mut self) {
+        self.start(SyntaxKind::JsonArrayExpression);
+        self.expect(SyntaxKind::LBracket, "expected `[` before JSON array");
+        while !self.at_end() && !self.at(SyntaxKind::RBracket) {
+            self.parse_expression();
+            if !self.eat(SyntaxKind::Comma) {
+                break;
+            }
+        }
+        self.expect(SyntaxKind::RBracket, "expected `]` after JSON array");
+        self.finish();
+    }
+
+    fn parse_json_object_expression(&mut self) {
+        self.start(SyntaxKind::JsonObjectExpression);
+        self.expect(SyntaxKind::LBrace, "expected `{` before JSON object");
+        while !self.at_end() && !self.at(SyntaxKind::RBrace) {
+            self.start(SyntaxKind::JsonMember);
+            if self.at_any(&[SyntaxKind::Identifier, SyntaxKind::String]) {
+                self.bump();
+            } else {
+                self.error("expected an identifier or string key in JSON object");
+                if !self.at_end() && !self.at(SyntaxKind::RBrace) {
+                    self.bump();
+                }
+            }
+            self.expect(SyntaxKind::Colon, "expected `:` after JSON object key");
+            self.parse_expression();
+            self.finish();
+            if !self.eat(SyntaxKind::Comma) {
+                break;
+            }
+        }
+        self.expect(SyntaxKind::RBrace, "expected `}` after JSON object");
         self.finish();
     }
 
@@ -856,6 +897,28 @@ impl Parser<'_> {
             self.nth(offset + 1),
             Some(SyntaxKind::Eq | SyntaxKind::Semicolon | SyntaxKind::Colon)
         )
+    }
+
+    fn looks_like_lambda(&self) -> bool {
+        if self.nth(0) != Some(SyntaxKind::LBracket) {
+            return false;
+        }
+        let mut depth = 0_u32;
+        let mut offset = 0;
+        while let Some(kind) = self.nth(offset) {
+            match kind {
+                SyntaxKind::LBracket => depth += 1,
+                SyntaxKind::RBracket => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return self.nth(offset + 1) == Some(SyntaxKind::LParen);
+                    }
+                }
+                _ => {}
+            }
+            offset += 1;
+        }
+        false
     }
 
     fn skip_balanced_angles(&self, mut offset: usize) -> Option<usize> {

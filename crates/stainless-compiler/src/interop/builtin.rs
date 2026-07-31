@@ -1,6 +1,6 @@
 use super::model::{
-    ArgumentAdaptation, CallStyle, CallableBinding, NativeBindings, NativeTypeBinding, Parameter,
-    Receiver, RustLowering, TraitRequirement, TypeRef,
+    ArgumentAdaptation, CallStyle, CallableBinding, NativeBindings, NativeErrorFormat,
+    NativeTypeBinding, Parameter, Receiver, RustLowering, TraitRequirement, TypeRef,
 };
 
 const T: &str = "T";
@@ -15,7 +15,85 @@ const T: &str = "T";
 /// Returns an error if compiler-provided metadata violates registry
 /// invariants. Such an error indicates a compiler implementation defect.
 pub fn standard_bindings() -> Result<NativeBindings, super::BindingError> {
-    NativeBindings::new(vec![string_binding(), vec_binding()])
+    NativeBindings::new(vec![
+        json_error_binding(),
+        string_binding(),
+        var_binding(),
+        vec_binding(),
+    ])
+}
+
+pub(crate) const VAR_TYPE_PATH: &str = "rust::stainless_runtime::Var";
+const JSON_ERROR_TYPE_PATH: &str = "rust::stainless_runtime::JsonError";
+
+fn var_binding() -> NativeTypeBinding {
+    let var = TypeRef::native(VAR_TYPE_PATH, Vec::new());
+    let string = string_type();
+    let string_ref = TypeRef::shared_ref(string.clone());
+    let json_error = TypeRef::native(JSON_ERROR_TYPE_PATH, Vec::new());
+    let result_var = TypeRef::native("rust::Result", vec![var.clone(), json_error.clone()]);
+
+    NativeTypeBinding {
+        stainless_path: VAR_TYPE_PATH.to_owned(),
+        rust_path: "::stainless_runtime::Var".to_owned(),
+        type_parameters: vec![],
+        error_format: None,
+        callables: vec![
+            constructor(
+                "Var",
+                vec![],
+                var.clone(),
+                RustLowering::AssociatedFunction {
+                    rust_path: "::stainless_runtime::Var::null".to_owned(),
+                },
+            ),
+            CallableBinding {
+                source_name: "parse".to_owned(),
+                style: CallStyle::AssociatedFunction,
+                receiver: None,
+                parameters: vec![Parameter::adapted(
+                    "source",
+                    string_ref.clone(),
+                    ArgumentAdaptation::StringRefToStr,
+                )],
+                return_type: result_var.clone(),
+                return_borrow: None,
+                requirements: vec![],
+                lowering: RustLowering::AssociatedFunction {
+                    rust_path: "::stainless_runtime::Var::parse".to_owned(),
+                },
+            },
+            CallableBinding {
+                source_name: "parse_file".to_owned(),
+                style: CallStyle::AssociatedFunction,
+                receiver: None,
+                parameters: vec![Parameter::adapted(
+                    "path",
+                    string_ref,
+                    ArgumentAdaptation::StringRefToStr,
+                )],
+                return_type: result_var,
+                return_borrow: None,
+                requirements: vec![],
+                lowering: RustLowering::AssociatedFunction {
+                    rust_path: "::stainless_runtime::Var::parse_file".to_owned(),
+                },
+            },
+            method("is_null", Receiver::Shared, vec![], TypeRef::Bool),
+            method("clone", Receiver::Shared, vec![], var),
+            method("to_json", Receiver::Shared, vec![], string),
+        ],
+    }
+}
+
+fn json_error_binding() -> NativeTypeBinding {
+    NativeTypeBinding {
+        stainless_path: JSON_ERROR_TYPE_PATH.to_owned(),
+        rust_path: "::stainless_runtime::JsonError".to_owned(),
+        type_parameters: vec![],
+        error_format: Some(NativeErrorFormat::Display),
+        callables: vec![],
+    }
 }
 
 fn vec_binding() -> NativeTypeBinding {

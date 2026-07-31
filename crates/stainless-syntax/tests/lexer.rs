@@ -89,3 +89,16 @@ fn lexer_recognizes_the_lambda_mutable_keyword() {
             .any(|token| token.kind == SyntaxKind::MutableKw)
     );
 }
+
+#[test]
+fn lexer_reserves_json_null() {
+    let lexed = lex("var value = null;");
+
+    assert!(lexed.errors.is_empty(), "{:?}", lexed.errors);
+    assert!(
+        lexed
+            .tokens
+            .iter()
+            .any(|token| token.kind == SyntaxKind::NullKw)
+    );
+}

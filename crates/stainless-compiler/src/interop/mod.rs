@@ -4,6 +4,7 @@ mod builtin;
 mod manifest;
 mod model;
 
+pub(crate) use builtin::VAR_TYPE_PATH;
 pub use builtin::standard_bindings;
 pub use manifest::{
     BINDINGS_MANIFEST_FILENAME, ManifestError, load_bindings_manifest, load_package_bindings,

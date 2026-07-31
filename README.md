@@ -7,9 +7,11 @@ Stainless is a new C++-like language that transpiles to Rust.
 > and Rowan parser, typed CST views, compiler-owned AST lowering, structural
 > diagnostics, an initial name/type/call resolver, a typed Rust-shaped HIR, and
 > structured Rust emission for the supported function/control-flow,
-> data-only-struct, constructor, checked-exception, `Vec`/`String`, and first
-> external-wrapper subset. An initial move/borrow dataflow pass now validates
-> that subset; classes and interfaces have not started yet.
+> data-only-struct, constructor, checked-exception, `Vec`/`String`, native JSON,
+> and first external-wrapper subset. The workspace now includes the compact
+> `stainless-runtime` used by generated JSON code. An initial move/borrow
+> dataflow pass validates that subset; classes and interfaces have not started
+> yet.
 
 ## Hello World
 
@@ -136,6 +138,10 @@ implemented:
 - [`20_formatting_macros.stl`](docs/ref/20_formatting_macros.stl) — imported
   `eprintln!`, `format!`, `write!`, and `writeln!`, including checked
   `stainless::FormatError` failures from string writes.
+- [`21_json_support.stl`](docs/ref/21_json_support.stl) — compiler-native `var`
+  and `null`, JSON array/object literals, null-safe access, reference-counted
+  aggregate identity, parsing strings/files, serialization, scalar coercion,
+  and checked `stainless::JsonError` parse failures.
 
 `01_basics.stl`, `02_structs_and_data_inheritance.stl`,
 `11_vec_and_string.stl`, `13_range_for.stl`, and `14_constructors.stl` are
@@ -143,7 +149,9 @@ currently parsed, resolved, lowered to HIR, emitted as Rust, and compiled by
 `rustc` in the test suite, as is the focused
 `15_checked_exception_subset.stl` sample, the native-Result
 `16_native_result_unwrap.stl` sample, and the formatting-macro
-`20_formatting_macros.stl` sample. The external
+`20_formatting_macros.stl` sample. The JSON
+`21_json_support.stl` sample is compiled and executed through Cargo against
+the real `stainless-runtime` and `serde_json`. The external
 `17_external_regex_wrapper.stl` sample is compiled and executed through Cargo
 against the real `regex` crate. The external callback sample is compiled and
 executed against a local Rust fixture crate so its generic closure bounds are
@@ -171,6 +179,8 @@ constructs with direct Rust equivalents:
 - other safe Rust library types under their real names, imported through the
   reserved `rust` namespace, including `rust::Option<T>`, `rust::Result<T>`,
   `rust::Vec<T>`, and `rust::String`;
+- compiler-native `var`, `null`, and JSON literals backed by the compact
+  runtime, with checked parsing and reference-counted object/array identity;
 - direct use of safe Rust `core`, `alloc`, and `std` APIs plus generated,
   compile-checked wrappers for external Cargo dependencies, all reached through
   the reserved `rust` namespace;
@@ -1472,9 +1482,11 @@ Regex expression = Regex::new("^stainless$");
 
 This is not an implicit conversion used by overload resolution. It is a
 target-typed assignment rule applied only after the destination type and
-right-hand expression type are known. The inserted operation has checked effect
-`throws stainless::RustError`, exactly like an explicit `.unwrap()`, so the
-enclosing function must catch or declare it.
+right-hand expression type are known. The default inserted operation has
+checked effect `throws stainless::RustError`, exactly like an explicit
+`.unwrap()`, so the enclosing function must catch or declare it. A
+compiler-owned native subsystem may select a more precise checked exception:
+the JSON runtime's native error type maps to `stainless::JsonError`.
 
 The initial rule applies to explicitly typed variable and field initialization,
 aggregate field initialization, and assignment to an existing value. It does
@@ -1496,14 +1508,13 @@ value is consumed and dropped after the message is produced.
 The initial implementation proves `Display` for primitive error values and
 `rust::String`, and consumes declared `Display`/`Debug` capability from
 validated native binding metadata. The first such external proof is
-`rust::regex::Error: Display`; types without a proof receive the fixed
-fallback. Loading those declarations from the external binding manifest
-remains future work.
+`rust::regex::Error: Display`; the compiler-owned JSON error also proves
+`Display`. Types without a proof receive the fixed fallback.
 
 This compiler-generated match replaces Rust's panicking `Result::unwrap`,
-keeping panic unwinding outside the Stainless exception model. Crate entry
-points and thread entry functions initially require an empty exception set, so
-`stainless::RustError` must be caught before those boundaries.
+keeping panic unwinding outside the Stainless exception model. The standalone
+CLI entry shim catches an unhandled checked exception, prints it, and exits
+with failure; other generated Rust boundaries retain their declared result.
 
 After receiver type and method resolution, a `.unwrap()` call whose receiver is
 native `rust::Result<T, E>` becomes a dedicated `UnwrapRustResult` HIR
@@ -1877,6 +1888,82 @@ constructors, associated functions, and methods, including receiver mode,
 argument adaptations, generic substitutions, and retained trait obligations.
 The Rust emitter uses this metadata for direct standard-library calls.
 
+#### Native JSON and `var`
+
+`var` is a compiler-native JSON value type and needs no `use` declaration.
+It can contain only JSON `null`, a boolean, a JSON number, a string, an array,
+or an object. `null` is reserved language syntax. Arrays and objects use
+JavaScript-like literal syntax; object keys may be identifiers or string
+literals:
+
+```cpp
+var response = {
+    status: 200,
+    "content-type": "application/json",
+    values: [1, 2, null, {}],
+};
+```
+
+The `stainless-runtime` representation stores arrays and objects behind
+thread-safe Rust `Arc` handles. Copying, assigning, passing, or returning a
+`var` implicitly clones the handle, so aggregate copies are cheap and preserve
+identity. Scalar alternatives remain ordinary values. Equality compares
+scalars by value and arrays/objects by shared identity, matching JavaScript's
+object-reference behavior. The current surface is read-only: a binding may be
+reassigned to another `var`, but member/index mutation and collection mutation
+methods are not implemented yet. That keeps shared values race-free while the
+mutation API is designed.
+
+Dot access and array indexing return an owned `var` handle. A missing member,
+an out-of-bounds index, or access on the wrong JSON kind returns `null`:
+
+```cpp
+var name = response.user.name;
+var first = response.values[0];
+var absent = response.values[999];
+if (absent.is_null()) {
+    // handle absence
+}
+```
+
+JSON-compatible statically typed values convert implicitly when a destination
+is `var` or when they occur inside a JSON literal. Conversion in the other
+direction is explicit constructor syntax. `bool(value)`, every Stainless
+integer/floating type, and `String(value)` use JavaScript-compatible scalar
+coercion; integer coercion is extended deterministically to all Stainless
+integer widths. Non-finite floating values are represented as JSON `null`
+because JSON has no NaN or infinity.
+
+Parsing and serialization use the following initial API:
+
+```cpp
+use rust::String;
+
+var parse_body(const String& source) throws stainless::JsonError {
+    var value = var::parse(source);
+    return value;
+}
+
+var parse_path(const String& path) throws stainless::JsonError {
+    var value = var::parse_file(path);
+    return value;
+}
+
+String encode(const var& value) {
+    return value.to_json();
+}
+```
+
+`var::parse` and `var::parse_file` return native Rust results internally. The
+normal target-typed result adaptation converts their errors to the dedicated
+checked `stainless::JsonError`, preserving the error text in the inherited
+`message` field. Callers must catch or declare that exception. `to_json()` is
+infallible because `var` cannot contain a non-JSON value; it returns compact,
+deterministic JSON directly. `parse_file` opens the file and parses it through
+a buffered reader. The runtime uses `serde_json` only at the parse/serialize
+boundary; its own `Var` shape supplies Stainless's reference-counted aggregate
+semantics.
+
 Each Stainless compiler release supports one stable Rust minor release. The
 build helper compares `rustc -Vv` with the metadata version and rejects a
 different minor version with an actionable diagnostic; patch releases are
@@ -1889,7 +1976,7 @@ purpose-built set is `rust::println!`, `rust::eprintln!`, `rust::format!`,
 `rust::write!`, and `rust::writeln!`; importing one from `rust` permits its
 short spelling, including the required `!`. Format arguments must be string
 literals. Formatting values currently accept Stainless numeric, boolean,
-character, and `String` values, and Cargo validates the Rust format string.
+character, `String`, and `var` values, and Cargo validates the Rust format string.
 `format!` returns `String`. The initial `write!`/`writeln!` destination is a
 mutable `String`; both return `void` in Stainless and automatically convert a
 Rust `std::fmt::Error` into checked `stainless::FormatError`, so the exception
@@ -2187,8 +2274,9 @@ compiler intrinsic(IntrinsicId, including UnwrapRustResult)
 ```
 
 The compact support runtime is limited to genuine Stainless language features,
-such as checked-exception erasure and diagnostic/source-map support. It is not
-a general standard-library facade. The ownership types are a narrow
+currently the reference-counted JSON `var` representation and its
+parse/serialization boundary. Checked-exception erasure is still emitted
+inline. The runtime is not a general standard-library facade. The ownership types are a narrow
 compiler-defined exception and lower to ordinary safe Rust ownership and
 synchronization primitives. Operations whose rules the compiler must
 understand, such as explicit `move`, guarded `require`, nullable-owner
@@ -2371,7 +2459,8 @@ the accepted subset it now:
   boxed compiler-private error carrier, and typed catches to safe base
   projection without `unsafe`;
 - lowers native `Result` conversion to an inline non-panicking `match` that
-  constructs and propagates a checked `stainless::RustError`;
+  constructs and propagates a checked `stainless::RustError`, or the more
+  specific `stainless::JsonError` for native JSON parsing;
 - emits deterministic private wrappers for manifest-selected external
   associated functions and methods, with argument adaptations and generic
   callback trait bounds inside the Cargo-checked boundary;
@@ -2381,13 +2470,13 @@ the accepted subset it now:
 - emits deterministic Rust with `proc-macro2` and `quote`, validates the
   generated token tree by parsing it with `syn`, and formats it with
   `prettyplease`;
-- compiles the seven dependency-free supported reference files as Rust
-  libraries, compiles and executes the external `regex` reference through
-  Cargo, and executes behavior fixtures covering functions, borrows, loops,
+- compiles the eight dependency-free supported reference files as Rust
+  libraries, compiles and executes the JSON and external `regex` references
+  through Cargo, and executes behavior fixtures covering functions, borrows, loops,
   structs, memberwise copying, data inheritance, `Vec`, `String`, moves,
   checked exceptions, throwing constructors, native `Result` conversion,
   external-wrapper validation, all four initial Rust callback kinds, and
-  shared/mutable stored callable behavior.
+  shared/mutable stored callable behavior, and reference-counted JSON values.
 
 This is still not full semantic validation. Classes, interfaces, access
 control, ownership pointers, cross-file modules, ownership through fields and
@@ -2411,8 +2500,8 @@ The target packaging is a Cargo workspace with five publishable crates:
 - `stainless-syntax` owns tokens, the lossless CST, and typed syntax wrappers.
 - `stainless-compiler` owns AST/HIR lowering, name/type/ownership analysis,
   Rust metadata and binding handling, source maps, and Rust emission.
-- `stainless-runtime` contains only generated-code support such as erased
-  checked exceptions.
+- `stainless-runtime` contains only generated-code support that cannot lower
+  directly to the standard library, initially reference-counted JSON `Var`.
 - `stainless-build` provides the Cargo build-script API.
 - `stainlessc` is a thin CLI over `stainless-compiler` for diagnostics,
   fixtures, and standalone generation.
@@ -2423,9 +2512,10 @@ A procedural macro is not used because whole-file parsing, external manifests,
 generated modules, dependency shims, and source-mapped diagnostics fit a build
 step better.
 
-The repository currently contains `stainless-syntax`, `stainless-compiler`,
-`stainless-build`, and `stainlessc`. Generated checked-exception support is
-still emitted inline; a separate `stainless-runtime` crate remains deferred.
+The repository now contains all five crates. `stainless-runtime` initially owns
+the `Var`/native JSON representation and `JsonError` returned by its Rust API;
+generated checked-exception trait/object support remains inline until that ABI
+stabilizes.
 
 The `stainless-build` crate is an optional bridge for the separate case where
 hand-written Rust code embeds Stainless functions. Normal standalone Stainless
@@ -2433,6 +2523,10 @@ programs do not use it. Until the crates are published, an embedding package in
 this workspace uses a path build dependency:
 
 ```toml
+[dependencies]
+# Required when generated Stainless code uses `var`/native JSON.
+stainless-runtime = { path = "../../crates/stainless-runtime" }
+
 [build-dependencies]
 stainless-build = { path = "../../crates/stainless-build" }
 ```
@@ -2481,15 +2575,18 @@ stainlessc --run main.stl
 written to stdout. `--build` writes an executable to the required `-o` path.
 `--run` generates a private Rust entry point, compiles it in a temporary
 directory, runs it with inherited standard streams, and removes the temporary
-files. Diagnostics go to stderr and use byte spans until richer source
-rendering is added. The initial direct build/run path supports the built-in
-Rust bindings; external Cargo dependency orchestration remains deferred.
+files. Runtime-free programs still use `rustc` directly. Programs that use
+native JSON receive a hidden temporary Cargo manifest linking
+`stainless-runtime`; users still do not create `main.rs` or `build.rs`.
+Diagnostics go to stderr and use byte spans until richer source rendering is
+added. General external Cargo dependency orchestration remains deferred.
 
 ## Rust library survey
 
-Research snapshot: 2026-07-30. The first compiler slice pins Logos 0.16.1,
+Research snapshot: 2026-07-31. The first compiler slice pins Logos 0.16.1,
 Rowan 0.16.1, `proc-macro2` 1.0.107, `quote` 1.0.47, `syn` 2.0.119, and
-`prettyplease` 0.2.37 through the workspace lockfile.
+`prettyplease` 0.2.37 through the workspace lockfile. Native JSON additionally
+pins `serde_json` 1.0.151.
 
 | Area | Candidate | Assessment |
 | --- | --- | --- |
@@ -2500,6 +2597,8 @@ Rowan 0.16.1, `proc-macro2` 1.0.107, `quote` 1.0.47, `syn` 2.0.119, and
 | CST schema/code generation | [`ungrammar`](https://docs.rs/ungrammar/latest/ungrammar/) | **Optional later.** Useful for declaring CST shapes and generating typed wrappers. It explicitly does not generate a parser, so it is not needed for the first slice. |
 | Diagnostics | [`miette`](https://docs.rs/miette/latest/miette/) | **Recommended at the public API/CLI boundary.** It supports structured diagnostics, source spans, labels, error codes, rich terminal output, and a narratable renderer. Internal compiler diagnostics should remain our own data types. |
 | Rust emission | [`proc-macro2`](https://docs.rs/proc-macro2/latest/proc_macro2/), [`quote`](https://docs.rs/quote/latest/quote/), [`syn`](https://docs.rs/syn/latest/syn/), and [`prettyplease`](https://docs.rs/prettyplease/latest/prettyplease/) | **In use.** HIR is emitted as structured tokens, reparsed with `syn` as a validity boundary, and formatted with `prettyplease` without requiring an installed `rustfmt`. String construction is limited to compiler-controlled identifiers and paths rather than semantic source generation. |
+| JSON | [`serde_json`](https://docs.rs/serde_json/latest/serde_json/) | **In use.** Its well-tested parser, reader support, exact JSON `Value` boundary, Serde ecosystem compatibility, portability, and safe API fit the first runtime. `Var` converts at that boundary so Stainless can retain reference-counted array/object identity. |
+| JSON performance alternative | [`simd-json`](https://docs.rs/simd-json/latest/simd_json/) | **Defer.** It is a promising optional parser backend after benchmarks justify it, but its mutable-input and borrowed/owned parsing model add complexity that is unnecessary for the initial portable runtime. |
 | Incremental compilation | [`salsa`](https://docs.rs/salsa/latest/salsa/) | **Defer.** Potentially useful for an IDE or a mature multi-file compiler, but unnecessary complexity for the first end-to-end transpilation slice. |
 
 ### Alternatives not selected for the core compiler
@@ -2522,9 +2621,10 @@ The first milestone should prove the whole architecture with a deliberately
 tiny language rather than attempt broad C++ compatibility. Current progress is
 recorded inline so implemented syntax is not confused with planned work:
 
-1. **In progress:** `stainless-compiler` and `stainless-syntax` exist; add the
-   compact runtime, Cargo build integration, and CLI when the end-to-end slice
-   reaches those boundaries.
+1. **Implemented for the initial slice:** `stainless-compiler`,
+   `stainless-syntax`, `stainless-runtime`, `stainless-build`, and `stainlessc`
+   exist. The CLI supplies hidden Cargo integration when generated code needs
+   the JSON runtime.
 2. **Implemented:** tokenize identifiers, literals, comments, punctuation, and
    keywords with byte spans and lossless trivia.
 3. **Implemented for the listed subset:** parse namespaces, imports, function
@@ -2533,14 +2633,14 @@ recorded inline so implemented syntax is not confused with planned work:
    arithmetic, `return`, `throw`, `try`/`catch`, `if`/`else`, and classic/range
    `for` loops plus typed lambdas with explicit, initializer, and mutable
    captures and stored callable signatures into a Rowan CST with recoverable
-   error nodes.
+   error nodes, plus compiler-native JSON arrays and objects.
 4. **In progress:** typed CST views, AST lowering, structural validation, the
    initial single-file name/type/call resolver, move/borrow analysis, and
    resolved HIR construction are implemented for the function/control-flow and
    first struct subsets, including checked exceptions and throwing
    constructors plus shared `function` and move-only `function_mut` values.
    Classes, interfaces, and general ownership through fields remain.
-5. **In progress:** the initial `Vec` and `String` metadata is connected through
+5. **In progress:** the initial `Vec`, `String`, and JSON metadata is connected through
    resolution and code generation. The versioned package binding manifest is
    parsed and merged with compiler built-ins; deterministic wrappers for its
    `regex::Regex::new` and `Regex::is_match` entries and non-escaping callback
@@ -2548,7 +2648,8 @@ recorded inline so implemented syntax is not confused with planned work:
    the emitted `Fn`, `FnMut`, `FnOnce`, and function-pointer signatures. Next,
    validate the selected dependency and feature set through Cargo metadata.
 6. **In progress:** structured Rust emission, formatting, and representative
-   generated-file compile/behavior tests are implemented. Source-mapping rustc
+   generated-file compile/behavior tests are implemented, including a Cargo
+   execution test against the real JSON runtime. Source-mapping Rust/Cargo
    diagnostics back to Stainless remains.
 7. Compile every reference sample as it enters the supported milestone subset,
    and keep unsupported later-stage samples as explicit expected diagnostics

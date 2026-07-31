@@ -14,7 +14,15 @@ fn standard_registry_contains_builtin_types_in_path_order() {
         .map(|binding| binding.stainless_path.as_str())
         .collect::<Vec<_>>();
 
-    assert_eq!(paths, ["rust::String", "rust::Vec"]);
+    assert_eq!(
+        paths,
+        [
+            "rust::String",
+            "rust::Vec",
+            "rust::stainless_runtime::JsonError",
+            "rust::stainless_runtime::Var",
+        ]
+    );
 }
 
 #[test]
