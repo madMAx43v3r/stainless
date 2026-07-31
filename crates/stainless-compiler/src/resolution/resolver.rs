@@ -1726,11 +1726,13 @@ impl Resolver<'_> {
             ExpressionKind::Lambda {
                 captures,
                 parameters,
+                is_mutable,
                 body,
             } => (
                 self.resolve_lambda(
                     captures,
                     parameters,
+                    *is_mutable,
                     body,
                     expected,
                     expression.span,
@@ -1886,10 +1888,11 @@ impl Resolver<'_> {
         &mut self,
         captures: &[ast::LambdaCapture],
         parameters: &[ast::Parameter],
+        is_mutable: bool,
         body: &ast::Block,
         expected: Option<&TypeRef>,
         span: Span,
-        outer: &FunctionContext,
+        outer: &mut FunctionContext,
     ) -> ExpressionInfo {
         let Some(TypeRef::Callback(callback)) = expected else {
             self.push(
@@ -1928,31 +1931,31 @@ impl Resolver<'_> {
                 );
                 continue;
             }
-            let outer_variable = outer
-                .scopes
-                .iter()
-                .rev()
-                .find_map(|scope| scope.get(&capture.name))
-                .cloned();
-            let Some(outer_variable) = outer_variable else {
-                self.push(
-                    "RES087",
-                    format!("lambda capture `{}` is not a local binding", capture.name),
-                    capture.span,
-                );
-                continue;
-            };
-            if outer_variable.ty.is_reference() {
-                self.push(
-                    "RES088",
-                    "capturing a reference binding is deferred; capture its owner instead"
-                        .to_owned(),
-                    capture.span,
-                );
-                continue;
-            }
-            let (mode, inner_variable) = match &capture.kind {
+            let resolved = match &capture.kind {
                 LambdaCaptureKind::Copy => {
+                    let Some(outer_variable) = outer
+                        .scopes
+                        .iter()
+                        .rev()
+                        .find_map(|scope| scope.get(&capture.name))
+                        .cloned()
+                    else {
+                        self.push(
+                            "RES087",
+                            format!("lambda capture `{}` is not a local binding", capture.name),
+                            capture.span,
+                        );
+                        continue;
+                    };
+                    if outer_variable.ty.is_reference() {
+                        self.push(
+                            "RES088",
+                            "capturing a reference binding is deferred; capture its owner instead"
+                                .to_owned(),
+                            capture.span,
+                        );
+                        continue;
+                    }
                     if !is_copyable(&canonical(&outer_variable.ty)) {
                         self.push(
                             "RES089",
@@ -1963,17 +1966,42 @@ impl Resolver<'_> {
                             capture.span,
                         );
                     }
-                    (
+                    Some((
+                        outer_variable.ty.clone(),
                         LambdaCaptureMode::Copy,
                         Variable {
                             ty: outer_variable.ty.clone(),
-                            mutable: false,
+                            mutable: is_mutable,
                         },
-                    )
+                    ))
                 }
                 LambdaCaptureKind::Borrow => {
+                    let Some(outer_variable) = outer
+                        .scopes
+                        .iter()
+                        .rev()
+                        .find_map(|scope| scope.get(&capture.name))
+                        .cloned()
+                    else {
+                        self.push(
+                            "RES087",
+                            format!("lambda capture `{}` is not a local binding", capture.name),
+                            capture.span,
+                        );
+                        continue;
+                    };
+                    if outer_variable.ty.is_reference() {
+                        self.push(
+                            "RES088",
+                            "capturing a reference binding is deferred; capture its owner instead"
+                                .to_owned(),
+                            capture.span,
+                        );
+                        continue;
+                    }
                     let mutable = outer_variable.mutable;
-                    (
+                    Some((
+                        outer_variable.ty.clone(),
                         LambdaCaptureMode::Borrow { mutable },
                         Variable {
                             ty: if mutable {
@@ -1983,32 +2011,48 @@ impl Resolver<'_> {
                             },
                             mutable,
                         },
-                    )
+                    ))
                 }
                 LambdaCaptureKind::Initialize(initializer) => {
-                    if !is_move_of_name(initializer, &capture.name) {
+                    let actual = self.resolve_expression(initializer, None, outer);
+                    let captured_ty = canonical(&actual.ty);
+                    if actual.ty.is_reference() || actual.ty.contains_reference() {
                         self.push(
                             "RES090",
-                            format!(
-                                "lambda initializer capture must be `[{} = move({})]`",
-                                capture.name, capture.name
-                            ),
+                            "a lambda initializer capture must produce an owned value".to_owned(),
                             capture.span,
                         );
                     }
-                    (
-                        LambdaCaptureMode::Move,
+                    if captured_ty == TypeRef::Void {
+                        self.push(
+                            "RES090",
+                            "a lambda initializer capture cannot have type `void`".to_owned(),
+                            capture.span,
+                        );
+                    }
+                    self.validate_value_use(
+                        &captured_ty,
+                        &actual,
+                        initializer.span,
+                        "lambda capture initializer",
+                    );
+                    Some((
+                        captured_ty.clone(),
+                        LambdaCaptureMode::Initialize,
                         Variable {
-                            ty: outer_variable.ty.clone(),
-                            mutable: false,
+                            ty: captured_ty,
+                            mutable: is_mutable,
                         },
-                    )
+                    ))
                 }
+            };
+            let Some((captured_ty, mode, inner_variable)) = resolved else {
+                continue;
             };
             lambda_scope.insert(capture.name.clone(), inner_variable);
             resolved_captures.push(ResolvedLambdaCapture {
                 name: capture.name.clone(),
-                ty: outer_variable.ty,
+                ty: captured_ty,
                 mode,
             });
         }
@@ -4026,22 +4070,6 @@ fn is_named_value_expression(expression: &Expression) -> bool {
         ExpressionKind::Parenthesized(inner) => is_named_value_expression(inner),
         _ => false,
     }
-}
-
-fn is_move_of_name(expression: &Expression, name: &str) -> bool {
-    let ExpressionKind::Call { callee, arguments } = &expression.kind else {
-        return false;
-    };
-    let ExpressionKind::Name(callee) = &callee.kind else {
-        return false;
-    };
-    let [argument] = arguments.as_slice() else {
-        return false;
-    };
-    let ExpressionKind::Name(argument) = &argument.kind else {
-        return false;
-    };
-    callee.segments == ["move"] && argument.segments == [name]
 }
 
 fn native_container_arity(path: &str) -> Option<usize> {

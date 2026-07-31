@@ -165,7 +165,10 @@ fn parses_explicit_capture_lambdas_losslessly() {
     apply([](i32 item) { return item; });
     apply([value](i32 item) { return value + item; });
     apply([&total](i32 item) { total += item; });
-    apply([value = move(value)](i32 item) { return value + item; });
+    apply([count = value + 1](i32 item) mutable {
+        count += item;
+        return count;
+    });
 }
 ";
     let parsed = parse(source);
@@ -188,6 +191,13 @@ fn parses_explicit_capture_lambdas_losslessly() {
         1
     );
     assert!(lambda.body().is_some());
+    assert_eq!(
+        root.descendants()
+            .filter_map(stainless_syntax::ast::LambdaExpression::cast)
+            .filter(stainless_syntax::ast::LambdaExpression::is_mutable)
+            .count(),
+        1
+    );
 }
 
 #[test]

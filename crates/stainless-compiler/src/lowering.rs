@@ -460,6 +460,7 @@ fn lower_expression(expression: cst::Expression) -> Expression {
             ExpressionKind::Lambda {
                 captures,
                 parameters,
+                is_mutable: lambda.is_mutable(),
                 body: lower_block(&body),
             }
         }

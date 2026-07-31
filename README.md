@@ -171,12 +171,14 @@ The first compiler uses the following conservative grammar policy:
   class inheritance, so `class sealed` is redundant and rejected. `native` is
   not a declaration modifier.
 - Lambdas require an explicit capture list. `[value]` copies a copyable value,
-  `[value = move(value)]` consumes it, and `[&value]` creates a non-escaping
-  borrow. Default captures are rejected. The first implemented callback slice
-  accepts only an imported `escape = "call"` contract, so every callback
-  finishes before its native call returns. Escaping and thread callbacks need a
-  later ownership model; a borrowed capture will not satisfy their eventual
-  `'static` requirement.
+  `[name = expression]` creates a new owned capture using normal initialization
+  semantics, and `[&value]` creates a non-escaping borrow. A non-copy value in
+  an initializer therefore requires `move(value)`. C++-positioned `mutable`
+  permits the body to modify by-value captures. Default captures are rejected.
+  The first implemented callback slice accepts only an imported
+  `escape = "call"` contract, so every callback finishes before its native call
+  returns. Escaping and thread callbacks need a later ownership model; a
+  borrowed capture will not satisfy their eventual `'static` requirement.
 - User-defined destructors and `Drop` implementations are not accepted.
   Generated Rust automatically drops locals and fields using Rust scope and
   field-declaration order. Resource-owning native Rust fields retain their
@@ -1920,25 +1922,37 @@ processor.apply(4, [&total](i32 value) {
 });
 
 i32 factor = 3;
-processor.apply(2, [factor = move(factor)](i32 value) {
-    return factor * value;
+processor.apply(2, [multiplier = move(factor)](i32 value) {
+    return multiplier * value;
+});
+
+i32 initial = 0;
+processor.apply(2, [count = initial](i32 value) mutable {
+    count += value;
+    return count;
 });
 ```
 
 `[]` captures nothing, `[value]` performs a Stainless copy, `[&value]` borrows
-an ordinary local for the duration of the native call, and
-`[value = move(value)]` consumes the outer binding. Reference bindings cannot
-themselves be captured; capture the owner instead. A lambda cannot be stored,
-returned, or used without a native callback context, and an ordinary Rust
-callback cannot throw or return a reference. Callback kinds and escape policy
-are not overload discriminators: two native bindings otherwise having the same
-signature may not differ only in those contracts.
+an ordinary local for the duration of the native call, and `[name = expression]`
+evaluates `expression` once to initialize a new capture named `name`. Its type
+is inferred. Named copyable inputs are copied and remain valid; non-copy inputs
+must be explicitly moved, which invalidates their source. Temporaries are owned
+directly. A reference-producing initializer is rejected. Without `mutable`,
+by-value captures are const inside the lambda; reference captures retain the
+mutability of their referent. Reference bindings cannot themselves be captured;
+capture the owner instead. A lambda cannot be stored, returned, or used without
+a native callback context, and an ordinary Rust callback cannot throw or return
+a reference. Callback kinds and escape policy are not overload discriminators:
+two native bindings otherwise having the same signature may not differ only in
+those contracts.
 
 Generated wrappers use a deterministic generic type parameter and the declared
 Rust closure bound; `fn_ptr` uses a Rust function-pointer parameter directly.
 The generated lambda shadows each captured binding with an explicit
-clone/borrow/move and then emits a `move` closure. Rust therefore checks the
-claimed `Fn` capability and exact parameter/return types again when Cargo
+clone/borrow/lowered initializer and then emits a `move` closure. Mutable
+by-value captures become mutable Rust shadow bindings. Rust therefore checks
+the claimed `Fn` capability and exact parameter/return types again when Cargo
 compiles the wrapper.
 
 Unknown keys, duplicate Stainless signatures, paths outside the named Cargo
@@ -2140,7 +2154,8 @@ The current recursive-descent grammar handles:
 - names and paths, literals, parenthesized expressions, calls, member access,
   indexing, ordinary and explicitly base-qualified struct fields,
   prefix/postfix operators, assignment, precedence-aware binary expressions,
-  and typed lambdas with explicit capture lists.
+  and typed lambdas with explicit capture lists, arbitrary owned initializer
+  captures, and C++-positioned `mutable`.
 
 `stainless_compiler::lowering::lower` converts the typed CST into a
 compiler-owned AST with source spans and explicit recovery forms.
@@ -2196,8 +2211,8 @@ The initial `stainless_compiler::resolution` pass now provides:
   user-manifest-defined opaque external types, exercised with
   `rust::regex::Regex` and `rust::regex::Error`;
 - contextual native callbacks with exact signatures, non-throwing named
-  function targets, explicit lambda captures, and `Fn`/`FnMut`/`FnOnce`/`fn`
-  invocation contracts;
+  function targets, inferred initializer-capture types, mutable by-value
+  captures, and `Fn`/`FnMut`/`FnOnce`/`fn` invocation contracts;
 - `Vec<T>` range-element resolution for shared, mutable, copied, and explicitly
   consumed range loops.
 
@@ -2217,9 +2232,10 @@ resolution and before HIR construction. For the implemented subset it:
 - treats an explicit native `Result.unwrap()` and an inserted target-typed
   Result conversion as consuming operations and preserves their exceptional
   ownership paths;
-- applies explicit callback captures at the call boundary: copy captures read,
-  move captures invalidate the outer binding, and borrow captures create a
-  temporary loan lasting through the native call;
+- applies explicit callback captures at the call boundary: shorthand copies
+  read their source, arbitrary initializers follow normal expression
+  copy/move rules, and borrow captures create a temporary loan lasting through
+  the native call;
 - verifies that a direct reference return ultimately originates from the
   function's single reference parameter.
 
@@ -2384,8 +2400,8 @@ recorded inline so implemented syntax is not confused with planned work:
    definitions, data-only structs, fields, one data base, aggregates, typed
    local bindings, struct constructors and initializer lists, blocks, calls,
    arithmetic, `return`, `throw`, `try`/`catch`, `if`/`else`, and classic/range
-   `for` loops plus explicit-capture typed lambdas into a Rowan CST with
-   recoverable error nodes.
+   `for` loops plus typed lambdas with explicit, initializer, and mutable
+   captures into a Rowan CST with recoverable error nodes.
 4. **In progress:** typed CST views, AST lowering, structural validation, the
    initial single-file name/type/call resolver, move/borrow analysis, and
    resolved HIR construction are implemented for the function/control-flow and

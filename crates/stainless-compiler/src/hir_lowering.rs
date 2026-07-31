@@ -6,7 +6,7 @@ use crate::hir;
 use crate::interop::{ArgumentAdaptation, Receiver, RustLowering, TypeRef};
 use crate::resolution::{
     CallTarget, CallbackTarget, FunctionSymbol, Intrinsic, LambdaCaptureMode, NativeCall,
-    ResolvedCall, SemanticModel, StructSymbol, ValueCategory,
+    ResolvedCall, ResolvedLambdaCapture, SemanticModel, StructSymbol, ValueCategory,
 };
 
 pub(crate) fn lower(
@@ -1033,8 +1033,11 @@ impl Lowerer<'_> {
                 return None;
             }
             ExpressionKind::Lambda {
-                parameters, body, ..
-            } => self.lower_lambda(expression.span, parameters, body)?,
+                captures,
+                parameters,
+                is_mutable,
+                body,
+            } => self.lower_lambda(expression.span, captures, parameters, *is_mutable, body)?,
             ExpressionKind::Error => {
                 self.push(
                     "HIR003",
@@ -1059,7 +1062,9 @@ impl Lowerer<'_> {
     fn lower_lambda(
         &mut self,
         span: ast::Span,
+        syntax_captures: &[ast::LambdaCapture],
         syntax_parameters: &[ast::Parameter],
+        is_mutable: bool,
         body: &ast::Block,
     ) -> Option<hir::Expression> {
         let callback = self.semantics.callback(span)?;
@@ -1079,29 +1084,8 @@ impl Lowerer<'_> {
             );
             return None;
         };
-        let captures = captures
-            .iter()
-            .map(|capture| {
-                let outer = hir::Expression::Name(binding_name(&capture.name));
-                let initializer = match capture.mode {
-                    LambdaCaptureMode::Copy => hir::Expression::Clone {
-                        expression: Box::new(hir::Expression::Borrow {
-                            mutable: false,
-                            expression: Box::new(outer),
-                        }),
-                    },
-                    LambdaCaptureMode::Move => hir::Expression::Move(Box::new(outer)),
-                    LambdaCaptureMode::Borrow { mutable } => hir::Expression::Borrow {
-                        mutable,
-                        expression: Box::new(outer),
-                    },
-                };
-                hir::LambdaCapture {
-                    rust_name: binding_name(&capture.name),
-                    initializer,
-                }
-            })
-            .collect();
+        let lowered_captures =
+            self.lower_lambda_captures(captures, syntax_captures, is_mutable, span)?;
         if syntax_parameters.len() != callback_type.parameters.len() {
             self.push(
                 "HIR018",
@@ -1149,10 +1133,73 @@ impl Lowerer<'_> {
         self.loop_labels = previous_loops;
 
         Some(hir::Expression::Lambda {
-            captures,
+            captures: lowered_captures,
             parameters,
             body: lowered_body?,
         })
+    }
+
+    fn lower_lambda_captures(
+        &mut self,
+        captures: &[ResolvedLambdaCapture],
+        syntax_captures: &[ast::LambdaCapture],
+        is_mutable: bool,
+        span: ast::Span,
+    ) -> Option<Vec<hir::LambdaCapture>> {
+        if syntax_captures.len() != captures.len() {
+            self.push(
+                "HIR018",
+                "resolved callback captures do not match lambda syntax".to_owned(),
+                span,
+            );
+            return None;
+        }
+        let mut lowered_captures = Vec::with_capacity(captures.len());
+        for (capture, syntax) in captures.iter().zip(syntax_captures) {
+            if capture.name != syntax.name {
+                self.push(
+                    "HIR018",
+                    "resolved callback capture order does not match lambda syntax".to_owned(),
+                    syntax.span,
+                );
+                return None;
+            }
+            let initializer = match capture.mode {
+                LambdaCaptureMode::Initialize => {
+                    let ast::LambdaCaptureKind::Initialize(initializer) = &syntax.kind else {
+                        self.push(
+                            "HIR018",
+                            "resolved initializer capture has no syntax initializer".to_owned(),
+                            syntax.span,
+                        );
+                        return None;
+                    };
+                    self.lower_bound_expression(initializer, &capture.ty)?
+                }
+                LambdaCaptureMode::Copy => {
+                    let outer = hir::Expression::Name(binding_name(&capture.name));
+                    hir::Expression::Clone {
+                        expression: Box::new(hir::Expression::Borrow {
+                            mutable: false,
+                            expression: Box::new(outer),
+                        }),
+                    }
+                }
+                LambdaCaptureMode::Borrow { mutable } => {
+                    let outer = hir::Expression::Name(binding_name(&capture.name));
+                    hir::Expression::Borrow {
+                        mutable,
+                        expression: Box::new(outer),
+                    }
+                }
+            };
+            lowered_captures.push(hir::LambdaCapture {
+                rust_name: binding_name(&capture.name),
+                mutable: is_mutable && !matches!(capture.mode, LambdaCaptureMode::Borrow { .. }),
+                initializer,
+            });
+        }
+        Some(lowered_captures)
     }
 
     #[allow(clippy::too_many_lines)]

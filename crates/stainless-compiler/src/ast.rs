@@ -420,7 +420,7 @@ pub enum LambdaCaptureKind {
     Copy,
     /// `[&value]`.
     Borrow,
-    /// `[value = expression]`, initially restricted to `move(value)`.
+    /// `[value = expression]` with an inferred owned capture type.
     Initialize(Box<Expression>),
 }
 
@@ -490,6 +490,8 @@ pub enum ExpressionKind {
         captures: Vec<LambdaCapture>,
         /// Typed lambda parameters.
         parameters: Vec<Parameter>,
+        /// Whether by-value captures may be mutated by the body.
+        is_mutable: bool,
         /// Lambda body.
         body: Block,
     },

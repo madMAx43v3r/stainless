@@ -1094,6 +1094,11 @@ impl LambdaExpression {
     }
 
     #[must_use]
+    pub fn is_mutable(&self) -> bool {
+        token(self.syntax(), SyntaxKind::MutableKw).is_some()
+    }
+
+    #[must_use]
     pub fn body(&self) -> Option<Block> {
         child(self.syntax())
     }

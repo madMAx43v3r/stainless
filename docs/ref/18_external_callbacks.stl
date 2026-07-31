@@ -20,13 +20,19 @@ i32 external_callbacks() {
     });
 
     i32 bias = 2;
-    i32 second = processor.inspect(5, [bias](i32 value) {
-        return bias + value;
+    i32 second = processor.inspect(5, [adjusted_bias = bias + 0](i32 value) {
+        return adjusted_bias + value;
     });
 
     i32 factor = 3;
-    i32 third = processor.apply(2, [factor = move(factor)](i32 value) {
-        return factor * value;
+    i32 third = processor.apply(2, [multiplier = move(factor)](i32 value) {
+        return multiplier * value;
+    });
+
+    i32 initial = 1;
+    i32 stateful = processor.apply(3, [count = initial](i32 value) mutable {
+        count += value;
+        return count;
     });
 
     i32 fourth = processor.apply_fn_ptr(4, double_value);
@@ -36,7 +42,9 @@ i32 external_callbacks() {
         return value + offset;
     });
 
-    return first * 1000 + second * 100 + third * 10 + fourth + fifth;
+    // `initial` remains valid because `[count = initial]` copied it.
+    return first * 100000 + second * 10000 + third * 1000
+        + stateful * 100 + fourth * 10 + fifth + initial;
 }
 
 } // namespace samples

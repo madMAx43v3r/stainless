@@ -332,8 +332,8 @@ pub struct ResolvedLambdaCapture {
 pub enum LambdaCaptureMode {
     /// Clone a Stainless-copyable value into the lambda.
     Copy,
-    /// Move the value into the lambda and invalidate the outer binding.
-    Move,
+    /// Evaluate an arbitrary owned initializer using normal value semantics.
+    Initialize,
     /// Borrow the value for the duration of the native call.
     Borrow {
         /// Whether the outer binding permits mutable access.

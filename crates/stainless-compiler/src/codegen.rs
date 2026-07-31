@@ -740,8 +740,9 @@ impl Emitter {
                     .iter()
                     .map(|capture| {
                         let name = identifier(&capture.rust_name)?;
+                        let mutable = capture.mutable.then(|| quote!(mut));
                         let initializer = self.expression(&capture.initializer)?;
-                        Ok(quote!(let #name = #initializer;))
+                        Ok(quote!(let #mutable #name = #initializer;))
                     })
                     .collect::<Result<Vec<_>, String>>()?;
                 let parameters = parameters

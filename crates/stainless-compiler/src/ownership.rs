@@ -985,18 +985,29 @@ impl Analyzer<'_> {
         let crate::resolution::CallbackTarget::Lambda { captures } = &callback.target else {
             return;
         };
-        for capture in captures {
-            let Some(id) = self.state.lookup(&capture.name) else {
-                continue;
-            };
+        let ExpressionKind::Lambda {
+            captures: syntax_captures,
+            ..
+        } = &argument.kind
+        else {
+            return;
+        };
+        for (capture, syntax_capture) in captures.iter().zip(syntax_captures) {
             match capture.mode {
                 crate::resolution::LambdaCaptureMode::Copy => {
-                    self.check_usage(id, Usage::Read, argument.span);
+                    if let Some(id) = self.state.lookup(&capture.name) {
+                        self.check_usage(id, Usage::Read, argument.span);
+                    }
                 }
-                crate::resolution::LambdaCaptureMode::Move => {
-                    self.mark_moved(id, argument.span);
+                crate::resolution::LambdaCaptureMode::Initialize => {
+                    if let ast::LambdaCaptureKind::Initialize(initializer) = &syntax_capture.kind {
+                        self.expression(initializer, Usage::Read);
+                    }
                 }
                 crate::resolution::LambdaCaptureMode::Borrow { mutable } => {
+                    let Some(id) = self.state.lookup(&capture.name) else {
+                        continue;
+                    };
                     self.check_usage(
                         id,
                         if mutable {
@@ -1529,13 +1540,18 @@ impl UseCollector {
                 captures,
                 parameters,
                 body,
+                ..
             } => {
                 for capture in captures {
-                    if let Some(declaration) = self.lookup(&capture.name) {
-                        self.last_uses.insert(declaration, capture.span);
-                    }
-                    if let ast::LambdaCaptureKind::Initialize(initializer) = &capture.kind {
-                        self.expression(initializer);
+                    match &capture.kind {
+                        ast::LambdaCaptureKind::Copy | ast::LambdaCaptureKind::Borrow => {
+                            if let Some(declaration) = self.lookup(&capture.name) {
+                                self.last_uses.insert(declaration, capture.span);
+                            }
+                        }
+                        ast::LambdaCaptureKind::Initialize(initializer) => {
+                            self.expression(initializer);
+                        }
                     }
                 }
                 self.push_scope();

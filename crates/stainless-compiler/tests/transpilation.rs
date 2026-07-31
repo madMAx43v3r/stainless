@@ -895,7 +895,7 @@ fn cargo_validates_generated_non_escaping_callback_wrappers() {
 fn main() {{
     assert_eq!(
         __stainless_namespace_samples::{external_callbacks}(),
-        8481,
+        846526,
     );
 }}
 "

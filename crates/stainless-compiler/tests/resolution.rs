@@ -56,7 +56,7 @@ fn resolves_external_callback_fixture_with_its_manifest() {
         "{:?}",
         analysis.diagnostics
     );
-    assert_eq!(analysis.semantics.callbacks.len(), 5);
+    assert_eq!(analysis.semantics.callbacks.len(), 6);
 }
 
 #[test]
@@ -95,8 +95,15 @@ void invalid_callbacks(const i32& reference) {
     processor.inspect(1, [reference](i32 value) {
         return value;
     });
-    processor.inspect(1, [captured = captured](i32 value) {
-        return captured + value;
+    processor.inspect(1, [copy = reference](i32 value) {
+        return copy + value;
+    });
+    processor.inspect(1, [text = owned](i32 value) {
+        return value;
+    });
+    processor.apply(1, [count = captured](i32 value) {
+        count += value;
+        return count;
     });
     processor.inspect(1, [](i32 value) {
         return;
@@ -112,7 +119,9 @@ void invalid_callbacks(const i32& reference) {
         .map(|diagnostic| diagnostic.code)
         .collect::<Vec<_>>();
 
-    for expected in ["RES082", "RES085", "RES086", "RES088", "RES089", "RES090"] {
+    for expected in [
+        "RES013", "RES027", "RES082", "RES085", "RES086", "RES088", "RES089", "RES090",
+    ] {
         assert!(
             codes.contains(&expected),
             "missing {expected}: {:?}",
@@ -132,20 +141,21 @@ void invalid_callbacks(const i32& reference) {
 fn moved_callback_capture_invalidates_the_outer_binding() {
     let bindings = callback_bindings();
     let analysis = analyze_with_bindings(
-        r"use rust::callback_fixture::Processor;
+        r#"use rust::String;
+use rust::callback_fixture::Processor;
 
-i32 invalid_after_capture() {
+usize invalid_after_capture() {
     Processor processor = Processor::new(1);
-    i32 factor = 2;
+    String factor = "two";
     i32 output = processor.inspect(
         1,
-        [factor = move(factor)](i32 value) {
-            return factor * value;
+        [captured = move(factor)](i32 value) {
+            return value;
         }
     );
-    return output + factor;
+    return factor.len();
 }
-",
+"#,
         &bindings,
     );
 

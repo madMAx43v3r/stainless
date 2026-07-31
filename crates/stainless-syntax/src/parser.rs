@@ -679,6 +679,7 @@ impl Parser<'_> {
         self.start(SyntaxKind::LambdaExpression);
         self.parse_capture_list();
         self.parse_parameter_list();
+        self.eat(SyntaxKind::MutableKw);
         self.parse_block();
         self.finish();
     }

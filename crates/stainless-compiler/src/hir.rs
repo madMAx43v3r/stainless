@@ -54,6 +54,8 @@ pub struct NativeWrapperParameter {
 pub struct LambdaCapture {
     /// Generated Rust binding shadowed inside the closure construction block.
     pub rust_name: String,
+    /// Whether the closure body may mutate this by-value capture.
+    pub mutable: bool,
     /// Copy, move, or borrow initializer.
     pub initializer: Expression,
 }

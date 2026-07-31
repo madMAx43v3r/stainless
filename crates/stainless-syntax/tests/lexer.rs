@@ -76,3 +76,16 @@ fn lexer_recognizes_stainless_numeric_and_character_spellings() {
         ]
     );
 }
+
+#[test]
+fn lexer_recognizes_the_lambda_mutable_keyword() {
+    let lexed = lex("[count = initial]() mutable { count += 1; }");
+
+    assert!(lexed.errors.is_empty(), "{:?}", lexed.errors);
+    assert!(
+        lexed
+            .tokens
+            .iter()
+            .any(|token| token.kind == SyntaxKind::MutableKw)
+    );
+}

@@ -44,6 +44,7 @@ define_syntax_kinds! {
     TrueKw,
     FalseKw,
     MoveKw,
+    MutableKw,
     StructKw,
     ClassKw,
     InterfaceKw,
