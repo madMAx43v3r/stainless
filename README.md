@@ -52,6 +52,19 @@ cargo run -p stainlessc -- --check examples/hello-world/main.stl
 cargo run -p stainlessc -- examples/hello-world/main.stl -o hello.rs
 ```
 
+## Visual Studio Code
+
+The repository includes a code-free VS Code extension for `.stl` syntax
+highlighting and basic editor behavior in [`editors/vscode`](editors/vscode).
+Try it directly from the repository root:
+
+```sh
+code --new-window --extensionDevelopmentPath="$(pwd)/editors/vscode"
+```
+
+Packaging and installation instructions are in the
+[extension README](editors/vscode/README.md).
+
 ## Project charter
 
 Stainless should feel as close to modern C++ as practical while having a small,

@@ -1,0 +1,282 @@
+{
+  "name": "Stainless",
+  "scopeName": "source.stainless",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#reserved-identifiers" },
+    { "include": "#declarations" },
+    { "include": "#numbers" },
+    { "include": "#constants" },
+    { "include": "#primitive-types" },
+    { "include": "#library-types" },
+    { "include": "#keywords" },
+    { "include": "#macros" },
+    { "include": "#builtins" },
+    { "include": "#namespace-paths" },
+    { "include": "#function-calls" },
+    { "include": "#property-names" },
+    { "include": "#type-names" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.stainless",
+          "begin": "//",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.comment.stainless" }
+          },
+          "end": "$",
+          "patterns": [
+            { "include": "#comment-tags" }
+          ]
+        },
+        {
+          "name": "comment.block.stainless",
+          "begin": "/\\*",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.comment.begin.stainless" }
+          },
+          "end": "\\*/",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.comment.end.stainless" }
+          },
+          "patterns": [
+            { "include": "#comment-tags" }
+          ]
+        }
+      ]
+    },
+    "comment-tags": {
+      "patterns": [
+        {
+          "name": "keyword.other.documentation.stainless",
+          "match": "\\b(?:TODO|FIXME|NOTE|SAFETY|XXX)\\b"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.stainless",
+          "begin": "\"",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.stainless" }
+          },
+          "end": "\"|$",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.stainless" }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.stainless",
+              "match": "\\\\."
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.stainless",
+          "begin": "'",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.stainless" }
+          },
+          "end": "'|$",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.stainless" }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.stainless",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "reserved-identifiers": {
+      "patterns": [
+        {
+          "name": "invalid.illegal.reserved.stainless",
+          "match": "\\b__[A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(struct|class|interface)(\\s+)(?:(sealed)(\\s+))?([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.declaration.stainless" },
+            "3": { "name": "storage.modifier.stainless" },
+            "5": { "name": "entity.name.type.stainless" }
+          }
+        },
+        {
+          "match": "\\b(namespace|mod)(\\s+)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.declaration.stainless" },
+            "3": { "name": "entity.name.namespace.stainless" }
+          }
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.stainless",
+          "match": "(?<![A-Za-z0-9_])(?:[0-9][0-9_]*\\.[0-9][0-9_]*(?:[eE][+-]?[0-9][0-9_]*)?|[0-9][0-9_]*[eE][+-]?[0-9][0-9_]*)(?:f)?(?![A-Za-z0-9_])"
+        },
+        {
+          "name": "constant.numeric.hex.stainless",
+          "match": "(?<![A-Za-z0-9_])0[xX][0-9a-fA-F][0-9a-fA-F_]*(?:i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize)?(?![A-Za-z0-9_])"
+        },
+        {
+          "name": "constant.numeric.binary.stainless",
+          "match": "(?<![A-Za-z0-9_])0[bB][01][01_]*(?:i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize)?(?![A-Za-z0-9_])"
+        },
+        {
+          "name": "constant.numeric.octal.stainless",
+          "match": "(?<![A-Za-z0-9_])0[oO][0-7][0-7_]*(?:i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize)?(?![A-Za-z0-9_])"
+        },
+        {
+          "name": "constant.numeric.integer.stainless",
+          "match": "(?<![A-Za-z0-9_])[0-9][0-9_]*(?:i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize)?(?![A-Za-z0-9_])"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.stainless",
+          "match": "\\b(?:true|false|null)\\b"
+        }
+      ]
+    },
+    "primitive-types": {
+      "patterns": [
+        {
+          "name": "storage.type.primitive.stainless",
+          "match": "\\b(?:void|bool|char|i8|i16|i32|i64|i128|isize|u8|u16|u32|u64|u128|usize|f32|f64|auto|var|str)\\b"
+        }
+      ]
+    },
+    "library-types": {
+      "patterns": [
+        {
+          "name": "support.type.ownership.stainless",
+          "match": "\\b(?:unique_ptr|unique_nullptr|shared_ptr|shared_nullptr|weak_ptr|atomic_ptr|atomic_nullptr|optional|function|function_mut)\\b"
+        },
+        {
+          "name": "support.type.native.stainless",
+          "match": "\\b(?:String|Vec|Option|Result)\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.stainless",
+          "match": "\\b(?:return|if|else|for|while|break|continue|try|catch|throw)\\b"
+        },
+        {
+          "name": "keyword.control.exception.stainless",
+          "match": "\\bthrows\\b"
+        },
+        {
+          "name": "keyword.other.declaration.stainless",
+          "match": "\\b(?:namespace|use|mod|struct|class|interface)\\b"
+        },
+        {
+          "name": "storage.modifier.stainless",
+          "match": "\\b(?:const|mutable|public|private|sealed)\\b"
+        },
+        {
+          "name": "keyword.operator.word.stainless",
+          "match": "\\b(?:as|move)\\b"
+        }
+      ]
+    },
+    "macros": {
+      "patterns": [
+        {
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(!)",
+          "captures": {
+            "1": { "name": "support.function.macro.stainless" },
+            "2": { "name": "punctuation.definition.macro.stainless" }
+          }
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "name": "support.function.builtin.stainless",
+          "match": "\\b(?:require|make_unique|make_shared)(?=\\s*(?:<[^<>\\n]*>)?\\s*\\()"
+        }
+      ]
+    },
+    "namespace-paths": {
+      "patterns": [
+        {
+          "name": "support.type.namespace.stainless",
+          "match": "\\b(?:rust|stainless|crate)(?=\\s*::)"
+        },
+        {
+          "name": "entity.name.namespace.stainless",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*::)"
+        }
+      ]
+    },
+    "function-calls": {
+      "patterns": [
+        {
+          "name": "entity.name.function.call.stainless",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*(?:<[^<>\\n]*>)?\\s*\\()"
+        }
+      ]
+    },
+    "property-names": {
+      "patterns": [
+        {
+          "name": "variable.other.property.stainless",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*:)"
+        }
+      ]
+    },
+    "type-names": {
+      "patterns": [
+        {
+          "name": "entity.name.type.stainless",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.stainless",
+          "match": "::|<=|>=|==|!=|&&|\\|\\||\\+=|-=|\\*=|/=|%=|\\+\\+|--|[<>+\\-*/%!&|^~=]"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.stainless",
+          "match": "\\.\\.\\.|[.,;:]"
+        },
+        {
+          "name": "punctuation.section.group.begin.stainless",
+          "match": "[({\\[]"
+        },
+        {
+          "name": "punctuation.section.group.end.stainless",
+          "match": "[)}\\]]"
+        }
+      ]
+    }
+  }
+}

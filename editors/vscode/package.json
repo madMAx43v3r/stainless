@@ -1,0 +1,58 @@
+{
+  "name": "stainless-language",
+  "displayName": "Stainless Language Support",
+  "description": "Syntax highlighting and basic editing support for the Stainless programming language.",
+  "version": "0.1.0",
+  "publisher": "madmax43v3r",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "stainless",
+    "language",
+    "syntax",
+    "highlighting",
+    "rust",
+    "cpp"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/madMAx43v3r/stainless.git"
+  },
+  "homepage": "https://github.com/madMAx43v3r/stainless#readme",
+  "bugs": {
+    "url": "https://github.com/madMAx43v3r/stainless/issues"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    },
+    "virtualWorkspaces": true
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "stainless",
+        "aliases": [
+          "Stainless",
+          "stainless"
+        ],
+        "extensions": [
+          ".stl"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "stainless",
+        "scopeName": "source.stainless",
+        "path": "./syntaxes/stainless.tmLanguage.json"
+      }
+    ]
+  }
+}
