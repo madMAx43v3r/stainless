@@ -310,10 +310,12 @@ impl Emitter {
             &function.return_type,
             explicit_lifetime.then_some(&lifetime),
         )?;
-        let return_type = if function.throws {
-            quote!(::std::result::Result<#return_type, crate::__StainlessExceptionBox>)
+        let return_signature = if function.throws {
+            quote!(-> ::std::result::Result<#return_type, crate::__StainlessExceptionBox>)
+        } else if matches!(function.return_type, hir::Type::Unit) {
+            TokenStream::new()
         } else {
-            return_type
+            quote!(-> #return_type)
         };
         let body = self.block(&function.body)?;
         let generics = explicit_lifetime.then(|| quote!(<'__stainless_borrow>));
@@ -325,7 +327,7 @@ impl Emitter {
                 unused_parens,
                 unused_variables,
             )]
-            pub fn #name #generics (#(#parameters),*) -> #return_type #body
+            pub fn #name #generics (#(#parameters),*) #return_signature #body
         })
     }
 
@@ -615,6 +617,19 @@ impl Emitter {
                 Ok(quote!(#name))
             }
             hir::Expression::Literal { kind, text } => literal(*kind, text),
+            hir::Expression::Println { format, arguments } => {
+                let arguments = arguments
+                    .iter()
+                    .map(|argument| self.expression(argument))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if let Some(format) = format {
+                    let format = syn::parse_str::<syn::LitStr>(format)
+                        .map_err(|error| format!("invalid `println!` format literal: {error}"))?;
+                    Ok(quote!(::std::println!(#format #(, #arguments)*)))
+                } else {
+                    Ok(quote!(::std::println!()))
+                }
+            }
             hir::Expression::Parenthesized(expression) => {
                 let expression = self.expression(expression)?;
                 Ok(quote!((#expression)))

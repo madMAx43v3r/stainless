@@ -392,6 +392,20 @@ fn lower_expression(expression: cst::Expression) -> Expression {
                     .collect(),
             }
         }
+        cst::Expression::MacroCall(call) => {
+            let Some(callee) = call.callee() else {
+                return error_expression(expression_span);
+            };
+            ExpressionKind::MacroCall {
+                callee: path_from_tokens(callee.path_tokens()),
+                arguments: call
+                    .argument_list()
+                    .into_iter()
+                    .flat_map(|arguments| arguments.arguments().collect::<Vec<_>>())
+                    .map(lower_expression)
+                    .collect(),
+            }
+        }
         cst::Expression::Aggregate(aggregate) => {
             let Some(cst::Expression::Name(name)) = aggregate.ty() else {
                 return error_expression(expression_span);

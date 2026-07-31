@@ -1,5 +1,11 @@
 [workspace]
-members = ["crates/stainless-compiler", "crates/stainless-syntax"]
+members = [
+    "crates/stainless-build",
+    "crates/stainless-compiler",
+    "crates/stainless-syntax",
+    "crates/stainlessc",
+    "examples/hello-world",
+]
 resolver = "3"
 
 [workspace.package]

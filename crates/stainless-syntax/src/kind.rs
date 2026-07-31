@@ -138,6 +138,7 @@ define_syntax_kinds! {
     PostfixExpression,
     BinaryExpression,
     CallExpression,
+    MacroCallExpression,
     ArgumentList,
     AggregateExpression,
     InitializerList,

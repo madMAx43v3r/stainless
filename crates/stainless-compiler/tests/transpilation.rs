@@ -947,6 +947,41 @@ fn rustc_validates_stored_function_and_function_mut_behavior() {
 }
 
 #[test]
+fn generated_println_macro_executes_with_stainless_values() {
+    let source = r#"use rust::println;
+
+void say_hello(i32 value) {
+    println!("Hello, {}!", value);
+    rust::println!();
+}
+"#;
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:?}",
+        result.analysis.diagnostics
+    );
+    let function = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["say_hello"])
+        .expect("println sample symbol")
+        .mangled_name
+        .clone();
+    let mut rust = result.rust.expect("println should emit Rust");
+    write!(rust, "\nfn main() {{ {function}(7); }}\n").expect("writing to a String cannot fail");
+    let binary = compile_rust("println", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .expect("generated println binary should run");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "Hello, 7!\n\n");
+    remove_temporary_parent(&binary);
+}
+
+#[test]
 fn invalid_checked_exception_prevents_rust_emission() {
     let result = transpile(
         r"struct Failure {};

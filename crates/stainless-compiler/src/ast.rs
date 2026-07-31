@@ -472,6 +472,13 @@ pub enum ExpressionKind {
         /// Arguments in source order.
         arguments: Vec<Expression>,
     },
+    /// A compiler-supported Rust macro invocation retaining its `!` spelling.
+    MacroCall {
+        /// Qualified or imported macro name.
+        callee: Path,
+        /// Stainless expressions in the macro argument list.
+        arguments: Vec<Expression>,
+    },
     /// C++-style aggregate construction, such as `Point{1, 2}`.
     Aggregate {
         /// Constructed type path.

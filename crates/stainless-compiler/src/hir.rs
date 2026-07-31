@@ -362,6 +362,13 @@ pub enum Expression {
         /// Source spelling.
         text: String,
     },
+    /// A compiler-validated Rust `println!` invocation.
+    Println {
+        /// Format string source spelling, absent for a blank line.
+        format: Option<String>,
+        /// Formatting values after the format string.
+        arguments: Vec<Expression>,
+    },
     /// Explicit parentheses.
     Parenthesized(Box<Expression>),
     /// Borrow a value.

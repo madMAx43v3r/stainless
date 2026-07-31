@@ -996,6 +996,36 @@ impl Lowerer<'_> {
                 };
                 self.lower_resolved_call(call, Some(callee), arguments)?
             }
+            ExpressionKind::MacroCall { arguments, .. } => {
+                let format = match arguments.first() {
+                    Some(ast::Expression {
+                        kind:
+                            ExpressionKind::Literal(ast::Literal {
+                                kind: ast::LiteralKind::String,
+                                text,
+                            }),
+                        ..
+                    }) => Some(text.clone()),
+                    None => None,
+                    Some(_) => {
+                        self.push(
+                            "HIR020",
+                            "resolved `println!` has no literal format string".to_owned(),
+                            expression.span,
+                        );
+                        return None;
+                    }
+                };
+                let skip = usize::from(format.is_some());
+                hir::Expression::Println {
+                    format,
+                    arguments: arguments
+                        .iter()
+                        .skip(skip)
+                        .map(|argument| self.lower_expression(argument, ExpressionMode::Reference))
+                        .collect::<Option<Vec<_>>>()?,
+                }
+            }
             ExpressionKind::Aggregate { initializers, .. } => {
                 let Some(call) = self
                     .semantics

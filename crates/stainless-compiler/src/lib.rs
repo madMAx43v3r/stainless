@@ -17,6 +17,9 @@ pub mod semantics;
 
 pub use diagnostic::{Diagnostic, DiagnosticPhase};
 
+/// Rust major/minor release described by the compiler-provided native bindings.
+pub const SUPPORTED_RUST_MINOR: &str = "1.97";
+
 /// Parses, lowers, and performs the structural semantic checks currently
 /// implemented by the front end.
 #[must_use]

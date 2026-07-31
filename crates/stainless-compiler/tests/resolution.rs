@@ -109,6 +109,45 @@ i32 invoke(function<i32(const i32&)> callback, i32 value) {
 }
 
 #[test]
+fn println_macro_requires_an_import_literal_format_and_printable_values() {
+    let valid = analyze(
+        r#"use rust::println;
+
+void hello(i32 value) {
+    println!("value = {}", value);
+    rust::println!();
+}
+"#,
+    );
+    assert!(valid.diagnostics.is_empty(), "{:?}", valid.diagnostics);
+
+    let invalid = analyze(
+        r#"use rust::String;
+
+struct Value { i32 number; };
+
+void bad(String format, Value value) {
+    println!("not imported");
+    rust::println!(format, 1);
+    rust::println!("{}", value);
+}
+"#,
+    );
+    let codes = invalid
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+    for expected in ["RES097", "RES098", "RES099"] {
+        assert!(
+            codes.contains(&expected),
+            "missing {expected}: {:#?}",
+            invalid.diagnostics
+        );
+    }
+}
+
+#[test]
 fn resolves_external_reference_fixture_with_its_manifest() {
     let external = parse_bindings_manifest(include_str!(
         "../../../docs/ref/17_external_regex_wrapper.bindings.toml"

@@ -11,6 +11,46 @@ Stainless is a new C++-like language that transpiles to Rust.
 > external-wrapper subset. An initial move/borrow dataflow pass now validates
 > that subset; classes and interfaces have not started yet.
 
+## Hello World
+
+Run the checked-in starter project:
+
+```sh
+cargo run -p stainless-hello-world
+```
+
+Output:
+
+```text
+Hello, world!
+```
+
+Its Stainless source is intentionally small:
+
+```cpp
+use rust::println;
+
+namespace hello {
+
+void run() {
+    println!("Hello, world!");
+}
+
+}
+```
+
+See [`examples/hello-world`](examples/hello-world/) for the complete
+boilerplate. It uses `stainless-build` from Cargo's `build.rs`, includes the
+generated Rust from `OUT_DIR`, and exposes `hello::run` under one stable name
+for the Rust `main`.
+
+For standalone checking or Rust generation:
+
+```sh
+cargo run -p stainlessc -- --check examples/hello-world/src/hello.stl
+cargo run -p stainlessc -- examples/hello-world/src/hello.stl -o hello.rs
+```
+
 ## Project charter
 
 Stainless should feel as close to modern C++ as practical while having a small,
@@ -1833,16 +1873,14 @@ accepted and Cargo still performs final validation. The repository pins that
 minor in `rust-toolchain.toml`. Supporting multiple Rust minors in one compiler
 is deferred until the metadata generator and compatibility costs are known.
 
-Rust macros do not have ordinary callable signatures. The initial compiler
-recognizes the fixed set `rust::print!`, `rust::println!`, `rust::eprint!`,
-`rust::eprintln!`, `rust::format!`, `rust::vec!`, `rust::assert!`,
-`rust::assert_eq!`, and `rust::assert_ne!`. Importing one from `rust` permits
-its short spelling, including the required `!`. The parser validates each
-supported macro's Stainless argument grammar and codegen reconstructs the
-corresponding Rust invocation; arbitrary Rust token trees are not passed
-through. `panic!`, `todo!`, `unreachable!`, `dbg!`, `write!`, `writeln!`, and
-all external-crate macros are initially rejected. An external macro requires a
-purpose-built safe Rust function adapter.
+Rust macros do not have ordinary callable signatures. The implemented first
+slice recognizes `rust::println!`; `use rust::println;` permits its short
+spelling, including the required `!`. The first argument, when present, must be
+a string literal. Remaining arguments currently accept Stainless numeric,
+boolean, character, and `String` values, and Cargo validates the Rust format
+string. Arbitrary Rust token trees are not passed through. Other standard and
+external macros remain rejected until each receives purpose-built parsing and
+lowering rules.
 
 Cargo dependencies are declared in the surrounding Rust project's
 `Cargo.toml`, and native paths begin with `rust::<dependency>::...`; for
@@ -2369,34 +2407,35 @@ A procedural macro is not used because whole-file parsing, external manifests,
 generated modules, dependency shims, and source-mapped diagnostics fit a build
 step better.
 
-The repository currently contains `stainless-syntax` and
-`stainless-compiler`; the runtime, Cargo integration, and CLI crates will be
-added when an executable compiler slice needs their public boundaries.
+The repository currently contains `stainless-syntax`, `stainless-compiler`,
+`stainless-build`, and `stainlessc`. Generated checked-exception support is
+still emitted inline; a separate `stainless-runtime` crate remains deferred.
 
 An existing Rust package integrates Stainless explicitly:
 
-```toml
-[dependencies]
-stainless-runtime = "0.1"
+Until the crates are published, a package in this workspace uses a path build
+dependency:
 
+```toml
 [build-dependencies]
-stainless-build = "0.1"
+stainless-build = { path = "../../crates/stainless-build" }
 ```
 
 ```rust
 // build.rs
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    stainless_build::Builder::new()
-        .crate_root("src/lib.stl")
-        .bindings("stainless-bindings.toml")
+fn main() {
+    stainless_build::Builder::new("src/lib.stl")
+        .output_name("stainless.rs")
+        .export("app::run", "stainless_run")
         .compile()
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 ```
 
-The builder resolves paths relative to `CARGO_MANIFEST_DIR`, writes generated
-files and source maps only beneath Cargo's `OUT_DIR`, emits
-`cargo:rerun-if-changed` for every source and binding input, and produces one
-root include file. The Rust crate chooses where to expose the generated items:
+The builder resolves the source relative to `CARGO_MANIFEST_DIR`, writes the
+generated file beneath Cargo's `OUT_DIR`, emits `cargo:rerun-if-changed`, and
+can re-export an exact non-overloaded free function under a stable Rust name.
+The Rust crate includes the requested output at crate root:
 
 ```rust
 // src/lib.rs
@@ -2407,9 +2446,20 @@ Including at crate root preserves Stainless `crate::` paths and permits direct
 calls between generated and hand-written Rust modules. A duplicate Rust and
 Stainless item name is a normal compile error unless one side is placed in a
 module. Generated files are rebuildable artifacts and are never written into
-`src`. `stainless-build` and `stainless-runtime` must use the same major/minor
-language version as `stainless-compiler`; incompatible generated-runtime ABI
-versions are rejected.
+`src`. Multi-file compilation, binding-manifest selection through the builder,
+overload-signature export selectors, and runtime ABI versioning are deferred.
+
+The standalone CLI has the same compiler semantics:
+
+```sh
+stainlessc --check src/lib.stl
+stainlessc src/lib.stl -o generated.rs
+stainlessc src/lib.stl > generated.rs
+```
+
+`--check` validates without emitting Rust. Without `-o`, generated Rust is
+written to stdout. Diagnostics go to stderr and use byte spans until richer
+source rendering is added.
 
 ## Rust library survey
 

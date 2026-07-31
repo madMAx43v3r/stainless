@@ -204,6 +204,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "stainless-build"
+version = "0.1.0"
+dependencies = [
+ "stainless-compiler",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "stainless-compiler"
 version = "0.1.0"
 dependencies = [
@@ -218,11 +226,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "stainless-hello-world"
+version = "0.1.0"
+dependencies = [
+ "stainless-build",
+]
+
+[[package]]
 name = "stainless-syntax"
 version = "0.1.0"
 dependencies = [
  "logos",
  "rowan",
+]
+
+[[package]]
+name = "stainlessc"
+version = "0.1.0"
+dependencies = [
+ "stainless-compiler",
 ]
 
 [[package]]

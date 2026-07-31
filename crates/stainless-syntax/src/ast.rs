@@ -95,6 +95,7 @@ ast_node!(PrefixExpression, PrefixExpression);
 ast_node!(PostfixExpression, PostfixExpression);
 ast_node!(BinaryExpression, BinaryExpression);
 ast_node!(CallExpression, CallExpression);
+ast_node!(MacroCallExpression, MacroCallExpression);
 ast_node!(ArgumentList, ArgumentList);
 ast_node!(AggregateExpression, AggregateExpression);
 ast_node!(InitializerList, InitializerList);
@@ -335,6 +336,7 @@ pub enum Expression {
     Postfix(PostfixExpression),
     Binary(BinaryExpression),
     Call(CallExpression),
+    MacroCall(MacroCallExpression),
     Aggregate(AggregateExpression),
     Field(FieldExpression),
     Index(IndexExpression),
@@ -353,6 +355,7 @@ impl AstNode for Expression {
                 | SyntaxKind::PostfixExpression
                 | SyntaxKind::BinaryExpression
                 | SyntaxKind::CallExpression
+                | SyntaxKind::MacroCallExpression
                 | SyntaxKind::AggregateExpression
                 | SyntaxKind::FieldExpression
                 | SyntaxKind::IndexExpression
@@ -372,6 +375,9 @@ impl AstNode for Expression {
             SyntaxKind::PostfixExpression => PostfixExpression::cast(syntax).map(Self::Postfix),
             SyntaxKind::BinaryExpression => BinaryExpression::cast(syntax).map(Self::Binary),
             SyntaxKind::CallExpression => CallExpression::cast(syntax).map(Self::Call),
+            SyntaxKind::MacroCallExpression => {
+                MacroCallExpression::cast(syntax).map(Self::MacroCall)
+            }
             SyntaxKind::AggregateExpression => {
                 AggregateExpression::cast(syntax).map(Self::Aggregate)
             }
@@ -392,6 +398,7 @@ impl AstNode for Expression {
             Self::Postfix(node) => node.syntax(),
             Self::Binary(node) => node.syntax(),
             Self::Call(node) => node.syntax(),
+            Self::MacroCall(node) => node.syntax(),
             Self::Aggregate(node) => node.syntax(),
             Self::Field(node) => node.syntax(),
             Self::Index(node) => node.syntax(),
@@ -1041,6 +1048,18 @@ impl CallExpression {
     #[must_use]
     pub fn callee(&self) -> Option<Expression> {
         expression_children(self.syntax()).next()
+    }
+
+    #[must_use]
+    pub fn argument_list(&self) -> Option<ArgumentList> {
+        child(self.syntax())
+    }
+}
+
+impl MacroCallExpression {
+    #[must_use]
+    pub fn callee(&self) -> Option<NameExpression> {
+        child(self.syntax())
     }
 
     #[must_use]

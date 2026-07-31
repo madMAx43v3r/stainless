@@ -737,6 +737,12 @@ impl Analyzer<'_> {
                 None
             }
             ExpressionKind::Call { arguments, .. } => self.call(expression, arguments),
+            ExpressionKind::MacroCall { arguments, .. } => {
+                for argument in arguments {
+                    self.expression(argument, Usage::Read);
+                }
+                None
+            }
             ExpressionKind::Aggregate { initializers, .. } => {
                 for initializer in initializers {
                     self.expression(initializer, Usage::Read);
@@ -1552,6 +1558,11 @@ impl UseCollector {
             }
             ExpressionKind::Call { callee, arguments } => {
                 self.expression(callee);
+                for argument in arguments {
+                    self.expression(argument);
+                }
+            }
+            ExpressionKind::MacroCall { arguments, .. } => {
                 for argument in arguments {
                     self.expression(argument);
                 }

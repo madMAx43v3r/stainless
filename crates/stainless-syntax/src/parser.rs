@@ -745,6 +745,13 @@ impl Parser<'_> {
     fn parse_postfix(&mut self, checkpoint: rowan::Checkpoint) {
         loop {
             match self.current() {
+                Some(SyntaxKind::Bang) if self.nth(1) == Some(SyntaxKind::LParen) => {
+                    self.builder
+                        .start_node_at(checkpoint, SyntaxKind::MacroCallExpression.into());
+                    self.bump();
+                    self.parse_argument_list();
+                    self.finish();
+                }
                 Some(SyntaxKind::LParen) => {
                     self.builder
                         .start_node_at(checkpoint, SyntaxKind::CallExpression.into());

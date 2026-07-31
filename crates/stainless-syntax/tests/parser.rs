@@ -231,6 +231,25 @@ fn parses_stored_function_signatures_losslessly() {
 }
 
 #[test]
+fn parses_imported_and_qualified_println_macros_losslessly() {
+    let source = r#"use rust::println;
+
+void hello(i32 value) {
+    println!("Hello, {}!", value);
+    rust::println!();
+}
+"#;
+    let parsed = parse(source);
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(parsed.syntax().to_string(), source);
+    assert_eq!(
+        count_kind(&parsed.syntax(), SyntaxKind::MacroCallExpression),
+        2
+    );
+}
+
+#[test]
 fn parser_recovers_and_parses_the_following_function() {
     let source = r"i32 broken(i32 value) {
     i32 missing = ;

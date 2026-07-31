@@ -1711,6 +1711,11 @@ impl Resolver<'_> {
                     self.resolve_call(callee, arguments, expected, expression.span, context);
                 (info, call, None)
             }
+            ExpressionKind::MacroCall { callee, arguments } => (
+                self.resolve_macro_call(callee, arguments, expression.span, context),
+                None,
+                None,
+            ),
             ExpressionKind::Aggregate { ty, initializers } => {
                 let (info, call) =
                     self.resolve_struct_aggregate(ty, initializers, expression.span, context);
@@ -2497,6 +2502,70 @@ impl Resolver<'_> {
                 (error_info(), None)
             }
         }
+    }
+
+    fn resolve_macro_call(
+        &mut self,
+        callee: &ast::Path,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> ExpressionInfo {
+        let is_qualified = callee.segments == ["rust", "println"];
+        let is_imported = callee.segments == ["println"]
+            && self
+                .imports
+                .candidates(&context.namespace, "println")
+                .iter()
+                .any(|candidate| candidate == &["rust", "println"]);
+        if !is_qualified && !is_imported {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES097",
+                format!(
+                    "unsupported macro `{}!`; use `rust::println!` or import `rust::println`",
+                    callee.display()
+                ),
+                span,
+            );
+            return error_info();
+        }
+
+        let actual = arguments
+            .iter()
+            .map(|argument| self.resolve_expression(argument, None, context))
+            .collect::<Vec<_>>();
+        if let Some(format) = arguments.first()
+            && !matches!(
+                &format.kind,
+                ExpressionKind::Literal(ast::Literal {
+                    kind: LiteralKind::String,
+                    ..
+                })
+            )
+        {
+            self.push(
+                "RES098",
+                "the first `println!` argument must be a string literal".to_owned(),
+                format.span,
+            );
+        }
+        for (argument, info) in arguments.iter().skip(1).zip(actual.iter().skip(1)) {
+            let ty = canonical_ref(&info.ty);
+            if *ty != TypeRef::Error && !is_println_value(ty) {
+                self.push(
+                    "RES099",
+                    format!(
+                        "type `{}` is not supported as a `println!` formatting argument",
+                        display_type(ty)
+                    ),
+                    argument.span,
+                );
+            }
+        }
+        temporary(TypeRef::Void)
     }
 
     fn resolve_method_call(
@@ -4302,6 +4371,32 @@ fn is_numeric(ty: &TypeRef) -> bool {
     is_integer(ty) || matches!(ty, TypeRef::F32 | TypeRef::F64)
 }
 
+fn is_println_value(ty: &TypeRef) -> bool {
+    matches!(
+        ty,
+        TypeRef::Bool
+            | TypeRef::Char
+            | TypeRef::I8
+            | TypeRef::I16
+            | TypeRef::I32
+            | TypeRef::I64
+            | TypeRef::I128
+            | TypeRef::Isize
+            | TypeRef::U8
+            | TypeRef::U16
+            | TypeRef::U32
+            | TypeRef::U64
+            | TypeRef::U128
+            | TypeRef::Usize
+            | TypeRef::F32
+            | TypeRef::F64
+    ) || matches!(
+        ty,
+        TypeRef::Native { path, arguments }
+            if path == "rust::String" && arguments.is_empty()
+    )
+}
+
 fn is_copyable(ty: &TypeRef) -> bool {
     matches!(
         ty,
@@ -4593,6 +4688,9 @@ fn source_uses_exceptions(source: &SourceFile) -> bool {
             ExpressionKind::Call { callee, arguments } => {
                 expression_uses_exceptions(callee)
                     || arguments.iter().any(expression_uses_exceptions)
+            }
+            ExpressionKind::MacroCall { arguments, .. } => {
+                arguments.iter().any(expression_uses_exceptions)
             }
             ExpressionKind::Aggregate { initializers, .. } => {
                 initializers.iter().any(expression_uses_exceptions)
