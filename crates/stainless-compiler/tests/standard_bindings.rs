@@ -3,31 +3,27 @@ use std::collections::BTreeSet;
 use stainless_compiler::interop::{
     ArgumentAdaptation, BindingError, CallStyle, CallableBinding, NativeBindings,
     NativeErrorFormat, NativeTypeBinding, Receiver, RustLowering, TypeRef, WrapperTarget,
-    standard_bindings,
+    parse_bindings_manifest, standard_bindings,
 };
 
 #[test]
-fn standard_registry_contains_builtin_and_external_types_in_path_order() {
+fn standard_registry_contains_builtin_types_in_path_order() {
     let bindings = standard_bindings().unwrap();
     let paths = bindings
         .types()
-        .map(|binding| binding.stainless_path)
+        .map(|binding| binding.stainless_path.as_str())
         .collect::<Vec<_>>();
 
-    assert_eq!(
-        paths,
-        [
-            "rust::String",
-            "rust::Vec",
-            "rust::regex::Error",
-            "rust::regex::Regex",
-        ]
-    );
+    assert_eq!(paths, ["rust::String", "rust::Vec"]);
 }
 
 #[test]
 fn regex_uses_generated_wrappers_and_proven_error_formatting() {
-    let bindings = standard_bindings().unwrap();
+    let external = parse_bindings_manifest(include_str!(
+        "../../../docs/ref/17_external_regex_wrapper.bindings.toml"
+    ))
+    .unwrap();
+    let bindings = standard_bindings().unwrap().merge(external).unwrap();
     let regex = bindings.type_by_path("rust::regex::Regex").unwrap();
     let error = bindings.type_by_path("rust::regex::Error").unwrap();
     let string_ref = TypeRef::shared_ref(TypeRef::native("rust::String", vec![]));
@@ -40,13 +36,18 @@ fn regex_uses_generated_wrappers_and_proven_error_formatting() {
             std::slice::from_ref(&string_ref),
         )
         .unwrap();
+    let RustLowering::GeneratedWrapper {
+        wrapper_name,
+        target,
+    } = &new.lowering
+    else {
+        panic!("Regex::new should use a generated wrapper");
+    };
+    assert!(wrapper_name.starts_with("__stainless_wrapper_v1_"));
     assert_eq!(
-        new.lowering,
-        RustLowering::GeneratedWrapper {
-            wrapper_name: "__stainless_wrapper_regex_Regex_new",
-            target: WrapperTarget::Function {
-                rust_path: "::regex::Regex::new",
-            },
+        target,
+        &WrapperTarget::Function {
+            rust_path: "::regex::Regex::new".to_owned(),
         }
     );
     assert_eq!(
@@ -62,14 +63,39 @@ fn regex_uses_generated_wrappers_and_proven_error_formatting() {
         )
         .unwrap();
     assert_eq!(is_match.receiver, Some(Receiver::Shared));
+    let RustLowering::GeneratedWrapper {
+        wrapper_name,
+        target,
+    } = &is_match.lowering
+    else {
+        panic!("Regex::is_match should use a generated wrapper");
+    };
+    assert!(wrapper_name.starts_with("__stainless_wrapper_v1_"));
     assert_eq!(
-        is_match.lowering,
-        RustLowering::GeneratedWrapper {
-            wrapper_name: "__stainless_wrapper_regex_Regex_is_match",
-            target: WrapperTarget::Method {
-                rust_name: "is_match",
-            },
+        target,
+        &WrapperTarget::Method {
+            rust_name: "is_match".to_owned(),
         }
+    );
+}
+
+#[test]
+fn generated_wrapper_names_are_deterministic() {
+    let source = include_str!("../../../docs/ref/17_external_regex_wrapper.bindings.toml");
+    let first = parse_bindings_manifest(source).unwrap();
+    let second = parse_bindings_manifest(source).unwrap();
+
+    assert_eq!(
+        first
+            .types()
+            .flat_map(|binding| &binding.callables)
+            .map(|callable| &callable.lowering)
+            .collect::<Vec<_>>(),
+        second
+            .types()
+            .flat_map(|binding| &binding.callables)
+            .map(|callable| &callable.lowering)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -84,24 +110,24 @@ fn invalid_generated_wrapper_metadata_is_rejected_before_lowering() {
         return_borrow: None,
         requirements: vec![],
         lowering: RustLowering::GeneratedWrapper {
-            wrapper_name: "__duplicate_wrapper",
+            wrapper_name: "__duplicate_wrapper".to_owned(),
             target,
         },
     };
     let binding = |callables| NativeTypeBinding {
-        stainless_path: "rust::fixture::Type",
-        rust_path: "::fixture::Type",
+        stainless_path: "rust::fixture::Type".to_owned(),
+        rust_path: "::fixture::Type".to_owned(),
         type_parameters: vec![],
         error_format: None,
         callables,
     };
 
     let mismatched = wrapper(
-        "bad",
+        "bad".to_owned(),
         CallStyle::Method,
         Some(Receiver::Shared),
         WrapperTarget::Function {
-            rust_path: "::fixture::Type::bad",
+            rust_path: "::fixture::Type::bad".to_owned(),
         },
     );
     assert!(matches!(
@@ -110,24 +136,26 @@ fn invalid_generated_wrapper_metadata_is_rejected_before_lowering() {
     ));
 
     let first = wrapper(
-        "first",
+        "first".to_owned(),
         CallStyle::AssociatedFunction,
         None,
         WrapperTarget::Function {
-            rust_path: "::fixture::Type::first",
+            rust_path: "::fixture::Type::first".to_owned(),
         },
     );
     let second = wrapper(
-        "second",
+        "second".to_owned(),
         CallStyle::AssociatedFunction,
         None,
         WrapperTarget::Function {
-            rust_path: "::fixture::Type::second",
+            rust_path: "::fixture::Type::second".to_owned(),
         },
     );
     assert_eq!(
         NativeBindings::new(vec![binding(vec![first, second])]),
-        Err(BindingError::DuplicateWrapperName("__duplicate_wrapper"))
+        Err(BindingError::DuplicateWrapperName(
+            "__duplicate_wrapper".to_owned()
+        ))
     );
 }
 
@@ -135,7 +163,7 @@ fn invalid_generated_wrapper_metadata_is_rejected_before_lowering() {
 fn vec_has_default_and_capacity_construction() {
     let bindings = standard_bindings().unwrap();
     let vec_binding = bindings.type_by_path("rust::Vec").unwrap();
-    let vec_t = TypeRef::native("rust::Vec", vec![TypeRef::Parameter("T")]);
+    let vec_t = TypeRef::native("rust::Vec", vec![TypeRef::Parameter("T".to_owned())]);
 
     let constructor = vec_binding
         .find_callable(CallStyle::Constructor, "Vec", &[])
@@ -144,7 +172,7 @@ fn vec_has_default_and_capacity_construction() {
     assert_eq!(
         constructor.lowering,
         RustLowering::AssociatedFunction {
-            rust_path: "::std::vec::Vec::new"
+            rust_path: "::std::vec::Vec::new".to_owned()
         }
     );
 
@@ -162,7 +190,7 @@ fn vec_has_default_and_capacity_construction() {
 fn vec_common_methods_have_expected_receiver_effects() {
     let bindings = standard_bindings().unwrap();
     let vec_binding = bindings.type_by_path("rust::Vec").unwrap();
-    let t = TypeRef::Parameter("T");
+    let t = TypeRef::Parameter("T".to_owned());
 
     let len = vec_binding
         .find_callable(CallStyle::Method, "len", &[])
@@ -187,7 +215,7 @@ fn vec_common_methods_have_expected_receiver_effects() {
 fn vec_trait_requirements_are_preserved() {
     let bindings = standard_bindings().unwrap();
     let vec_binding = bindings.type_by_path("rust::Vec").unwrap();
-    let t = TypeRef::Parameter("T");
+    let t = TypeRef::Parameter("T".to_owned());
 
     let contains = vec_binding
         .find_callable(CallStyle::Method, "contains", &[TypeRef::shared_ref(t)])
@@ -286,7 +314,7 @@ fn native_call_matching_uses_exact_stainless_types() {
     let bindings = standard_bindings().unwrap();
     let vec_binding = bindings.type_by_path("rust::Vec").unwrap();
     let string_binding = bindings.type_by_path("rust::String").unwrap();
-    let t = TypeRef::Parameter("T");
+    let t = TypeRef::Parameter("T".to_owned());
 
     assert!(
         vec_binding
@@ -327,13 +355,11 @@ fn unsupported_borrowing_and_iterator_methods_are_not_exposed() {
     }
 }
 
-fn method_names(
-    binding: &stainless_compiler::interop::NativeTypeBinding,
-) -> BTreeSet<&'static str> {
+fn method_names(binding: &stainless_compiler::interop::NativeTypeBinding) -> BTreeSet<&str> {
     binding
         .callables
         .iter()
         .filter(|callable| callable.style == CallStyle::Method)
-        .map(|callable| callable.source_name)
+        .map(|callable| callable.source_name.as_str())
         .collect()
 }

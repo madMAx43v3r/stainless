@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use stainless_compiler::{DiagnosticPhase, transpile};
+use stainless_compiler::interop::{load_bindings_manifest, standard_bindings};
+use stainless_compiler::{DiagnosticPhase, transpile, transpile_with_bindings};
 
 static TEMPORARY_INDEX: AtomicUsize = AtomicUsize::new(0);
 
@@ -785,7 +786,13 @@ fn main() {{
 #[test]
 fn cargo_validates_generated_external_regex_wrappers() {
     let source = include_str!("../../../docs/ref/17_external_regex_wrapper.stl");
-    let result = transpile(source);
+    let external = load_bindings_manifest(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/ref/17_external_regex_wrapper.bindings.toml"),
+    )
+    .unwrap();
+    let bindings = standard_bindings().unwrap().merge(external).unwrap();
+    let result = transpile_with_bindings(source, &bindings);
     assert!(
         result.analysis.diagnostics.is_empty(),
         "{:?}",
@@ -850,6 +857,58 @@ fn main() {{
         String::from_utf8_lossy(&invalid.stderr).contains("compile"),
         "Cargo diagnostic should name the stale item:\n{}",
         String::from_utf8_lossy(&invalid.stderr)
+    );
+    fs::remove_dir_all(&directory)
+        .unwrap_or_else(|error| panic!("failed to remove {}: {error}", directory.display()));
+}
+
+#[test]
+fn cargo_validates_generated_non_escaping_callback_wrappers() {
+    let source = include_str!("../../../docs/ref/18_external_callbacks.stl");
+    let external = load_bindings_manifest(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/ref/18_external_callbacks.bindings.toml"),
+    )
+    .unwrap();
+    let bindings = standard_bindings().unwrap().merge(external).unwrap();
+    let result = transpile_with_bindings(source, &bindings);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:?}",
+        result.analysis.diagnostics
+    );
+    let external_callbacks = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "external_callbacks"])
+        .expect("external_callbacks symbol")
+        .mangled_name
+        .clone();
+    let hir = result.hir.as_ref().expect("callback wrapper HIR");
+    assert_eq!(hir.native_wrappers.len(), 5);
+    let mut rust = result.rust.expect("callback wrappers should emit Rust");
+    write!(
+        rust,
+        r"
+fn main() {{
+    assert_eq!(
+        __stainless_namespace_samples::{external_callbacks}(),
+        8481,
+    );
+}}
+"
+    )
+    .expect("writing to a String cannot fail");
+
+    let directory = write_callback_cargo_fixture("callbacks", &rust);
+    let output = run_fixture_cargo(&directory, "run");
+    assert!(
+        output.status.success(),
+        "Cargo rejected generated callback wrappers:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
     fs::remove_dir_all(&directory)
         .unwrap_or_else(|error| panic!("failed to remove {}: {error}", directory.display()));
@@ -949,6 +1008,91 @@ warnings = "deny"
     .expect("external fixture manifest should be writable");
     fs::write(source_directory.join("main.rs"), source)
         .expect("external fixture source should be writable");
+    directory
+}
+
+fn write_callback_cargo_fixture(name: &str, source: &str) -> PathBuf {
+    let directory = temporary_directory(name);
+    let source_directory = directory.join("src");
+    let dependency_directory = directory.join("callback-fixture");
+    let dependency_source_directory = dependency_directory.join("src");
+    fs::create_dir_all(&source_directory)
+        .unwrap_or_else(|error| panic!("failed to create {}: {error}", source_directory.display()));
+    fs::create_dir_all(&dependency_source_directory).unwrap_or_else(|error| {
+        panic!(
+            "failed to create {}: {error}",
+            dependency_source_directory.display()
+        )
+    });
+    fs::write(
+        directory.join("Cargo.toml"),
+        r#"[package]
+name = "stainless-generated-callback-fixture"
+version = "0.0.0"
+edition = "2024"
+
+[dependencies]
+callback_fixture = { path = "callback-fixture" }
+
+[lints.rust]
+warnings = "deny"
+"#,
+    )
+    .expect("callback fixture manifest should be writable");
+    fs::write(
+        dependency_directory.join("Cargo.toml"),
+        r#"[package]
+name = "callback_fixture"
+version = "0.0.0"
+edition = "2024"
+
+[lints.rust]
+warnings = "deny"
+"#,
+    )
+    .expect("callback dependency manifest should be writable");
+    fs::write(
+        dependency_source_directory.join("lib.rs"),
+        r"pub struct Processor {
+    value: i32,
+}
+
+impl Processor {
+    pub fn new(value: i32) -> Self {
+        Self { value }
+    }
+
+    pub fn apply<F>(&mut self, input: i32, mut callback: F) -> i32
+    where
+        F: FnMut(i32) -> i32,
+    {
+        self.value = callback(input);
+        self.value
+    }
+
+    pub fn inspect<F>(&self, input: i32, callback: F) -> i32
+    where
+        F: Fn(i32) -> i32,
+    {
+        self.value + callback(input)
+    }
+
+    pub fn consume<F>(self, callback: F) -> i32
+    where
+        F: FnOnce(i32) -> i32,
+    {
+        callback(self.value)
+    }
+
+    pub fn apply_fn_ptr(&self, input: i32, callback: fn(i32) -> i32) -> i32 {
+        self.value + callback(input)
+    }
+}
+",
+    )
+    .expect("callback dependency source should be writable");
+    fs::write(source_directory.join("main.rs"), source)
+        .expect("callback fixture source should be writable");
     directory
 }
 

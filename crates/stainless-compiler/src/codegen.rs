@@ -73,9 +73,11 @@ impl Emitter {
     }
 
     fn native_wrapper(wrapper: &hir::NativeWrapper) -> Result<TokenStream, String> {
-        let name = identifier(wrapper.rust_name)?;
+        let name = identifier(&wrapper.rust_name)?;
         let mut parameter_declarations = Vec::new();
         let mut call_arguments = Vec::new();
+        let mut generic_parameters = Vec::new();
+        let mut callback_bounds = Vec::new();
         let receiver_name = identifier("__stainless_receiver")?;
         if let Some(receiver) = &wrapper.receiver {
             let receiver_type = type_tokens(&receiver.ty, None)?;
@@ -88,7 +90,48 @@ impl Emitter {
         }
         for (index, parameter) in wrapper.parameters.iter().enumerate() {
             let parameter_name = identifier(&format!("__stainless_argument_{index}"))?;
-            let parameter_type = type_tokens(&parameter.ty, None)?;
+            let parameter_type = match &parameter.ty {
+                hir::Type::Callback {
+                    kind,
+                    parameters,
+                    return_type,
+                } => {
+                    if parameter.adaptation != crate::interop::ArgumentAdaptation::Identity {
+                        return Err(format!(
+                            "generated callback parameter {index} has an unsupported adaptation"
+                        ));
+                    }
+                    let callback_parameters = parameters
+                        .iter()
+                        .map(|parameter| type_tokens(parameter, None))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let callback_return = type_tokens(return_type, None)?;
+                    if *kind == crate::interop::CallbackKind::FunctionPointer {
+                        quote!(fn(#(#callback_parameters),*) -> #callback_return)
+                    } else {
+                        let generic = identifier(&format!("__StainlessCallback{index}"))?;
+                        let trait_path = match kind {
+                            crate::interop::CallbackKind::Fn => quote!(::core::ops::Fn),
+                            crate::interop::CallbackKind::FnMut => {
+                                quote!(::core::ops::FnMut)
+                            }
+                            crate::interop::CallbackKind::FnOnce => {
+                                quote!(::core::ops::FnOnce)
+                            }
+                            crate::interop::CallbackKind::FunctionPointer => {
+                                unreachable!("function pointers do not use callback generics")
+                            }
+                        };
+                        generic_parameters.push(quote!(#generic));
+                        callback_bounds.push(quote!(
+                            #generic: #trait_path(#(#callback_parameters),*)
+                                -> #callback_return
+                        ));
+                        quote!(#generic)
+                    }
+                }
+                _ => type_tokens(&parameter.ty, None)?,
+            };
             parameter_declarations.push(quote!(#parameter_name: #parameter_type));
             let argument = match parameter.adaptation {
                 crate::interop::ArgumentAdaptation::Identity => quote!(#parameter_name),
@@ -115,11 +158,16 @@ impl Emitter {
                 quote!((#receiver_name).#method(#(#call_arguments),*))
             }
         };
+        let generics = (!generic_parameters.is_empty()).then(|| quote!(<#(#generic_parameters),*>));
+        let where_clause =
+            (!callback_bounds.is_empty()).then(|| quote!(where #(#callback_bounds),*));
         Ok(quote! {
             #[allow(non_snake_case)]
-            pub(crate) fn #name(
+            pub(crate) fn #name #generics (
                 #(#parameter_declarations),*
-            ) -> #return_type {
+            ) -> #return_type
+            #where_clause
+            {
                 #call
             }
         })
@@ -346,7 +394,7 @@ impl Emitter {
                 body,
             } => self.classic_for(
                 label,
-                initializer.as_ref(),
+                initializer.as_deref(),
                 condition.as_ref(),
                 update.as_ref(),
                 body,
@@ -683,6 +731,38 @@ impl Emitter {
                     .collect::<Result<Vec<_>, String>>()?;
                 Ok(quote!(#ty { #(#fields),* }))
             }
+            hir::Expression::Lambda {
+                captures,
+                parameters,
+                body,
+            } => {
+                let captures = captures
+                    .iter()
+                    .map(|capture| {
+                        let name = identifier(&capture.rust_name)?;
+                        let initializer = self.expression(&capture.initializer)?;
+                        Ok(quote!(let #name = #initializer;))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                let parameters = parameters
+                    .iter()
+                    .map(|parameter| parameter_tokens(parameter, None))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let body = self.block(body)?;
+                Ok(quote!({
+                    #(#captures)*
+                    move |#(#parameters),*| #body
+                }))
+            }
+            hir::Expression::FunctionItem { modules, function } => {
+                let target = if modules.is_empty() {
+                    format!("crate::{function}")
+                } else {
+                    format!("crate::{}::{function}", modules.join("::"))
+                };
+                let target = path(&target)?;
+                Ok(quote!(#target))
+            }
             hir::Expression::FunctionCall { .. }
             | hir::Expression::AssociatedCall { .. }
             | hir::Expression::WrapperCall { .. }
@@ -843,6 +923,9 @@ fn type_tokens(ty: &hir::Type, lifetime: Option<&syn::Lifetime>) -> Result<Token
             } else {
                 Ok(quote!(#path < #(#arguments),* >))
             }
+        }
+        hir::Type::Callback { .. } => {
+            Err("callback type escaped its generated-wrapper parameter boundary".to_owned())
         }
         hir::Type::User { rust_path } => {
             let path = path(rust_path)?;

@@ -160,6 +160,52 @@ fn pratt_parser_preserves_operator_precedence() {
 }
 
 #[test]
+fn parses_explicit_capture_lambdas_losslessly() {
+    let source = r"void callbacks(i32 value, i32& total) {
+    apply([](i32 item) { return item; });
+    apply([value](i32 item) { return value + item; });
+    apply([&total](i32 item) { total += item; });
+    apply([value = move(value)](i32 item) { return value + item; });
+}
+";
+    let parsed = parse(source);
+    let root = parsed.syntax();
+    let lambda = root
+        .descendants()
+        .find_map(stainless_syntax::ast::LambdaExpression::cast)
+        .expect("lambda expression");
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(root.to_string(), source);
+    assert_eq!(count_kind(&root, SyntaxKind::LambdaExpression), 4);
+    assert_eq!(count_kind(&root, SyntaxKind::LambdaCapture), 3);
+    assert_eq!(
+        lambda
+            .parameter_list()
+            .expect("lambda parameters")
+            .parameters()
+            .count(),
+        1
+    );
+    assert!(lambda.body().is_some());
+}
+
+#[test]
+fn rejects_borrowed_lambda_capture_initializers() {
+    let source = "void invalid(i32 value) { apply([&value = move(value)]() {}); }";
+    let parsed = parse(source);
+
+    assert_eq!(parsed.syntax().to_string(), source);
+    assert!(
+        parsed.errors().iter().any(|error| error
+            .message
+            .contains("borrowed lambda capture cannot have an initializer")),
+        "{:?}",
+        parsed.errors()
+    );
+}
+
+#[test]
 fn parser_recovers_and_parses_the_following_function() {
     let source = r"i32 broken(i32 value) {
     i32 missing = ;

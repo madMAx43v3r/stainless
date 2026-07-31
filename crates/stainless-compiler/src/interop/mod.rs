@@ -1,11 +1,16 @@
 //! Native Rust API metadata used by Stainless name and type resolution.
 
 mod builtin;
+mod manifest;
 mod model;
 
 pub use builtin::standard_bindings;
+pub use manifest::{
+    BINDINGS_MANIFEST_FILENAME, ManifestError, load_bindings_manifest, load_package_bindings,
+    parse_bindings_manifest,
+};
 pub use model::{
-    ArgumentAdaptation, BindingError, CallStyle, CallableBinding, NativeBindings,
-    NativeErrorFormat, NativeTypeBinding, Parameter, Receiver, ReturnBorrow, ReturnBorrowError,
-    RustLowering, TraitRequirement, TypeRef, WrapperTarget,
+    ArgumentAdaptation, BindingError, CallStyle, CallableBinding, CallbackEscape, CallbackKind,
+    CallbackType, NativeBindings, NativeErrorFormat, NativeTypeBinding, Parameter, Receiver,
+    ReturnBorrow, ReturnBorrowError, RustLowering, TraitRequirement, TypeRef, WrapperTarget,
 };

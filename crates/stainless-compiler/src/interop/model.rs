@@ -42,14 +42,16 @@ pub enum TypeRef {
     /// Stainless `f64`.
     F64,
     /// A generic type parameter declared by the native type.
-    Parameter(&'static str),
+    Parameter(String),
     /// A native Rust type under the reserved Stainless `rust::` namespace.
     Native {
         /// Canonical Stainless path, such as `rust::Vec`.
-        path: &'static str,
+        path: String,
         /// Explicit generic arguments.
         arguments: Vec<TypeRef>,
     },
+    /// A contextual callback accepted by a selected native Rust callable.
+    Callback(Box<CallbackType>),
     /// A Stainless data-only struct.
     Struct {
         /// Fully qualified Stainless path.
@@ -67,8 +69,11 @@ pub enum TypeRef {
 impl TypeRef {
     /// Creates a native type with explicit type arguments.
     #[must_use]
-    pub fn native(path: &'static str, arguments: Vec<Self>) -> Self {
-        Self::Native { path, arguments }
+    pub fn native(path: impl Into<String>, arguments: Vec<Self>) -> Self {
+        Self::Native {
+            path: path.into(),
+            arguments,
+        }
     }
 
     /// Creates an immutable parameter reference.
@@ -89,6 +94,22 @@ impl TypeRef {
         }
     }
 
+    /// Creates a non-storable callback type.
+    #[must_use]
+    pub fn callback(
+        kind: CallbackKind,
+        escape: CallbackEscape,
+        parameters: Vec<Self>,
+        return_type: Self,
+    ) -> Self {
+        Self::Callback(Box::new(CallbackType {
+            kind,
+            escape,
+            parameters,
+            return_type: Box::new(return_type),
+        }))
+    }
+
     /// Returns whether this type contains a reference at its outermost level.
     #[must_use]
     pub const fn is_reference(&self) -> bool {
@@ -104,6 +125,49 @@ impl TypeRef {
             _ => false,
         }
     }
+
+    /// Returns whether this is a contextual callback type.
+    #[must_use]
+    pub const fn is_callback(&self) -> bool {
+        matches!(self, Self::Callback(_))
+    }
+}
+
+/// Rust callback invocation capability required by a native binding.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum CallbackKind {
+    /// Repeatable immutable invocation through Rust `Fn`.
+    Fn,
+    /// Repeatable mutable invocation through Rust `FnMut`.
+    FnMut,
+    /// A single invocation through Rust `FnOnce`.
+    FnOnce,
+    /// A captureless Rust function pointer.
+    FunctionPointer,
+}
+
+/// How long a native API may retain a callback.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum CallbackEscape {
+    /// The callback is not retained after the native call returns.
+    Call,
+    /// The callback may be retained with a Rust `'static` bound.
+    Static,
+    /// The callback may be retained and sent to another thread.
+    Thread,
+}
+
+/// Exact signature and ownership contract for one contextual callback.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CallbackType {
+    /// Required Rust invocation trait or function-pointer representation.
+    pub kind: CallbackKind,
+    /// Callback retention policy.
+    pub escape: CallbackEscape,
+    /// Exact Stainless-visible callback parameters.
+    pub parameters: Vec<TypeRef>,
+    /// Exact value-semantic callback return type.
+    pub return_type: Box<TypeRef>,
 }
 
 /// How a callable is written in Stainless source.
@@ -151,7 +215,7 @@ pub enum ArgumentAdaptation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Parameter {
     /// Diagnostic/source name.
-    pub name: &'static str,
+    pub name: String,
     /// Stainless-visible type.
     pub ty: TypeRef,
     /// Rust-boundary conversion applied after call resolution.
@@ -161,9 +225,9 @@ pub struct Parameter {
 impl Parameter {
     /// Creates an identity-lowered parameter.
     #[must_use]
-    pub fn new(name: &'static str, ty: TypeRef) -> Self {
+    pub fn new(name: impl Into<String>, ty: TypeRef) -> Self {
         Self {
-            name,
+            name: name.into(),
             ty,
             adaptation: ArgumentAdaptation::Identity,
         }
@@ -171,9 +235,9 @@ impl Parameter {
 
     /// Creates a parameter with an explicit Rust-boundary adaptation.
     #[must_use]
-    pub fn adapted(name: &'static str, ty: TypeRef, adaptation: ArgumentAdaptation) -> Self {
+    pub fn adapted(name: impl Into<String>, ty: TypeRef, adaptation: ArgumentAdaptation) -> Self {
         Self {
-            name,
+            name: name.into(),
             ty,
             adaptation,
         }
@@ -184,24 +248,24 @@ impl Parameter {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraitRequirement {
     /// Generic parameter constrained by the call.
-    pub parameter: &'static str,
+    pub parameter: String,
     /// Fully qualified Rust trait path checked again by rustc.
-    pub rust_trait: &'static str,
+    pub rust_trait: String,
 }
 
 /// Code-generation strategy for a resolved callable.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RustLowering {
     /// Call a fully qualified Rust associated function.
-    AssociatedFunction { rust_path: &'static str },
+    AssociatedFunction { rust_path: String },
     /// Invoke a Rust method on the lowered receiver.
-    Method { rust_name: &'static str },
+    Method { rust_name: String },
     /// Clone a constructor argument without exposing Rust `From` details.
     CloneArgument { index: usize },
     /// Call through a generated, compile-checked Rust wrapper.
     GeneratedWrapper {
         /// Deterministic private wrapper function name.
-        wrapper_name: &'static str,
+        wrapper_name: String,
         /// Real Rust item invoked by the wrapper.
         target: WrapperTarget,
     },
@@ -211,9 +275,9 @@ pub enum RustLowering {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WrapperTarget {
     /// Fully qualified free or associated function.
-    Function { rust_path: &'static str },
+    Function { rust_path: String },
     /// Inherent method invoked on the wrapper's receiver parameter.
-    Method { rust_name: &'static str },
+    Method { rust_name: String },
 }
 
 /// Formatting capability asserted for a native Rust error type.
@@ -229,7 +293,7 @@ pub enum NativeErrorFormat {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallableBinding {
     /// Stainless source name. Constructors use their type's short name.
-    pub source_name: &'static str,
+    pub source_name: String,
     /// Source call form.
     pub style: CallStyle,
     /// Method receiver, absent for constructors and associated functions.
@@ -254,15 +318,15 @@ impl CallableBinding {
     }
 }
 
-/// All built-in call metadata for one native Rust type.
+/// All exposed call metadata for one native Rust type.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeTypeBinding {
     /// Canonical source path below the reserved `rust::` namespace.
-    pub stainless_path: &'static str,
+    pub stainless_path: String,
     /// Canonical generated Rust type path.
-    pub rust_path: &'static str,
+    pub rust_path: String,
     /// Generic type parameters in declaration order.
-    pub type_parameters: Vec<&'static str>,
+    pub type_parameters: Vec<String>,
     /// Proven formatting for use by checked native `Result` conversion.
     pub error_format: Option<NativeErrorFormat>,
     /// Constructors, associated functions, and methods.
@@ -286,7 +350,7 @@ impl NativeTypeBinding {
     }
 }
 
-/// Registry of compiler-provided native Rust type bindings.
+/// Validated registry of compiler-provided and package-provided Rust bindings.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct NativeBindings {
     types: Vec<NativeTypeBinding>,
@@ -300,7 +364,7 @@ impl NativeBindings {
     /// Returns a [`BindingError`] when a type or callable violates the
     /// invariants required for deterministic Stainless resolution.
     pub fn new(mut types: Vec<NativeTypeBinding>) -> Result<Self, BindingError> {
-        types.sort_by_key(|binding| binding.stainless_path);
+        types.sort_by(|left, right| left.stainless_path.cmp(&right.stainless_path));
         let bindings = Self { types };
         bindings.validate()?;
         Ok(bindings)
@@ -316,9 +380,22 @@ impl NativeBindings {
     #[must_use]
     pub fn type_by_path(&self, path: &str) -> Option<&NativeTypeBinding> {
         self.types
-            .binary_search_by_key(&path, |binding| binding.stainless_path)
+            .binary_search_by_key(&path, |binding| binding.stainless_path.as_str())
             .ok()
             .map(|index| &self.types[index])
+    }
+
+    /// Combines two validated registries and revalidates cross-registry
+    /// uniqueness constraints.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`BindingError`] when the registries contain conflicting
+    /// native types, call signatures, or generated wrapper names.
+    pub fn merge(self, other: Self) -> Result<Self, BindingError> {
+        let mut types = self.types;
+        types.extend(other.types);
+        Self::new(types)
     }
 
     fn validate(&self) -> Result<(), BindingError> {
@@ -327,24 +404,27 @@ impl NativeBindings {
 
         for native_type in &self.types {
             if !native_type.stainless_path.starts_with("rust::") {
-                return Err(BindingError::InvalidNativePath(native_type.stainless_path));
+                return Err(BindingError::InvalidNativePath(
+                    native_type.stainless_path.clone(),
+                ));
             }
-            if !paths.insert(native_type.stainless_path) {
+            if !paths.insert(native_type.stainless_path.as_str()) {
                 return Err(BindingError::DuplicateNativeType(
-                    native_type.stainless_path,
+                    native_type.stainless_path.clone(),
                 ));
             }
 
             let mut signatures = BTreeSet::new();
+            let mut callback_resolution_signatures = BTreeSet::new();
             for callable in &native_type.callables {
-                validate_return_borrow(native_type.stainless_path, callable)?;
+                validate_return_borrow(&native_type.stainless_path, callable)?;
                 if let RustLowering::GeneratedWrapper {
                     wrapper_name,
                     target,
                 } = &callable.lowering
                 {
-                    if !wrapper_names.insert(*wrapper_name) {
-                        return Err(BindingError::DuplicateWrapperName(wrapper_name));
+                    if !wrapper_names.insert(wrapper_name.as_str()) {
+                        return Err(BindingError::DuplicateWrapperName(wrapper_name.clone()));
                     }
                     let target_matches = matches!(
                         (callable.style, target),
@@ -355,35 +435,49 @@ impl NativeBindings {
                     );
                     if !target_matches {
                         return Err(BindingError::WrapperTargetMismatch {
-                            type_path: native_type.stainless_path,
-                            callable: callable.source_name,
+                            type_path: native_type.stainless_path.clone(),
+                            callable: callable.source_name.clone(),
                         });
                     }
                 }
 
                 let signature = (
                     callable.style as u8,
-                    callable.source_name,
+                    callable.source_name.as_str(),
                     callable.parameter_types().cloned().collect::<Vec<_>>(),
                 );
                 if !signatures.insert(signature) {
                     return Err(BindingError::DuplicateCallable {
-                        type_path: native_type.stainless_path,
-                        callable: callable.source_name,
+                        type_path: native_type.stainless_path.clone(),
+                        callable: callable.source_name.clone(),
+                    });
+                }
+                let callback_resolution_signature = (
+                    callable.style as u8,
+                    callable.source_name.as_str(),
+                    callable
+                        .parameter_types()
+                        .map(callback_resolution_type)
+                        .collect::<Vec<_>>(),
+                );
+                if !callback_resolution_signatures.insert(callback_resolution_signature) {
+                    return Err(BindingError::ConflictingCallbackCallable {
+                        type_path: native_type.stainless_path.clone(),
+                        callable: callable.source_name.clone(),
                     });
                 }
 
                 match (callable.style, callable.receiver) {
                     (CallStyle::Method, None) => {
                         return Err(BindingError::MissingReceiver {
-                            type_path: native_type.stainless_path,
-                            callable: callable.source_name,
+                            type_path: native_type.stainless_path.clone(),
+                            callable: callable.source_name.clone(),
                         });
                     }
                     (CallStyle::Constructor | CallStyle::AssociatedFunction, Some(_)) => {
                         return Err(BindingError::UnexpectedReceiver {
-                            type_path: native_type.stainless_path,
-                            callable: callable.source_name,
+                            type_path: native_type.stainless_path.clone(),
+                            callable: callable.source_name.clone(),
                         });
                     }
                     _ => {}
@@ -395,10 +489,31 @@ impl NativeBindings {
     }
 }
 
-fn validate_return_borrow(
-    type_path: &'static str,
-    callable: &CallableBinding,
-) -> Result<(), BindingError> {
+fn callback_resolution_type(ty: &TypeRef) -> TypeRef {
+    match ty {
+        TypeRef::Callback(callback) => TypeRef::callback(
+            CallbackKind::Fn,
+            CallbackEscape::Call,
+            callback
+                .parameters
+                .iter()
+                .map(callback_resolution_type)
+                .collect(),
+            callback_resolution_type(&callback.return_type),
+        ),
+        TypeRef::Native { path, arguments } => TypeRef::native(
+            path,
+            arguments.iter().map(callback_resolution_type).collect(),
+        ),
+        TypeRef::Reference { mutable, target } => TypeRef::Reference {
+            mutable: *mutable,
+            target: Box::new(callback_resolution_type(target)),
+        },
+        _ => ty.clone(),
+    }
+}
+
+fn validate_return_borrow(type_path: &str, callable: &CallableBinding) -> Result<(), BindingError> {
     let Some(return_mutable) = direct_reference_mutability(type_path, callable)? else {
         return if callable.return_borrow.is_some() {
             invalid_return_borrow(type_path, callable, ReturnBorrowError::UnexpectedProvenance)
@@ -430,7 +545,7 @@ fn validate_return_borrow(
 }
 
 fn direct_reference_mutability(
-    type_path: &'static str,
+    type_path: &str,
     callable: &CallableBinding,
 ) -> Result<Option<bool>, BindingError> {
     let mutability = match &callable.return_type {
@@ -455,7 +570,7 @@ fn direct_reference_mutability(
 }
 
 fn validate_receiver_return_borrow(
-    type_path: &'static str,
+    type_path: &str,
     callable: &CallableBinding,
     return_mutable: bool,
 ) -> Result<(), BindingError> {
@@ -480,7 +595,7 @@ fn validate_receiver_return_borrow(
 }
 
 fn validate_parameter_return_borrow(
-    type_path: &'static str,
+    type_path: &str,
     callable: &CallableBinding,
     index: usize,
     return_mutable: bool,
@@ -528,13 +643,13 @@ fn validate_parameter_return_borrow(
 }
 
 fn invalid_return_borrow<T>(
-    type_path: &'static str,
+    type_path: &str,
     callable: &CallableBinding,
     reason: ReturnBorrowError,
 ) -> Result<T, BindingError> {
     Err(BindingError::InvalidReturnBorrow {
-        type_path,
-        callable: callable.source_name,
+        type_path: type_path.to_owned(),
+        callable: callable.source_name.clone(),
         reason,
     })
 }
@@ -568,49 +683,56 @@ pub enum ReturnBorrowError {
     ParameterIsNotReference,
 }
 
-/// Invalid compiler-provided native metadata.
+/// Invalid native binding metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BindingError {
     /// Native type path did not enter through `rust::`.
-    InvalidNativePath(&'static str),
+    InvalidNativePath(String),
     /// Two type bindings used the same canonical source path.
-    DuplicateNativeType(&'static str),
+    DuplicateNativeType(String),
     /// Two callable bindings had the same exact Stainless signature.
     DuplicateCallable {
         /// Containing type.
-        type_path: &'static str,
+        type_path: String,
         /// Duplicated source name.
-        callable: &'static str,
+        callable: String,
+    },
+    /// Callback overloads differed only in Rust invocation capability.
+    ConflictingCallbackCallable {
+        /// Containing type.
+        type_path: String,
+        /// Ambiguous source name.
+        callable: String,
     },
     /// A method omitted its receiver metadata.
     MissingReceiver {
         /// Containing type.
-        type_path: &'static str,
+        type_path: String,
         /// Invalid method.
-        callable: &'static str,
+        callable: String,
     },
     /// A non-method declared receiver metadata.
     UnexpectedReceiver {
         /// Containing type.
-        type_path: &'static str,
+        type_path: String,
         /// Invalid callable.
-        callable: &'static str,
+        callable: String,
     },
     /// Two generated wrappers would use the same Rust function name.
-    DuplicateWrapperName(&'static str),
+    DuplicateWrapperName(String),
     /// Generated wrapper target form disagreed with the source call style.
     WrapperTargetMismatch {
         /// Containing native type.
-        type_path: &'static str,
+        type_path: String,
         /// Invalid callable.
-        callable: &'static str,
+        callable: String,
     },
     /// A callable has invalid or unsupported returned-reference metadata.
     InvalidReturnBorrow {
         /// Containing type.
-        type_path: &'static str,
+        type_path: String,
         /// Invalid callable.
-        callable: &'static str,
+        callable: String,
         /// Violated returned-borrow rule.
         reason: ReturnBorrowError,
     },
@@ -634,6 +756,13 @@ impl fmt::Display for BindingError {
             } => write!(
                 formatter,
                 "duplicate callable `{callable}` on native type `{type_path}`"
+            ),
+            Self::ConflictingCallbackCallable {
+                type_path,
+                callable,
+            } => write!(
+                formatter,
+                "native callable `{type_path}::{callable}` cannot be overloaded only by callback kind or escape policy"
             ),
             Self::MissingReceiver {
                 type_path,

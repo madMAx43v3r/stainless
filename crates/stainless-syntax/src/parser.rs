@@ -654,6 +654,7 @@ impl Parser<'_> {
                 self.expect(SyntaxKind::RParen, "expected `)`");
                 self.finish();
             }
+            Some(SyntaxKind::LBracket) => self.parse_lambda_expression(),
             _ => {
                 self.start(SyntaxKind::Error);
                 self.error("expected an expression");
@@ -672,6 +673,36 @@ impl Parser<'_> {
                 self.finish();
             }
         }
+    }
+
+    fn parse_lambda_expression(&mut self) {
+        self.start(SyntaxKind::LambdaExpression);
+        self.parse_capture_list();
+        self.parse_parameter_list();
+        self.parse_block();
+        self.finish();
+    }
+
+    fn parse_capture_list(&mut self) {
+        self.start(SyntaxKind::CaptureList);
+        self.expect(SyntaxKind::LBracket, "expected `[` before lambda captures");
+        while !self.at_end() && !self.at(SyntaxKind::RBracket) {
+            self.start(SyntaxKind::LambdaCapture);
+            let borrowed = self.eat(SyntaxKind::Amp);
+            self.expect(SyntaxKind::Identifier, "expected a captured binding name");
+            if self.eat(SyntaxKind::Eq) {
+                if borrowed {
+                    self.error("a borrowed lambda capture cannot have an initializer");
+                }
+                self.parse_expression();
+            }
+            self.finish();
+            if !self.eat(SyntaxKind::Comma) {
+                break;
+            }
+        }
+        self.expect(SyntaxKind::RBracket, "expected `]` after lambda captures");
+        self.finish();
     }
 
     fn parse_postfix(&mut self, checkpoint: rowan::Checkpoint) {

@@ -1,0 +1,29 @@
+schema = 1
+
+[[type]]
+dependency = "regex"
+rust_path = "regex::Regex"
+stainless_path = "rust::regex::Regex"
+representation = "opaque"
+
+[[type]]
+dependency = "regex"
+rust_path = "regex::Error"
+stainless_path = "rust::regex::Error"
+representation = "opaque"
+error_format = "display"
+
+[[function]]
+dependency = "regex"
+rust_path = "regex::Regex::new"
+stainless_path = "rust::regex::Regex::new"
+parameters = ["const rust::String&"]
+return = "rust::Result<rust::regex::Regex, rust::regex::Error>"
+
+[[method]]
+receiver_type = "rust::regex::Regex"
+rust_name = "is_match"
+stainless_name = "is_match"
+receiver = "const"
+parameters = ["const rust::String&"]
+return = "bool"

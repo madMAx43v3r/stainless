@@ -1,5 +1,6 @@
 // Compiler-generated wrappers for a selected external Cargo API.
 // The surrounding Rust package must declare the `regex` dependency.
+// The companion .bindings.toml file selects the exact callable surface.
 
 use rust::String;
 use rust::regex::Regex;

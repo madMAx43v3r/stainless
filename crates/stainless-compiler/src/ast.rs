@@ -402,6 +402,28 @@ pub struct Expression {
     pub span: Span,
 }
 
+/// One explicit lambda capture.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LambdaCapture {
+    /// Captured binding name and the lambda-local binding name.
+    pub name: String,
+    /// Copy, borrow, or explicit initializer capture form.
+    pub kind: LambdaCaptureKind,
+    /// Complete capture range.
+    pub span: Span,
+}
+
+/// Ownership syntax used by one lambda capture.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LambdaCaptureKind {
+    /// `[value]`.
+    Copy,
+    /// `[&value]`.
+    Borrow,
+    /// `[value = expression]`, initially restricted to `move(value)`.
+    Initialize(Box<Expression>),
+}
+
 /// Expression forms accepted by the initial parser.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExpressionKind {
@@ -461,6 +483,15 @@ pub enum ExpressionKind {
         receiver: Box<Expression>,
         /// Index expression.
         index: Box<Expression>,
+    },
+    /// A C++-style explicit-capture lambda.
+    Lambda {
+        /// Explicit captures in source order.
+        captures: Vec<LambdaCapture>,
+        /// Typed lambda parameters.
+        parameters: Vec<Parameter>,
+        /// Lambda body.
+        body: Block,
     },
     /// Malformed syntax retained after recovery.
     Error,

@@ -83,7 +83,13 @@ implemented:
   to checked `stainless::RustError`.
 - [`17_external_regex_wrapper.stl`](docs/ref/17_external_regex_wrapper.stl) —
   compiler-generated, Cargo-checked wrappers for `regex::Regex::new` and
-  `Regex::is_match`.
+  `Regex::is_match`, selected by its companion
+  [`17_external_regex_wrapper.bindings.toml`](docs/ref/17_external_regex_wrapper.bindings.toml)
+  manifest.
+- [`18_external_callbacks.stl`](docs/ref/18_external_callbacks.stl) —
+  explicit-copy, borrow, and move captures passed to Rust `Fn`, `FnMut`,
+  `FnOnce`, and function-pointer parameters selected by
+  [`18_external_callbacks.bindings.toml`](docs/ref/18_external_callbacks.bindings.toml).
 
 `01_basics.stl`, `02_structs_and_data_inheritance.stl`,
 `11_vec_and_string.stl`, `13_range_for.stl`, and `14_constructors.stl` are
@@ -92,9 +98,11 @@ currently parsed, resolved, lowered to HIR, emitted as Rust, and compiled by
 `15_checked_exception_subset.stl` sample and the native-Result
 `16_native_result_unwrap.stl` sample. The external
 `17_external_regex_wrapper.stl` sample is compiled and executed through Cargo
-against the real `regex` crate. Other samples remain forward-looking and must
-become explicit parser, diagnostic, and transpilation fixtures rather than
-being allowed to drift from the implementation.
+against the real `regex` crate. The external callback sample is compiled and
+executed against a local Rust fixture crate so its generic closure bounds are
+checked by Cargo. Other samples remain forward-looking and must become explicit
+parser, diagnostic, and transpilation fixtures rather than being allowed to
+drift from the implementation.
 
 ## Language boundaries
 
@@ -164,9 +172,11 @@ The first compiler uses the following conservative grammar policy:
   not a declaration modifier.
 - Lambdas require an explicit capture list. `[value]` copies a copyable value,
   `[value = move(value)]` consumes it, and `[&value]` creates a non-escaping
-  borrow. Default captures are rejected. The imported Rust signature determines
-  whether the closure may escape; a borrowed capture therefore fails the
-  `'static` requirement of `rust::std::thread::spawn`.
+  borrow. Default captures are rejected. The first implemented callback slice
+  accepts only an imported `escape = "call"` contract, so every callback
+  finishes before its native call returns. Escaping and thread callbacks need a
+  later ownership model; a borrowed capture will not satisfy their eventual
+  `'static` requirement.
 - User-defined destructors and `Drop` implementations are not accepted.
   Generated Rust automatically drops locals and fields using Rust scope and
   field-declaration order. Resource-owning native Rust fields retain their
@@ -1519,7 +1529,7 @@ data:
   atomic cells, cannot be used directly as `T`; synchronization of the pointer
   binding itself uses `atomic_ptr` or `atomic_nullptr`. The isolated
   `frozen_adapter` foreign-newtype contract described under Rust interop is the
-  only initial escape hatch for an opaque native representation.
+  planned escape hatch for an opaque native representation.
 - Reassigning a mutable handle changes only that handle, not the allocation
   observed by other handles.
 - Copy construction, assignment, and pass-by-value implicitly clone the
@@ -1658,12 +1668,13 @@ without changing Stainless semantics.
 Thread entry uses Rust's `std::thread::spawn`, reached in Stainless through
 `rust::std::thread::spawn` or an import such as
 `use rust::std::thread;`. The explicit C++ lambda syntax shown in the reference
-examples lowers to a Rust closure with explicit capture
-initialization. The Stainless checker must enforce the closure's `Send`,
-return-value `Send`, and `'static` capture requirements before generation, and
-`rustc` checks the same bounds again. A borrowed `T&` therefore cannot be
-captured by a spawned thread; an owned value must be moved or a `shared_ptr`
-copied into the closure.
+examples lowers to a Rust closure with explicit capture initialization. The
+currently implemented external-callback contract is non-escaping and does not
+yet expose `thread::spawn`. When `escape = "thread"` is added, the Stainless
+checker must enforce the closure's `Send`, return-value `Send`, and `'static`
+capture requirements before generation, and `rustc` must check the same bounds
+again. A borrowed `T&` therefore cannot be captured by a spawned thread; an
+owned value must be moved or a `shared_ptr` copied into the closure.
 
 #### Namespace-scope variables
 
@@ -1826,10 +1837,12 @@ purpose-built safe Rust function adapter.
 
 Cargo dependencies are declared in the surrounding Rust project's
 `Cargo.toml`, and native paths begin with `rust::<dependency>::...`; for
-example, `use rust::regex::Regex;`. Non-standard crates use generated wrappers
-because a Rust public signature can contain features that Stainless cannot
-directly spell or validate: inferred lifetimes, associated types, `impl Trait`,
-higher-ranked bounds, closure traits, macros, and unsafe contracts.
+example, `use rust::regex::Regex;`. Here `dependency` is the Cargo dependency
+key, with `-` normalized to `_` as in Rust crate paths, so renamed dependencies
+work as expected. Non-standard crates use generated wrappers because a Rust
+public signature can contain features that Stainless cannot directly spell or
+validate: inferred lifetimes, associated types, `impl Trait`, higher-ranked
+bounds, closure traits, macros, and unsafe contracts.
 
 The package root may contain one versioned `stainless-bindings.toml` manifest.
 Its version-1 schema uses structured entries whose type strings are parsed with
@@ -1867,6 +1880,67 @@ parameters = ["const rust::String&"]
 return = "bool"
 ```
 
+Callback parameters use a structured entry because their Rust invocation and
+retention contracts are not ordinary Stainless value types:
+
+```toml
+[[method]]
+receiver_type = "rust::callback_fixture::Processor"
+rust_name = "apply"
+stainless_name = "apply"
+receiver = "mut"
+parameters = [
+    "i32",
+    { callback = {
+        kind = "fn_mut",
+        parameters = ["i32"],
+        return = "i32",
+        escape = "call",
+    } },
+]
+return = "i32"
+```
+
+`kind` is `fn`, `fn_mut`, `fn_once`, or `fn_ptr`, corresponding to Rust
+`Fn`, `FnMut`, `FnOnce`, or `fn(...) -> ...`. The implemented
+`escape = "call"` contract guarantees that the Rust target does not retain the
+callback after returning. `static` and `thread` are reserved manifest values
+but rejected until escaping callback ownership is implemented.
+
+The callback expression is contextually typed by that exact manifest
+signature. It may be a uniquely resolved exact, non-throwing Stainless
+free-function overload or a C++-style lambda with typed parameters and an
+explicit capture list:
+
+```cpp
+i32 total = 0;
+processor.apply(4, [&total](i32 value) {
+    total += value;
+    return total;
+});
+
+i32 factor = 3;
+processor.apply(2, [factor = move(factor)](i32 value) {
+    return factor * value;
+});
+```
+
+`[]` captures nothing, `[value]` performs a Stainless copy, `[&value]` borrows
+an ordinary local for the duration of the native call, and
+`[value = move(value)]` consumes the outer binding. Reference bindings cannot
+themselves be captured; capture the owner instead. A lambda cannot be stored,
+returned, or used without a native callback context, and an ordinary Rust
+callback cannot throw or return a reference. Callback kinds and escape policy
+are not overload discriminators: two native bindings otherwise having the same
+signature may not differ only in those contracts.
+
+Generated wrappers use a deterministic generic type parameter and the declared
+Rust closure bound; `fn_ptr` uses a Rust function-pointer parameter directly.
+The generated lambda shadows each captured binding with an explicit
+clone/borrow/move and then emits a `move` closure. Rust therefore checks the
+claimed `Fn` capability and exact parameter/return types again when Cargo
+compiles the wrapper.
+
 Unknown keys, duplicate Stainless signatures, paths outside the named Cargo
 dependency, and unversioned manifests are errors. `receiver` is one of
 `value`, `const`, or `mut`, corresponding to Rust `self`, `&self`, or
@@ -1876,45 +1950,65 @@ syntax; wrapper-specific adaptations such as `const rust::String&` to Rust
 Rust proves the requested trait before Stainless uses it for a `RustError`
 message.
 
-The first implemented external slice hard-codes the equivalent `regex::Regex`,
-`regex::Error`, `Regex::new`, and `Regex::is_match` entries in the validated
-registry. Calls produce deterministic functions in a private
+The compiler now parses this manifest rather than hard-coding the regex
+metadata. Calls produce deterministic functions in a private
 `__stainless_bindings` Rust module. The generated `Regex::new` wrapper accepts
 `const rust::String&`, converts it to `&str` inside the wrapper, and preserves
-the real `Result<Regex, regex::Error>` return type; `is_match` similarly proves
-its shared receiver and string adaptation. A Cargo integration test compiles
-and executes these wrappers against the actual crate, then changes the target
-to a nonexistent associated item and verifies that Cargo rejects the stale
-binding. Parsing `stainless-bindings.toml`, querying Cargo metadata, and mapping
-Cargo diagnostics back to manifest spans remain the next interop layer.
+the real `Result<Regex, regex::Error>` return type; `is_match` similarly
+preserves its shared receiver and string adaptation. A Cargo integration test
+loads the checked-in manifest, compiles and executes the wrappers against the
+actual crate, then changes the target to a nonexistent associated item and
+verifies that Cargo rejects the stale binding.
 
-The initial binding subset admits safe public free functions, associated
-functions, and inherent methods with concrete signatures composed of
-primitives, supported containers, declared opaque types, values, and
-input borrows. Direct reference returns are admitted only when a method result
-is borrowed from its receiver or a free/associated function has exactly one
-reference parameter; this provenance is stored in binding metadata. Raw
-pointers, reference-bearing return values, `unsafe fn`, variadics, trait
-objects other than mapped Stainless interfaces, callbacks, async/Future
-values, `impl Trait`, associated-type projections, higher-ranked bounds, and
-unconstrained lifetimes are rejected. External generic functions
-require one manifest entry per concrete instantiation; generic Rust types may
-appear only with explicit supported type arguments. A user-authored safe Rust
-adapter is the escape hatch for every rejected signature.
+The implemented version-1 loader is deliberately smaller than the eventual
+schema. It accepts non-generic opaque external types, associated functions, and
+inherent methods with concrete signatures composed of primitives, compiler
+supported containers, declared opaque types, values, input borrows, and
+non-escaping callback parameters.
+`[[function]]` introduces a Stainless associated function on its declared
+owner; its Rust target may be either a safe free function or a safe associated
+function inside the named dependency.
+`rust::Option` and `rust::Result` may be used with explicit supported type
+arguments. A `const rust::String&` parameter receives the compiler-known
+`&str` adaptation. Free functions, external generic type declarations,
+reference returns requiring provenance, frozen adapters, and explicit trait
+requirements are not accepted yet. A user-authored safe Rust associated
+function or method adapter is the current escape hatch for a Rust signature
+that this subset cannot express.
 
-The initial stable toolchain flow is:
+Custom bindings can already be selected through the compiler library API:
 
-1. Cargo metadata identifies the exact package version, enabled features, and
-   target configuration.
-2. The versioned binding manifest selects each public item and states its
+```rust
+use stainless_compiler::interop::load_package_bindings;
+use stainless_compiler::transpile_with_bindings;
+
+let bindings = load_package_bindings(package_root)?;
+let result = transpile_with_bindings(stainless_source, &bindings);
+```
+
+`load_package_bindings` starts with compiler-owned bindings such as
+`rust::String` and `rust::Vec`, then merges an optional
+`stainless-bindings.toml` from the supplied package root. A missing file means
+there are no package-specific bindings. `load_bindings_manifest` loads only
+one manifest file, while `parse_bindings_manifest` accepts manifest text for
+tools that already own the source. `analyze_with_bindings` is the corresponding
+analysis-only entry point. TOML syntax errors retain byte spans and file-loaded
+errors retain their manifest path.
+
+The target stable toolchain flow is:
+
+1. The versioned binding manifest selects each public item and states its
    Stainless-representable signature and ownership effects.
-3. The compiler generates a deterministic Rust shim in a private
+2. The compiler generates a deterministic Rust shim in a private
    `__stainless_bindings` module. It calls the real crate item and may
    specialize generics, introduce a safe newtype, or normalize an otherwise
    unrepresentable return type.
-4. Cargo compiles the shim against the selected dependency. A wrong path,
+3. Cargo compiles the shim against the selected dependency. A wrong path,
    signature, trait bound, feature assumption, or ownership claim is therefore
    a compile error rather than trusted foreign metadata.
+4. Cargo metadata identifies the exact package version, enabled features, and
+   target configuration before accepting the generated artifact. This
+   dependency-graph validation is the next implementation step.
 5. The verified signature becomes available to Stainless name and type
    resolution, and wrapper/rustc diagnostics are source-mapped to the binding
    declaration and call site.
@@ -1930,7 +2024,7 @@ adaptation cannot preserve observable ownership behavior.
 An opaque native `T` may be stored by value or behind a unique owner. It is
 forbidden as the pointee of `shared_ptr`, `shared_nullptr`, `weak_ptr`,
 `atomic_ptr`, or `atomic_nullptr` by default because Rust `Sync` does not prove
-Stainless's stronger logical-immutability rule. The only initial opt-in is a
+Stainless's stronger logical-immutability rule. The planned opt-in is a
 user-authored safe Rust newtype listed with
 `representation = "frozen_adapter"`. This is an explicit semantic promise that
 the selected API exposes no observable mutation through shared access; the
@@ -2045,8 +2139,8 @@ The current recursive-descent grammar handles:
   `for (binding : expression)` statements;
 - names and paths, literals, parenthesized expressions, calls, member access,
   indexing, ordinary and explicitly base-qualified struct fields,
-  prefix/postfix operators, assignment, and precedence-aware binary
-  expressions.
+  prefix/postfix operators, assignment, precedence-aware binary expressions,
+  and typed lambdas with explicit capture lists.
 
 `stainless_compiler::lowering::lower` converts the typed CST into a
 compiler-owned AST with source spans and explicit recovery forms.
@@ -2098,8 +2192,12 @@ The initial `stainless_compiler::resolution` pass now provides:
   method resolution, including generic substitution, receiver mutability,
   consuming-receiver checks, Rust argument adaptations, and default
   construction;
-- retained Rust representations and generated-wrapper resolution for the first
-  opaque external types, `rust::regex::Regex` and `rust::regex::Error`;
+- retained Rust representations and generated-wrapper resolution for
+  user-manifest-defined opaque external types, exercised with
+  `rust::regex::Regex` and `rust::regex::Error`;
+- contextual native callbacks with exact signatures, non-throwing named
+  function targets, explicit lambda captures, and `Fn`/`FnMut`/`FnOnce`/`fn`
+  invocation contracts;
 - `Vec<T>` range-element resolution for shared, mutable, copied, and explicitly
   consumed range loops.
 
@@ -2119,6 +2217,9 @@ resolution and before HIR construction. For the implemented subset it:
 - treats an explicit native `Result.unwrap()` and an inserted target-typed
   Result conversion as consuming operations and preserves their exceptional
   ownership paths;
+- applies explicit callback captures at the call boundary: copy captures read,
+  move captures invalidate the outer binding, and borrow captures create a
+  temporary loan lasting through the native call;
 - verifies that a direct reference return ultimately originates from the
   function's single reference parameter.
 
@@ -2127,9 +2228,11 @@ memberwise copies. The backend realizes each copy with Rust `Clone`, so structs
 containing `String`, `Vec`, or another cloneable struct retain Stainless value
 semantics without pretending to implement Rust `Copy`.
 
-`stainless_compiler::transpile` is the first fail-closed backend API. If the
-front end reports a diagnostic, or HIR lowering encounters a construct without
-defined Rust semantics, it returns no Rust. For the accepted subset it now:
+`stainless_compiler::transpile` is the first fail-closed backend API, and
+`transpile_with_bindings` applies the same pipeline with a caller-selected
+binding registry. If the front end reports a diagnostic, or HIR lowering
+encounters a construct without defined Rust semantics, it returns no Rust. For
+the accepted subset it now:
 
 - lowers resolved namespaces, free functions, data-only structs, and statically
   dispatched member functions and struct constructors into a public, typed
@@ -2146,9 +2249,9 @@ defined Rust semantics, it returns no Rust. For the accepted subset it now:
   projection without `unsafe`;
 - lowers native `Result` conversion to an inline non-panicking `match` that
   constructs and propagates a checked `stainless::RustError`;
-- emits deterministic private wrappers for the selected external `regex`
-  associated function and method, with argument adaptations inside the
-  Cargo-checked boundary;
+- emits deterministic private wrappers for manifest-selected external
+  associated functions and methods, with argument adaptations and generic
+  callback trait bounds inside the Cargo-checked boundary;
 - emits deterministic Rust with `proc-macro2` and `quote`, validates the
   generated token tree by parsing it with `syn`, and formats it with
   `prettyplease`;
@@ -2156,15 +2259,17 @@ defined Rust semantics, it returns no Rust. For the accepted subset it now:
   libraries, compiles and executes the external `regex` reference through
   Cargo, and executes behavior fixtures covering functions, borrows, loops,
   structs, memberwise copying, data inheritance, `Vec`, `String`, moves,
-  checked exceptions, throwing constructors, native `Result` conversion, and
-  external-wrapper validation.
+  checked exceptions, throwing constructors, native `Result` conversion,
+  external-wrapper validation, and all four initial Rust callback kinds.
 
 This is still not full semantic validation. Classes, interfaces, access
 control, ownership pointers, cross-file modules, ownership through fields and
 future pointer types, full path-sensitive loop-exit precision, general borrow
 lifetimes, member/native returned-reference provenance, and generalized native
-trait satisfaction remain unresolved. External manifest loading, Cargo metadata
-validation, and source-mapped wrapper diagnostics are also not implemented.
+trait satisfaction remain unresolved. Stored, returned, escaping, threaded,
+throwing, reference-returning, async, and FFI callbacks are also deferred.
+Cargo metadata validation and source-mapped wrapper diagnostics are not
+implemented.
 Struct member functions and constructors currently lower to deterministically
 named Rust free functions. Member functions receive an explicit hidden
 receiver; constructors create a hidden mutable borrow only after assembling
@@ -2279,18 +2384,20 @@ recorded inline so implemented syntax is not confused with planned work:
    definitions, data-only structs, fields, one data base, aggregates, typed
    local bindings, struct constructors and initializer lists, blocks, calls,
    arithmetic, `return`, `throw`, `try`/`catch`, `if`/`else`, and classic/range
-   `for` loops into a Rowan CST with recoverable error nodes.
+   `for` loops plus explicit-capture typed lambdas into a Rowan CST with
+   recoverable error nodes.
 4. **In progress:** typed CST views, AST lowering, structural validation, the
    initial single-file name/type/call resolver, move/borrow analysis, and
    resolved HIR construction are implemented for the function/control-flow and
    first struct subsets, including checked exceptions and throwing
    constructors. Classes, interfaces, and ownership through fields remain.
 5. **In progress:** the initial `Vec` and `String` metadata is connected through
-   resolution and code generation. A deterministic wrapper for
-   `regex::Regex::new` and `Regex::is_match` is generated and Cargo rejects a
-   deliberately stale target. Next, load the same metadata from the versioned
-   binding manifest and validate the selected dependency through Cargo
-   metadata.
+   resolution and code generation. The versioned package binding manifest is
+   parsed and merged with compiler built-ins; deterministic wrappers for its
+   `regex::Regex::new` and `Regex::is_match` entries and non-escaping callback
+   entries are generated. Cargo rejects a deliberately stale target and checks
+   the emitted `Fn`, `FnMut`, `FnOnce`, and function-pointer signatures. Next,
+   validate the selected dependency and feature set through Cargo metadata.
 6. **In progress:** structured Rust emission, formatting, and representative
    generated-file compile/behavior tests are implemented. Source-mapping rustc
    diagnostics back to Stainless remains.

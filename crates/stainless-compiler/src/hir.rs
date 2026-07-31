@@ -1,7 +1,7 @@
 //! Typed, Rust-shaped intermediate representation used by the backend.
 
 use crate::ast::{BinaryOperator, LiteralKind, PrefixOperator, Span};
-use crate::interop::{ArgumentAdaptation, Receiver, WrapperTarget};
+use crate::interop::{ArgumentAdaptation, CallbackKind, Receiver, WrapperTarget};
 
 /// A source file after successful semantic resolution and backend lowering.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -20,7 +20,7 @@ pub struct Program {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeWrapper {
     /// Deterministic private Rust function name.
-    pub rust_name: &'static str,
+    pub rust_name: String,
     /// Actual external Rust item invoked by the wrapper.
     pub target: WrapperTarget,
     /// Concrete method receiver, absent for free and associated functions.
@@ -47,6 +47,15 @@ pub struct NativeWrapperParameter {
     pub ty: Type,
     /// Conversion performed inside the compile-checked wrapper.
     pub adaptation: ArgumentAdaptation,
+}
+
+/// One explicit capture materialized before constructing a Rust closure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LambdaCapture {
+    /// Generated Rust binding shadowed inside the closure construction block.
+    pub rust_name: String,
+    /// Copy, move, or borrow initializer.
+    pub initializer: Expression,
 }
 
 /// A Stainless namespace represented as a Rust module.
@@ -132,9 +141,18 @@ pub enum Type {
     /// A native Rust type with concrete type arguments.
     Native {
         /// Fully qualified Rust path.
-        rust_path: &'static str,
+        rust_path: String,
         /// Concrete type arguments.
         arguments: Vec<Type>,
+    },
+    /// A contextual callback used only as a generated-wrapper parameter.
+    Callback {
+        /// Required Rust closure trait or function-pointer representation.
+        kind: CallbackKind,
+        /// Exact callback parameter types.
+        parameters: Vec<Type>,
+        /// Exact value-semantic callback return type.
+        return_type: Box<Type>,
     },
     /// A user-defined Stainless struct.
     User {
@@ -213,7 +231,7 @@ pub enum Statement {
         /// Generated Rust loop label used by nested try blocks.
         label: String,
         /// Optional initializer.
-        initializer: Option<ForInitializer>,
+        initializer: Option<Box<ForInitializer>>,
         /// Optional condition.
         condition: Option<Expression>,
         /// Optional end-of-iteration update.
@@ -402,6 +420,22 @@ pub enum Expression {
         /// Rust field names paired with their values.
         fields: Vec<(String, Expression)>,
     },
+    /// A contextually typed explicit-capture Rust closure.
+    Lambda {
+        /// Capture bindings materialized in source order.
+        captures: Vec<LambdaCapture>,
+        /// Explicitly typed closure parameters.
+        parameters: Vec<Parameter>,
+        /// Closure body.
+        body: Block,
+    },
+    /// A resolved Stainless function item used as a callback.
+    FunctionItem {
+        /// Namespace modules containing the target.
+        modules: Vec<String>,
+        /// Deterministically mangled target.
+        function: String,
+    },
     /// A resolved Stainless free-function call.
     FunctionCall {
         /// Namespace modules containing the target.
@@ -414,14 +448,14 @@ pub enum Expression {
     /// A native associated function or constructor.
     AssociatedCall {
         /// Fully qualified Rust callable path.
-        rust_path: &'static str,
+        rust_path: String,
         /// Lowered arguments.
         arguments: Vec<Expression>,
     },
     /// A call through a generated external Rust wrapper.
     WrapperCall {
         /// Deterministic wrapper function name.
-        rust_name: &'static str,
+        rust_name: String,
         /// Receiver followed by ordinary arguments.
         arguments: Vec<Expression>,
     },
@@ -430,7 +464,7 @@ pub enum Expression {
         /// Method receiver.
         receiver: Box<Expression>,
         /// Rust method name.
-        rust_name: &'static str,
+        rust_name: String,
         /// Ownership behavior retained for inspection.
         receiver_mode: Receiver,
         /// Lowered arguments.

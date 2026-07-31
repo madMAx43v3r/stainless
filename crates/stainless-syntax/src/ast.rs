@@ -99,6 +99,9 @@ ast_node!(AggregateExpression, AggregateExpression);
 ast_node!(InitializerList, InitializerList);
 ast_node!(FieldExpression, FieldExpression);
 ast_node!(IndexExpression, IndexExpression);
+ast_node!(LambdaExpression, LambdaExpression);
+ast_node!(CaptureList, CaptureList);
+ast_node!(LambdaCapture, LambdaCapture);
 ast_node!(ErrorNode, Error);
 
 /// A source-file or namespace item.
@@ -334,6 +337,7 @@ pub enum Expression {
     Aggregate(AggregateExpression),
     Field(FieldExpression),
     Index(IndexExpression),
+    Lambda(LambdaExpression),
     Error(ErrorNode),
 }
 
@@ -351,6 +355,7 @@ impl AstNode for Expression {
                 | SyntaxKind::AggregateExpression
                 | SyntaxKind::FieldExpression
                 | SyntaxKind::IndexExpression
+                | SyntaxKind::LambdaExpression
                 | SyntaxKind::Error
         )
     }
@@ -371,6 +376,7 @@ impl AstNode for Expression {
             }
             SyntaxKind::FieldExpression => FieldExpression::cast(syntax).map(Self::Field),
             SyntaxKind::IndexExpression => IndexExpression::cast(syntax).map(Self::Index),
+            SyntaxKind::LambdaExpression => LambdaExpression::cast(syntax).map(Self::Lambda),
             SyntaxKind::Error => ErrorNode::cast(syntax).map(Self::Error),
             _ => None,
         }
@@ -388,6 +394,7 @@ impl AstNode for Expression {
             Self::Aggregate(node) => node.syntax(),
             Self::Field(node) => node.syntax(),
             Self::Index(node) => node.syntax(),
+            Self::Lambda(node) => node.syntax(),
             Self::Error(node) => node.syntax(),
         }
     }
@@ -1072,6 +1079,47 @@ impl FieldExpression {
 impl IndexExpression {
     pub fn expressions(&self) -> impl Iterator<Item = Expression> + '_ {
         expression_children(self.syntax())
+    }
+}
+
+impl LambdaExpression {
+    #[must_use]
+    pub fn capture_list(&self) -> Option<CaptureList> {
+        child(self.syntax())
+    }
+
+    #[must_use]
+    pub fn parameter_list(&self) -> Option<ParameterList> {
+        child(self.syntax())
+    }
+
+    #[must_use]
+    pub fn body(&self) -> Option<Block> {
+        child(self.syntax())
+    }
+}
+
+impl CaptureList {
+    #[must_use]
+    pub fn captures(&self) -> AstChildren<LambdaCapture> {
+        children(self.syntax())
+    }
+}
+
+impl LambdaCapture {
+    #[must_use]
+    pub fn is_borrowed(&self) -> bool {
+        token(self.syntax(), SyntaxKind::Amp).is_some()
+    }
+
+    #[must_use]
+    pub fn name_token(&self) -> Option<SyntaxToken> {
+        token(self.syntax(), SyntaxKind::Identifier)
+    }
+
+    #[must_use]
+    pub fn initializer(&self) -> Option<Expression> {
+        expression_children(self.syntax()).next()
     }
 }
 

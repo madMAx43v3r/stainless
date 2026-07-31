@@ -1,0 +1,42 @@
+// Explicit-capture callbacks passed through compiler-generated Rust wrappers.
+// The companion .bindings.toml file supplies each callback's exact signature,
+// invocation capability, and non-escaping lifetime contract.
+
+use rust::callback_fixture::Processor;
+
+namespace samples {
+
+i32 double_value(i32 value) {
+    return value * 2;
+}
+
+i32 external_callbacks() {
+    Processor processor = Processor::new(1);
+
+    i32 total = 3;
+    i32 first = processor.apply(4, [&total](i32 value) {
+        total += value;
+        return total;
+    });
+
+    i32 bias = 2;
+    i32 second = processor.inspect(5, [bias](i32 value) {
+        return bias + value;
+    });
+
+    i32 factor = 3;
+    i32 third = processor.apply(2, [factor = move(factor)](i32 value) {
+        return factor * value;
+    });
+
+    i32 fourth = processor.apply_fn_ptr(4, double_value);
+
+    i32 offset = 1;
+    i32 fifth = move(processor).consume([offset = move(offset)](i32 value) {
+        return value + offset;
+    });
+
+    return first * 1000 + second * 100 + third * 10 + fourth + fifth;
+}
+
+} // namespace samples

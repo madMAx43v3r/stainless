@@ -2,22 +2,24 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Diagnostic;
 use crate::ast::{
-    self, BinaryOperator, Expression, ExpressionKind, ForClause, ForInitializer, Item, LiteralKind,
-    PrefixOperator, SourceFile, Span, Statement, StatementKind, TypeKind,
+    self, BinaryOperator, Expression, ExpressionKind, ForClause, ForInitializer, Item,
+    LambdaCaptureKind, LiteralKind, PrefixOperator, SourceFile, Span, Statement, StatementKind,
+    TypeKind,
 };
 use crate::interop::{
-    CallStyle, CallableBinding, NativeBindings, NativeErrorFormat, NativeTypeBinding, Receiver,
-    TypeRef,
+    CallStyle, CallableBinding, CallbackKind, CallbackType, NativeBindings, NativeErrorFormat,
+    NativeTypeBinding, Receiver, TypeRef,
 };
 
 use super::imports::ImportTable;
 use super::mangle;
 use super::{
-    BindingResolution, CallTarget, ConstructorFieldInitialization, ConstructorId,
+    BindingResolution, CallTarget, CallbackTarget, ConstructorFieldInitialization, ConstructorId,
     ConstructorSymbol, ExpressionResolution, FieldSymbol, FunctionId, FunctionSymbol, Intrinsic,
-    NativeCall, ParameterSymbol, Resolution, ResolvedCall, ResolvedField, ResolvedNativeType,
-    ResolvedTraitRequirement, RustErrorMessage, RustResultAdaptation, SemanticModel, StructId,
-    StructReceiver, StructSymbol, ValueCategory,
+    LambdaCaptureMode, NativeCall, ParameterSymbol, Resolution, ResolvedCall, ResolvedCallback,
+    ResolvedField, ResolvedLambdaCapture, ResolvedNativeType, ResolvedTraitRequirement,
+    RustErrorMessage, RustResultAdaptation, SemanticModel, StructId, StructReceiver, StructSymbol,
+    ValueCategory,
 };
 
 /// Resolves names and types using an explicit native binding registry.
@@ -29,8 +31,8 @@ pub fn resolve(source: &SourceFile, bindings: &NativeBindings) -> Resolution {
         native_types: bindings
             .types()
             .map(|binding| ResolvedNativeType {
-                stainless_path: binding.stainless_path,
-                rust_path: binding.rust_path,
+                stainless_path: binding.stainless_path.clone(),
+                rust_path: binding.rust_path.clone(),
             })
             .collect(),
         ..SemanticModel::default()
@@ -93,6 +95,7 @@ struct FunctionContext {
     declared_throws: Vec<StructId>,
     handled_throws: Vec<Vec<StructId>>,
     current_catch: Option<StructId>,
+    is_lambda: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -103,7 +106,7 @@ struct ExpressionInfo {
 
 #[derive(Clone, Debug)]
 struct NativeInstance {
-    type_path: &'static str,
+    type_path: String,
     arguments: Vec<TypeRef>,
 }
 
@@ -132,7 +135,7 @@ impl Resolver<'_> {
             fields: vec![FieldSymbol {
                 name: "message".to_owned(),
                 ty: TypeRef::Native {
-                    path: "rust::String",
+                    path: "rust::String".to_owned(),
                     arguments: Vec::new(),
                 },
                 span: Span::default(),
@@ -814,6 +817,7 @@ impl Resolver<'_> {
             declared_throws: symbol.throws.clone(),
             handled_throws: Vec::new(),
             current_catch: None,
+            is_lambda: false,
         };
         let slots = self.constructor_slots(symbol.structure);
         let mut explicit = BTreeMap::<usize, &ast::ConstructorInitializer>::new();
@@ -889,6 +893,7 @@ impl Resolver<'_> {
             declared_throws: symbol.throws,
             handled_throws: Vec::new(),
             current_catch: None,
+            is_lambda: false,
         };
         if let Some(body) = &constructor.body {
             self.resolve_block(body, &mut context, false);
@@ -914,6 +919,7 @@ impl Resolver<'_> {
                 declared_throws: Vec::new(),
                 handled_throws: Vec::new(),
                 current_catch: None,
+                is_lambda: false,
             };
             let mut initializations = Vec::new();
             for (rust_name, ty) in self.constructor_slots(symbol.structure) {
@@ -1007,7 +1013,7 @@ impl Resolver<'_> {
                 arguments: type_arguments,
             } => {
                 let instance = NativeInstance {
-                    type_path: path,
+                    type_path: path.clone(),
                     arguments: type_arguments.clone(),
                 };
                 let (_, call) = self.resolve_native_callable(
@@ -1094,7 +1100,7 @@ impl Resolver<'_> {
                 arguments: type_arguments,
             } => {
                 let instance = NativeInstance {
-                    type_path: path,
+                    type_path: path.clone(),
                     arguments: type_arguments.clone(),
                 };
                 let (_, call) = self.resolve_native_callable(
@@ -1155,6 +1161,7 @@ impl Resolver<'_> {
             declared_throws: symbol.throws,
             handled_throws: Vec::new(),
             current_catch: None,
+            is_lambda: false,
         };
         if let Some(body) = &function.body {
             self.resolve_block(body, &mut context, false);
@@ -1187,11 +1194,24 @@ impl Resolver<'_> {
                     let expected = context.return_type.clone();
                     if expected == TypeRef::Void {
                         self.resolve_expression(value, None, context);
+                        if context.is_lambda {
+                            self.push(
+                                "RES083",
+                                "a void callback cannot return a value".to_owned(),
+                                statement.span,
+                            );
+                        }
                     } else {
                         let actual =
                             self.resolve_expression(value, Some(&canonical(&expected)), context);
                         self.validate_binding(&expected, &actual, value.span, "return value");
                     }
+                } else if context.is_lambda && context.return_type != TypeRef::Void {
+                    self.push(
+                        "RES083",
+                        "a non-void callback must return a value".to_owned(),
+                        statement.span,
+                    );
                 }
             }
             StatementKind::Throw(value) => {
@@ -1612,6 +1632,7 @@ impl Resolver<'_> {
         self.insert_variable(scope, &range.name, variable, range.ty.span);
     }
 
+    #[allow(clippy::too_many_lines)]
     fn resolve_expression(
         &mut self,
         expression: &Expression,
@@ -1620,8 +1641,23 @@ impl Resolver<'_> {
     ) -> ExpressionInfo {
         let (info, call, field) = match &expression.kind {
             ExpressionKind::Name(path) => {
-                let (info, field) = self.resolve_value_name(path, expression.span, context);
-                (info, None, field)
+                if let Some(TypeRef::Callback(callback)) = expected
+                    && !self.value_name_resolves(path, context)
+                {
+                    (
+                        self.resolve_callback_function_name(
+                            path,
+                            callback,
+                            expression.span,
+                            context,
+                        ),
+                        None,
+                        None,
+                    )
+                } else {
+                    let (info, field) = self.resolve_value_name(path, expression.span, context);
+                    (info, None, field)
+                }
             }
             ExpressionKind::Literal(literal) => (
                 ExpressionInfo {
@@ -1687,6 +1723,22 @@ impl Resolver<'_> {
                 );
                 (error_info(), None, None)
             }
+            ExpressionKind::Lambda {
+                captures,
+                parameters,
+                body,
+            } => (
+                self.resolve_lambda(
+                    captures,
+                    parameters,
+                    body,
+                    expected,
+                    expression.span,
+                    context,
+                ),
+                None,
+                None,
+            ),
             ExpressionKind::Error => (error_info(), None, None),
         };
         if let Some(call) = &call {
@@ -1743,6 +1795,268 @@ impl Resolver<'_> {
             span,
         );
         (error_info(), None)
+    }
+
+    fn value_name_resolves(&self, path: &ast::Path, context: &FunctionContext) -> bool {
+        if path.segments.len() != 1 {
+            return false;
+        }
+        let name = &path.segments[0];
+        context
+            .scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains_key(name))
+            || context.receiver.as_ref().is_some_and(|receiver| {
+                self.lookup_struct_field(receiver.structure, path).is_some()
+            })
+    }
+
+    fn resolve_callback_function_name(
+        &mut self,
+        path: &ast::Path,
+        callback: &CallbackType,
+        span: Span,
+        context: &FunctionContext,
+    ) -> ExpressionInfo {
+        let signature_candidates = self
+            .function_candidates(path, &context.namespace)
+            .into_iter()
+            .filter(|id| {
+                let function = &self.model.functions[id.0];
+                function.receiver.is_none()
+                    && function
+                        .parameters
+                        .iter()
+                        .map(|parameter| canonical(&parameter.ty))
+                        .eq(callback.parameters.iter().map(canonical))
+                    && canonical(&function.return_type) == canonical(&callback.return_type)
+            })
+            .collect::<Vec<_>>();
+        if signature_candidates.len() != 1 {
+            self.push(
+                "RES084",
+                format!(
+                    "callback function `{}` must resolve to exactly one non-member overload with signature ({}) -> {}",
+                    path.display(),
+                    callback
+                        .parameters
+                        .iter()
+                        .map(display_type)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    display_type(&callback.return_type)
+                ),
+                span,
+            );
+            return error_info();
+        }
+        let id = signature_candidates[0];
+        let function = &self.model.functions[id.0];
+        if !function.has_definition {
+            self.push(
+                "RES084",
+                format!(
+                    "callback function `{}` has no definition",
+                    display_path(&function.path)
+                ),
+                span,
+            );
+            return error_info();
+        }
+        if !function.throws.is_empty() {
+            self.push(
+                "RES085",
+                "a callback passed to an ordinary Rust closure parameter cannot throw".to_owned(),
+                span,
+            );
+            return error_info();
+        }
+        let ty = TypeRef::Callback(Box::new(callback.clone()));
+        self.model.callbacks.push(ResolvedCallback {
+            span,
+            ty: ty.clone(),
+            target: CallbackTarget::Function(id),
+        });
+        temporary(ty)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn resolve_lambda(
+        &mut self,
+        captures: &[ast::LambdaCapture],
+        parameters: &[ast::Parameter],
+        body: &ast::Block,
+        expected: Option<&TypeRef>,
+        span: Span,
+        outer: &FunctionContext,
+    ) -> ExpressionInfo {
+        let Some(TypeRef::Callback(callback)) = expected else {
+            self.push(
+                "RES082",
+                "a lambda is only valid as a contextually typed native callback argument"
+                    .to_owned(),
+                span,
+            );
+            return error_info();
+        };
+        if callback.escape != crate::interop::CallbackEscape::Call {
+            self.push(
+                "RES082",
+                "only non-escaping callback lambdas are implemented".to_owned(),
+                span,
+            );
+            return error_info();
+        }
+        if callback.kind == CallbackKind::FunctionPointer && !captures.is_empty() {
+            self.push(
+                "RES086",
+                "`fn_ptr` callbacks require a captureless lambda or named function".to_owned(),
+                span,
+            );
+        }
+
+        let mut lambda_scope = BTreeMap::new();
+        let mut resolved_captures = Vec::new();
+        let mut seen_captures = BTreeSet::new();
+        for capture in captures {
+            if !seen_captures.insert(capture.name.as_str()) {
+                self.push(
+                    "RES087",
+                    format!("lambda captures `{}` more than once", capture.name),
+                    capture.span,
+                );
+                continue;
+            }
+            let outer_variable = outer
+                .scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get(&capture.name))
+                .cloned();
+            let Some(outer_variable) = outer_variable else {
+                self.push(
+                    "RES087",
+                    format!("lambda capture `{}` is not a local binding", capture.name),
+                    capture.span,
+                );
+                continue;
+            };
+            if outer_variable.ty.is_reference() {
+                self.push(
+                    "RES088",
+                    "capturing a reference binding is deferred; capture its owner instead"
+                        .to_owned(),
+                    capture.span,
+                );
+                continue;
+            }
+            let (mode, inner_variable) = match &capture.kind {
+                LambdaCaptureKind::Copy => {
+                    if !is_copyable(&canonical(&outer_variable.ty)) {
+                        self.push(
+                            "RES089",
+                            format!(
+                                "copy capture `{}` requires a Stainless-copyable value; use `[{} = move({})]`",
+                                capture.name, capture.name, capture.name
+                            ),
+                            capture.span,
+                        );
+                    }
+                    (
+                        LambdaCaptureMode::Copy,
+                        Variable {
+                            ty: outer_variable.ty.clone(),
+                            mutable: false,
+                        },
+                    )
+                }
+                LambdaCaptureKind::Borrow => {
+                    let mutable = outer_variable.mutable;
+                    (
+                        LambdaCaptureMode::Borrow { mutable },
+                        Variable {
+                            ty: if mutable {
+                                TypeRef::mutable_ref(canonical(&outer_variable.ty))
+                            } else {
+                                TypeRef::shared_ref(canonical(&outer_variable.ty))
+                            },
+                            mutable,
+                        },
+                    )
+                }
+                LambdaCaptureKind::Initialize(initializer) => {
+                    if !is_move_of_name(initializer, &capture.name) {
+                        self.push(
+                            "RES090",
+                            format!(
+                                "lambda initializer capture must be `[{} = move({})]`",
+                                capture.name, capture.name
+                            ),
+                            capture.span,
+                        );
+                    }
+                    (
+                        LambdaCaptureMode::Move,
+                        Variable {
+                            ty: outer_variable.ty.clone(),
+                            mutable: false,
+                        },
+                    )
+                }
+            };
+            lambda_scope.insert(capture.name.clone(), inner_variable);
+            resolved_captures.push(ResolvedLambdaCapture {
+                name: capture.name.clone(),
+                ty: outer_variable.ty,
+                mode,
+            });
+        }
+
+        if parameters.len() != callback.parameters.len() {
+            self.push(
+                "RES091",
+                format!(
+                    "callback requires {} lambda parameter(s), found {}",
+                    callback.parameters.len(),
+                    parameters.len()
+                ),
+                span,
+            );
+        }
+        for (index, parameter) in parameters.iter().enumerate() {
+            let resolved = self.resolve_type(&parameter.ty, &outer.namespace, false);
+            if let Some(expected) = callback.parameters.get(index) {
+                self.require_exact(expected, &resolved, parameter.ty.span, "lambda parameter");
+            }
+            let variable = Variable {
+                mutable: parameter_mutability(parameter, &resolved),
+                ty: resolved,
+            };
+            self.insert_variable(&mut lambda_scope, &parameter.name, variable, parameter.span);
+        }
+
+        let mut context = FunctionContext {
+            namespace: outer.namespace.clone(),
+            return_type: callback.return_type.as_ref().clone(),
+            scopes: vec![lambda_scope],
+            receiver: None,
+            declared_throws: Vec::new(),
+            handled_throws: Vec::new(),
+            current_catch: None,
+            is_lambda: true,
+        };
+        self.resolve_block(body, &mut context, false);
+
+        let ty = TypeRef::Callback(callback.clone());
+        self.model.callbacks.push(ResolvedCallback {
+            span,
+            ty: ty.clone(),
+            target: CallbackTarget::Lambda {
+                captures: resolved_captures,
+            },
+        });
+        temporary(ty)
     }
 
     fn resolve_struct_aggregate(
@@ -1981,7 +2295,7 @@ impl Resolver<'_> {
                 }
                 match self.lookup_native_instance(path, expected, context, span) {
                     NativeInstanceLookup::Resolved(instance) => {
-                        let source_name = instance_short_name(instance.type_path);
+                        let source_name = instance_short_name(&instance.type_path);
                         return self.resolve_native_callable(
                             &instance,
                             CallStyle::Constructor,
@@ -2369,7 +2683,7 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
     ) -> (ExpressionInfo, Option<ResolvedCall>) {
         let expected = TypeRef::Native {
-            path: "rust::String",
+            path: "rust::String".to_owned(),
             arguments: Vec::new(),
         };
         if arguments.len() != 1 {
@@ -2819,12 +3133,12 @@ impl Resolver<'_> {
             self.validate_binding(expected, argument, expression.span, "argument");
         }
         let native_call = NativeCall {
-            type_path: instance.type_path,
+            type_path: instance.type_path.clone(),
             style,
             source_name: candidate.callable.source_name,
             receiver: candidate.callable.receiver,
             receiver_type: candidate.callable.receiver.map(|_| TypeRef::Native {
-                path: instance.type_path,
+                path: instance.type_path.clone(),
                 arguments: instance.arguments.clone(),
             }),
             parameter_types: candidate.parameter_types,
@@ -2840,7 +3154,7 @@ impl Resolver<'_> {
         };
         let call = ResolvedCall {
             span,
-            target: CallTarget::Native(native_call),
+            target: CallTarget::Native(Box::new(native_call)),
             return_type: candidate.return_type.clone(),
             throws: Vec::new(),
         };
@@ -2854,7 +3168,7 @@ impl Resolver<'_> {
         name: &str,
         arity: usize,
     ) -> Option<Vec<ConcreteNativeCandidate>> {
-        let binding = self.bindings.type_by_path(instance.type_path)?;
+        let binding = self.bindings.type_by_path(&instance.type_path)?;
         Some(
             binding
                 .callables
@@ -3160,7 +3474,7 @@ impl Resolver<'_> {
         else {
             return NativeInstanceLookup::NotNative;
         };
-        let Some(binding) = self.bindings.type_by_path(type_path) else {
+        let Some(binding) = self.bindings.type_by_path(&type_path) else {
             self.push(
                 "RES021",
                 format!("native type `{type_path}` has no callable metadata"),
@@ -3248,8 +3562,8 @@ impl Resolver<'_> {
                         else {
                             return TypeRef::Error;
                         };
-                        let expected_arity = self.bindings.type_by_path(path).map_or_else(
-                            || native_container_arity(path),
+                        let expected_arity = self.bindings.type_by_path(&path).map_or_else(
+                            || native_container_arity(&path),
                             |binding| Some(binding.type_parameters.len()),
                         );
                         if expected_arity == Some(arguments.len()) {
@@ -3295,7 +3609,7 @@ impl Resolver<'_> {
         namespace: &[String],
         diagnose_unknown: bool,
         span: Span,
-    ) -> Option<&'static str> {
+    ) -> Option<String> {
         let candidates = if segments.first().is_some_and(|segment| segment == "rust") {
             vec![segments.to_vec()]
         } else if segments.len() == 1 {
@@ -3525,6 +3839,7 @@ impl Resolver<'_> {
             }
             TypeRef::Void
             | TypeRef::Parameter(_)
+            | TypeRef::Callback(_)
             | TypeRef::Struct { .. }
             | TypeRef::Reference { .. }
             | TypeRef::Error => false,
@@ -3550,7 +3865,7 @@ fn instantiate_callable(
     let substitutions = binding
         .type_parameters
         .iter()
-        .copied()
+        .cloned()
         .zip(arguments.iter().cloned())
         .collect::<BTreeMap<_, _>>();
     ConcreteNativeCandidate {
@@ -3566,25 +3881,35 @@ fn instantiate_callable(
             .iter()
             .map(|requirement| ResolvedTraitRequirement {
                 ty: substitutions
-                    .get(requirement.parameter)
+                    .get(&requirement.parameter)
                     .cloned()
                     .unwrap_or(TypeRef::Error),
-                rust_trait: requirement.rust_trait,
+                rust_trait: requirement.rust_trait.clone(),
             })
             .collect(),
     }
 }
 
-fn substitute(ty: &TypeRef, substitutions: &BTreeMap<&'static str, TypeRef>) -> TypeRef {
+fn substitute(ty: &TypeRef, substitutions: &BTreeMap<String, TypeRef>) -> TypeRef {
     match ty {
         TypeRef::Parameter(name) => substitutions.get(name).cloned().unwrap_or(TypeRef::Error),
         TypeRef::Native { path, arguments } => TypeRef::Native {
-            path,
+            path: path.clone(),
             arguments: arguments
                 .iter()
                 .map(|argument| substitute(argument, substitutions))
                 .collect(),
         },
+        TypeRef::Callback(callback) => TypeRef::callback(
+            callback.kind,
+            callback.escape,
+            callback
+                .parameters
+                .iter()
+                .map(|parameter| substitute(parameter, substitutions))
+                .collect(),
+            substitute(&callback.return_type, substitutions),
+        ),
         TypeRef::Struct { .. } => ty.clone(),
         TypeRef::Reference { mutable, target } => TypeRef::Reference {
             mutable: *mutable,
@@ -3683,14 +4008,14 @@ fn integer_suffix(text: &str) -> Option<TypeRef> {
     .find_map(|(suffix, ty)| text.ends_with(suffix).then_some(ty))
 }
 
-fn known_native_path(segments: &[String], bindings: &NativeBindings) -> Option<&'static str> {
+fn known_native_path(segments: &[String], bindings: &NativeBindings) -> Option<String> {
     let path = segments.join("::");
     bindings
         .type_by_path(&path)
-        .map(|binding| binding.stainless_path)
+        .map(|binding| binding.stainless_path.clone())
         .or(match path.as_str() {
-            "rust::Option" => Some("rust::Option"),
-            "rust::Result" => Some("rust::Result"),
+            "rust::Option" => Some("rust::Option".to_owned()),
+            "rust::Result" => Some("rust::Result".to_owned()),
             _ => None,
         })
 }
@@ -3701,6 +4026,22 @@ fn is_named_value_expression(expression: &Expression) -> bool {
         ExpressionKind::Parenthesized(inner) => is_named_value_expression(inner),
         _ => false,
     }
+}
+
+fn is_move_of_name(expression: &Expression, name: &str) -> bool {
+    let ExpressionKind::Call { callee, arguments } = &expression.kind else {
+        return false;
+    };
+    let ExpressionKind::Name(callee) = &callee.kind else {
+        return false;
+    };
+    let [argument] = arguments.as_slice() else {
+        return false;
+    };
+    let ExpressionKind::Name(argument) = &argument.kind else {
+        return false;
+    };
+    callee.segments == ["move"] && argument.segments == [name]
 }
 
 fn native_container_arity(path: &str) -> Option<usize> {
@@ -3821,8 +4162,8 @@ fn display_type(ty: &TypeRef) -> String {
         TypeRef::Usize => "usize".to_owned(),
         TypeRef::F32 => "f32".to_owned(),
         TypeRef::F64 => "f64".to_owned(),
-        TypeRef::Parameter(name) => (*name).to_owned(),
-        TypeRef::Native { path, arguments } if arguments.is_empty() => (*path).to_owned(),
+        TypeRef::Parameter(name) => (*name).clone(),
+        TypeRef::Native { path, arguments } if arguments.is_empty() => (*path).clone(),
         TypeRef::Native { path, arguments } => format!(
             "{path}<{}>",
             arguments
@@ -3830,6 +4171,17 @@ fn display_type(ty: &TypeRef) -> String {
                 .map(display_type)
                 .collect::<Vec<_>>()
                 .join(", ")
+        ),
+        TypeRef::Callback(callback) => format!(
+            "callback<{:?}({}) -> {}>",
+            callback.kind,
+            callback
+                .parameters
+                .iter()
+                .map(display_type)
+                .collect::<Vec<_>>()
+                .join(", "),
+            display_type(&callback.return_type)
         ),
         TypeRef::Struct { path } => display_path(path),
         TypeRef::Reference { mutable, target } => {
@@ -3905,7 +4257,7 @@ fn display_native_signature(candidate: &ConcreteNativeCandidate) -> String {
 
 fn display_native_instance(instance: &NativeInstance) -> String {
     display_type(&TypeRef::Native {
-        path: instance.type_path,
+        path: instance.type_path.clone(),
         arguments: instance.arguments.clone(),
     })
 }
@@ -3960,28 +4312,94 @@ fn binary_name(operator: BinaryOperator) -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn source_uses_exceptions(source: &SourceFile) -> bool {
     fn block_uses_exceptions(block: &ast::Block) -> bool {
         block.statements.iter().any(statement_uses_exceptions)
+    }
+
+    fn expression_uses_exceptions(expression: &Expression) -> bool {
+        match &expression.kind {
+            ExpressionKind::Name(_) | ExpressionKind::Literal(_) | ExpressionKind::Error => false,
+            ExpressionKind::Parenthesized(inner)
+            | ExpressionKind::Prefix { operand: inner, .. }
+            | ExpressionKind::Postfix { operand: inner, .. } => expression_uses_exceptions(inner),
+            ExpressionKind::Binary { left, right, .. } => {
+                expression_uses_exceptions(left) || expression_uses_exceptions(right)
+            }
+            ExpressionKind::Call { callee, arguments } => {
+                expression_uses_exceptions(callee)
+                    || arguments.iter().any(expression_uses_exceptions)
+            }
+            ExpressionKind::Aggregate { initializers, .. } => {
+                initializers.iter().any(expression_uses_exceptions)
+            }
+            ExpressionKind::Field { receiver, .. } => expression_uses_exceptions(receiver),
+            ExpressionKind::Index { receiver, index } => {
+                expression_uses_exceptions(receiver) || expression_uses_exceptions(index)
+            }
+            ExpressionKind::Lambda { captures, body, .. } => {
+                captures.iter().any(|capture| {
+                    matches!(
+                        &capture.kind,
+                        LambdaCaptureKind::Initialize(initializer)
+                            if expression_uses_exceptions(initializer)
+                    )
+                }) || block_uses_exceptions(body)
+            }
+        }
+    }
+
+    fn local_uses_exceptions(local: &ast::LocalDeclaration) -> bool {
+        local
+            .initializer
+            .as_ref()
+            .is_some_and(expression_uses_exceptions)
     }
 
     fn statement_uses_exceptions(statement: &Statement) -> bool {
         match &statement.kind {
             StatementKind::Throw(_) | StatementKind::Try(_) => true,
             StatementKind::Block(block) => block_uses_exceptions(block),
+            StatementKind::Local(local) => local_uses_exceptions(local),
+            StatementKind::Return(value) => value.as_ref().is_some_and(expression_uses_exceptions),
             StatementKind::If(statement) => {
-                statement_uses_exceptions(&statement.then_branch)
+                expression_uses_exceptions(&statement.condition)
+                    || statement_uses_exceptions(&statement.then_branch)
                     || statement
                         .else_branch
                         .as_deref()
                         .is_some_and(statement_uses_exceptions)
             }
-            StatementKind::For(statement) => statement_uses_exceptions(&statement.body),
-            StatementKind::Local(_)
-            | StatementKind::Return(_)
-            | StatementKind::Break
+            StatementKind::For(statement) => {
+                let clause_uses_exceptions = match &statement.clause {
+                    ast::ForClause::Range(range) => expression_uses_exceptions(&range.iterable),
+                    ast::ForClause::Classic(classic) => {
+                        classic
+                            .initializer
+                            .as_ref()
+                            .is_some_and(|initializer| match initializer {
+                                ast::ForInitializer::Local(local) => local_uses_exceptions(local),
+                                ast::ForInitializer::Expression(expression) => {
+                                    expression_uses_exceptions(expression)
+                                }
+                            })
+                            || classic
+                                .condition
+                                .as_ref()
+                                .is_some_and(expression_uses_exceptions)
+                            || classic
+                                .update
+                                .as_ref()
+                                .is_some_and(expression_uses_exceptions)
+                    }
+                    ast::ForClause::Error => false,
+                };
+                clause_uses_exceptions || statement_uses_exceptions(&statement.body)
+            }
+            StatementKind::Expression(expression) => expression_uses_exceptions(expression),
+            StatementKind::Break
             | StatementKind::Continue
-            | StatementKind::Expression(_)
             | StatementKind::Empty
             | StatementKind::Error => false,
         }

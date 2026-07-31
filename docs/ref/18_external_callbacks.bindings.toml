@@ -1,0 +1,77 @@
+schema = 1
+
+[[type]]
+dependency = "callback_fixture"
+rust_path = "callback_fixture::Processor"
+stainless_path = "rust::callback_fixture::Processor"
+representation = "opaque"
+
+[[function]]
+dependency = "callback_fixture"
+rust_path = "callback_fixture::Processor::new"
+stainless_path = "rust::callback_fixture::Processor::new"
+parameters = ["i32"]
+return = "rust::callback_fixture::Processor"
+
+[[method]]
+receiver_type = "rust::callback_fixture::Processor"
+rust_name = "apply"
+stainless_name = "apply"
+receiver = "mut"
+parameters = [
+    "i32",
+    { callback = {
+        kind = "fn_mut",
+        parameters = ["i32"],
+        return = "i32",
+        escape = "call",
+    } },
+]
+return = "i32"
+
+[[method]]
+receiver_type = "rust::callback_fixture::Processor"
+rust_name = "inspect"
+stainless_name = "inspect"
+receiver = "const"
+parameters = [
+    "i32",
+    { callback = {
+        kind = "fn",
+        parameters = ["i32"],
+        return = "i32",
+        escape = "call",
+    } },
+]
+return = "i32"
+
+[[method]]
+receiver_type = "rust::callback_fixture::Processor"
+rust_name = "consume"
+stainless_name = "consume"
+receiver = "value"
+parameters = [
+    { callback = {
+        kind = "fn_once",
+        parameters = ["i32"],
+        return = "i32",
+        escape = "call",
+    } },
+]
+return = "i32"
+
+[[method]]
+receiver_type = "rust::callback_fixture::Processor"
+rust_name = "apply_fn_ptr"
+stainless_name = "apply_fn_ptr"
+receiver = "const"
+parameters = [
+    "i32",
+    { callback = {
+        kind = "fn_ptr",
+        parameters = ["i32"],
+        return = "i32",
+        escape = "call",
+    } },
+]
+return = "i32"

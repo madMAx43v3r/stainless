@@ -700,7 +700,9 @@ impl Analyzer<'_> {
                 self.check_usage(id, usage, expression.span);
                 Some(id)
             }
-            ExpressionKind::Literal(_) | ExpressionKind::Error => None,
+            ExpressionKind::Literal(_) | ExpressionKind::Lambda { .. } | ExpressionKind::Error => {
+                None
+            }
             ExpressionKind::Parenthesized(inner) => self.expression(inner, usage),
             ExpressionKind::Prefix { operator, operand } => {
                 self.expression(
@@ -948,7 +950,10 @@ impl Analyzer<'_> {
             .iter()
             .zip(expected)
             .map(|(argument, expected)| {
-                if let TypeRef::Reference { mutable, .. } = expected {
+                if expected.is_callback() {
+                    self.callback_argument(argument, &mut loans);
+                    None
+                } else if let TypeRef::Reference { mutable, .. } = expected {
                     let origin = self.expression(
                         argument,
                         if *mutable {
@@ -971,6 +976,44 @@ impl Analyzer<'_> {
             self.state.release(loan);
         }
         origins
+    }
+
+    fn callback_argument(&mut self, argument: &ast::Expression, loans: &mut Vec<Loan>) {
+        let Some(callback) = self.semantics.callback(argument.span) else {
+            return;
+        };
+        let crate::resolution::CallbackTarget::Lambda { captures } = &callback.target else {
+            return;
+        };
+        for capture in captures {
+            let Some(id) = self.state.lookup(&capture.name) else {
+                continue;
+            };
+            match capture.mode {
+                crate::resolution::LambdaCaptureMode::Copy => {
+                    self.check_usage(id, Usage::Read, argument.span);
+                }
+                crate::resolution::LambdaCaptureMode::Move => {
+                    self.mark_moved(id, argument.span);
+                }
+                crate::resolution::LambdaCaptureMode::Borrow { mutable } => {
+                    self.check_usage(
+                        id,
+                        if mutable {
+                            Usage::BorrowMutable
+                        } else {
+                            Usage::BorrowShared
+                        },
+                        argument.span,
+                    );
+                    if let Some(loan) =
+                        self.acquire_temporary_loan(Some(id), mutable, argument.span)
+                    {
+                        loans.push(loan);
+                    }
+                }
+            }
+        }
     }
 
     fn check_usage(&mut self, id: BindingId, usage: Usage, span: ast::Span) {
@@ -1481,6 +1524,29 @@ impl UseCollector {
             ExpressionKind::Index { receiver, index } => {
                 self.expression(receiver);
                 self.expression(index);
+            }
+            ExpressionKind::Lambda {
+                captures,
+                parameters,
+                body,
+            } => {
+                for capture in captures {
+                    if let Some(declaration) = self.lookup(&capture.name) {
+                        self.last_uses.insert(declaration, capture.span);
+                    }
+                    if let ast::LambdaCaptureKind::Initialize(initializer) = &capture.kind {
+                        self.expression(initializer);
+                    }
+                }
+                self.push_scope();
+                for capture in captures {
+                    self.declare(&capture.name, capture.span);
+                }
+                for parameter in parameters {
+                    self.declare(&parameter.name, parameter.span);
+                }
+                self.block(body, false);
+                self.scopes.pop();
             }
         }
     }

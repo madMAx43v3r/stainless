@@ -5,8 +5,8 @@ use crate::ast::{self, ExpressionKind, ForClause, Item, StatementKind};
 use crate::hir;
 use crate::interop::{ArgumentAdaptation, Receiver, RustLowering, TypeRef};
 use crate::resolution::{
-    CallTarget, FunctionSymbol, Intrinsic, NativeCall, ResolvedCall, SemanticModel, StructSymbol,
-    ValueCategory,
+    CallTarget, CallbackTarget, FunctionSymbol, Intrinsic, LambdaCaptureMode, NativeCall,
+    ResolvedCall, SemanticModel, StructSymbol, ValueCategory,
 };
 
 pub(crate) fn lower(
@@ -102,7 +102,7 @@ struct Lowerer<'a> {
     try_index: usize,
     loop_index: usize,
     loop_labels: Vec<String>,
-    native_wrappers: BTreeMap<&'static str, hir::NativeWrapper>,
+    native_wrappers: BTreeMap<String, hir::NativeWrapper>,
 }
 
 #[derive(Clone, Copy)]
@@ -705,7 +705,7 @@ impl Lowerer<'_> {
         match &statement.clause {
             ForClause::Classic(classic) => {
                 let initializer = match &classic.initializer {
-                    Some(initializer) => Some(match initializer {
+                    Some(initializer) => Some(Box::new(match initializer {
                         ast::ForInitializer::Local(local) => {
                             let (name, ty, mutable, initializer) = self.lower_local(local)?;
                             hir::ForInitializer::Let {
@@ -720,7 +720,7 @@ impl Lowerer<'_> {
                                 self.lower_expression(expression, ExpressionMode::Value)?,
                             )
                         }
-                    }),
+                    })),
                     None => None,
                 };
                 let condition = match &classic.condition {
@@ -895,6 +895,18 @@ impl Lowerer<'_> {
 
         let lowered = match &expression.kind {
             ExpressionKind::Name(path) => {
+                if let Some(callback) = self.semantics.callback(expression.span)
+                    && let CallbackTarget::Function(id) = callback.target
+                {
+                    let function = self.semantics.function(id)?;
+                    return Some(hir::Expression::FunctionItem {
+                        modules: function_module_path(function, self.semantics)
+                            .iter()
+                            .map(|name| module_name(name))
+                            .collect(),
+                        function: function.mangled_name.clone(),
+                    });
+                }
                 if path.segments.len() != 1 {
                     self.push(
                         "HIR007",
@@ -1020,6 +1032,9 @@ impl Lowerer<'_> {
                 );
                 return None;
             }
+            ExpressionKind::Lambda {
+                parameters, body, ..
+            } => self.lower_lambda(expression.span, parameters, body)?,
             ExpressionKind::Error => {
                 self.push(
                     "HIR003",
@@ -1039,6 +1054,105 @@ impl Lowerer<'_> {
         } else {
             Some(lowered)
         }
+    }
+
+    fn lower_lambda(
+        &mut self,
+        span: ast::Span,
+        syntax_parameters: &[ast::Parameter],
+        body: &ast::Block,
+    ) -> Option<hir::Expression> {
+        let callback = self.semantics.callback(span)?;
+        let TypeRef::Callback(callback_type) = &callback.ty else {
+            self.push(
+                "HIR018",
+                "resolved lambda has no callback type".to_owned(),
+                span,
+            );
+            return None;
+        };
+        let CallbackTarget::Lambda { captures } = &callback.target else {
+            self.push(
+                "HIR018",
+                "lambda expression resolved to a non-lambda callback target".to_owned(),
+                span,
+            );
+            return None;
+        };
+        let captures = captures
+            .iter()
+            .map(|capture| {
+                let outer = hir::Expression::Name(binding_name(&capture.name));
+                let initializer = match capture.mode {
+                    LambdaCaptureMode::Copy => hir::Expression::Clone {
+                        expression: Box::new(hir::Expression::Borrow {
+                            mutable: false,
+                            expression: Box::new(outer),
+                        }),
+                    },
+                    LambdaCaptureMode::Move => hir::Expression::Move(Box::new(outer)),
+                    LambdaCaptureMode::Borrow { mutable } => hir::Expression::Borrow {
+                        mutable,
+                        expression: Box::new(outer),
+                    },
+                };
+                hir::LambdaCapture {
+                    rust_name: binding_name(&capture.name),
+                    initializer,
+                }
+            })
+            .collect();
+        if syntax_parameters.len() != callback_type.parameters.len() {
+            self.push(
+                "HIR018",
+                "resolved callback parameters do not match lambda syntax".to_owned(),
+                span,
+            );
+            return None;
+        }
+        let parameters = syntax_parameters
+            .iter()
+            .zip(&callback_type.parameters)
+            .map(|(syntax, ty)| {
+                Some(hir::Parameter {
+                    source_name: syntax.name.clone(),
+                    rust_name: binding_name(&syntax.name),
+                    ty: self.lower_type(ty, syntax.ty.span)?,
+                    mutable: matches!(ty, TypeRef::Reference { mutable: true, .. })
+                        || (!ty.is_reference() && !syntax.ty.is_const),
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        let previous_return_type = self
+            .current_return_type
+            .replace(callback_type.return_type.as_ref().clone());
+        let previous_fluent = self.current_fluent_receiver;
+        let previous_constructor = self.current_constructor;
+        let previous_throwing = self.current_throwing;
+        let previous_target = std::mem::replace(
+            &mut self.exception_target,
+            hir::ExceptionTarget::Unreachable,
+        );
+        let previous_caught = self.caught_error.take();
+        let previous_loops = std::mem::take(&mut self.loop_labels);
+        self.current_fluent_receiver = false;
+        self.current_constructor = false;
+        self.current_throwing = false;
+        let lowered_body = self.lower_block(body);
+        self.current_return_type = previous_return_type;
+        self.current_fluent_receiver = previous_fluent;
+        self.current_constructor = previous_constructor;
+        self.current_throwing = previous_throwing;
+        self.exception_target = previous_target;
+        self.caught_error = previous_caught;
+        self.loop_labels = previous_loops;
+
+        Some(hir::Expression::Lambda {
+            captures,
+            parameters,
+            body: lowered_body?,
+        })
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1178,7 +1292,7 @@ impl Lowerer<'_> {
                 let symbol = self.semantics.structure(*structure)?;
                 let message = arguments.first()?;
                 let expected = TypeRef::Native {
-                    path: "rust::String",
+                    path: "rust::String".to_owned(),
                     arguments: Vec::new(),
                 };
                 Some(hir::Expression::Aggregate {
@@ -1267,7 +1381,7 @@ impl Lowerer<'_> {
                     ArgumentAdaptation::Identity => lowered,
                     ArgumentAdaptation::StringRefToStr => hir::Expression::MethodCall {
                         receiver: Box::new(lowered),
-                        rust_name: "as_str",
+                        rust_name: "as_str".to_owned(),
                         receiver_mode: Receiver::Shared,
                         arguments: Vec::new(),
                     },
@@ -1278,7 +1392,7 @@ impl Lowerer<'_> {
         match &native.lowering {
             RustLowering::AssociatedFunction { rust_path } => {
                 Some(hir::Expression::AssociatedCall {
-                    rust_path,
+                    rust_path: rust_path.clone(),
                     arguments: lowered_arguments,
                 })
             }
@@ -1302,7 +1416,7 @@ impl Lowerer<'_> {
                 };
                 Some(hir::Expression::MethodCall {
                     receiver: Box::new(self.lower_expression(receiver, expression_mode)?),
-                    rust_name,
+                    rust_name: rust_name.clone(),
                     receiver_mode,
                     arguments: lowered_arguments,
                 })
@@ -1332,7 +1446,7 @@ impl Lowerer<'_> {
         callee: Option<&ast::Expression>,
         arguments: &[ast::Expression],
         span: ast::Span,
-        wrapper_name: &'static str,
+        wrapper_name: &str,
         target: &crate::interop::WrapperTarget,
     ) -> Option<hir::Expression> {
         let receiver = match (native.receiver, &native.receiver_type) {
@@ -1362,7 +1476,7 @@ impl Lowerer<'_> {
             })
             .collect::<Option<Vec<_>>>()?;
         let wrapper = hir::NativeWrapper {
-            rust_name: wrapper_name,
+            rust_name: wrapper_name.to_owned(),
             target: target.clone(),
             receiver,
             parameters,
@@ -1378,7 +1492,8 @@ impl Lowerer<'_> {
                 return None;
             }
         } else {
-            self.native_wrappers.insert(wrapper_name, wrapper);
+            self.native_wrappers
+                .insert(wrapper_name.to_owned(), wrapper);
         }
 
         let mut lowered_arguments = Vec::new();
@@ -1420,7 +1535,7 @@ impl Lowerer<'_> {
                 .collect::<Option<Vec<_>>>()?,
         );
         Some(hir::Expression::WrapperCall {
-            rust_name: wrapper_name,
+            rust_name: wrapper_name.to_owned(),
             arguments: lowered_arguments,
         })
     }
@@ -1463,6 +1578,15 @@ impl Lowerer<'_> {
                         .collect::<Option<Vec<_>>>()?,
                 }
             }
+            TypeRef::Callback(callback) => hir::Type::Callback {
+                kind: callback.kind,
+                parameters: callback
+                    .parameters
+                    .iter()
+                    .map(|parameter| self.lower_type(parameter, span))
+                    .collect::<Option<Vec<_>>>()?,
+                return_type: Box::new(self.lower_type(&callback.return_type, span)?),
+            },
             TypeRef::Struct { path } => hir::Type::User {
                 rust_path: user_type_path(path),
             },
@@ -1500,17 +1624,17 @@ impl Lowerer<'_> {
 }
 
 fn native_type_path(
-    path: &'static str,
+    path: &str,
     semantics: &SemanticModel,
     span: ast::Span,
     diagnostics: &mut Vec<Diagnostic>,
-) -> Option<&'static str> {
+) -> Option<String> {
     match path {
-        "rust::Option" => Some("::std::option::Option"),
-        "rust::Result" => Some("::std::result::Result"),
+        "rust::Option" => Some("::std::option::Option".to_owned()),
+        "rust::Result" => Some("::std::result::Result".to_owned()),
         _ => semantics
             .native_type(path)
-            .map(|native| native.rust_path)
+            .map(|native| native.rust_path.clone())
             .or_else(|| {
                 diagnostics.push(Diagnostic::hir(
                     "HIR014",

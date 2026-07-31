@@ -21,6 +21,48 @@ pub use diagnostic::{Diagnostic, DiagnosticPhase};
 /// implemented by the front end.
 #[must_use]
 pub fn analyze(source: &str) -> Analysis {
+    match interop::standard_bindings() {
+        Ok(bindings) => analyze_with_bindings(source, &bindings),
+        Err(error) => {
+            let (parse, ast, mut diagnostics) = lower_frontend(source);
+            diagnostics.push(Diagnostic::semantic(
+                "INT001",
+                format!("invalid compiler-provided native bindings: {error}"),
+                ast.span,
+            ));
+            diagnostics.sort_by_key(|diagnostic| diagnostic.span);
+            Analysis {
+                parse,
+                ast,
+                semantics: resolution::SemanticModel::default(),
+                diagnostics,
+            }
+        }
+    }
+}
+
+/// Parses and analyzes one source file against an explicitly selected native
+/// binding registry.
+#[must_use]
+pub fn analyze_with_bindings(source: &str, bindings: &interop::NativeBindings) -> Analysis {
+    let (parse, ast, mut diagnostics) = lower_frontend(source);
+    let resolved = resolution::resolve(&ast, bindings);
+    diagnostics.extend(resolved.diagnostics);
+    let semantic_model = resolved.model;
+    if diagnostics.is_empty() {
+        diagnostics.extend(ownership::validate(&ast, &semantic_model));
+    }
+    diagnostics.sort_by_key(|diagnostic| diagnostic.span);
+
+    Analysis {
+        parse,
+        ast,
+        semantics: semantic_model,
+        diagnostics,
+    }
+}
+
+fn lower_frontend(source: &str) -> (stainless_syntax::Parse, ast::SourceFile, Vec<Diagnostic>) {
     let parse = stainless_syntax::parse(source);
     let ast = lowering::lower(&parse.tree());
     let mut diagnostics = parse
@@ -35,32 +77,7 @@ pub fn analyze(source: &str) -> Analysis {
         })
         .collect::<Vec<_>>();
     diagnostics.extend(semantics::validate(&ast));
-    let semantic_model = match interop::standard_bindings() {
-        Ok(bindings) => {
-            let resolved = resolution::resolve(&ast, &bindings);
-            diagnostics.extend(resolved.diagnostics);
-            resolved.model
-        }
-        Err(error) => {
-            diagnostics.push(Diagnostic::semantic(
-                "INT001",
-                format!("invalid compiler-provided native bindings: {error}"),
-                ast.span,
-            ));
-            resolution::SemanticModel::default()
-        }
-    };
-    if diagnostics.is_empty() {
-        diagnostics.extend(ownership::validate(&ast, &semantic_model));
-    }
-    diagnostics.sort_by_key(|diagnostic| diagnostic.span);
-
-    Analysis {
-        parse,
-        ast,
-        semantics: semantic_model,
-        diagnostics,
-    }
+    (parse, ast, diagnostics)
 }
 
 /// All front-end products for one source file.
@@ -93,7 +110,20 @@ pub struct TranspileResult {
 /// prevents Rust output instead of producing a partially trustworthy file.
 #[must_use]
 pub fn transpile(source: &str) -> TranspileResult {
-    let mut analysis = analyze(source);
+    transpile_analysis(analyze(source))
+}
+
+/// Transpiles one source file against an explicitly selected native binding
+/// registry.
+#[must_use]
+pub fn transpile_with_bindings(
+    source: &str,
+    bindings: &interop::NativeBindings,
+) -> TranspileResult {
+    transpile_analysis(analyze_with_bindings(source, bindings))
+}
+
+fn transpile_analysis(mut analysis: Analysis) -> TranspileResult {
     if !analysis.diagnostics.is_empty() {
         return TranspileResult {
             analysis,

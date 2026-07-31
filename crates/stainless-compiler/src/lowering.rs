@@ -345,6 +345,7 @@ fn lower_for_clause(clause: cst::ForClause) -> ForClause {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn lower_expression(expression: cst::Expression) -> Expression {
     let expression_span = span(&expression);
     let kind = match expression {
@@ -410,6 +411,56 @@ fn lower_expression(expression: cst::Expression) -> Expression {
             ExpressionKind::Index {
                 receiver: Box::new(lower_expression(receiver)),
                 index: Box::new(lower_expression(index)),
+            }
+        }
+        cst::Expression::Lambda(lambda) => {
+            let captures = lambda
+                .capture_list()
+                .into_iter()
+                .flat_map(|list| list.captures())
+                .map(|capture| {
+                    let capture_span = span(&capture);
+                    let name = capture
+                        .name_token()
+                        .map_or_else(missing_name, |token| token.text().to_owned());
+                    let kind = if capture.is_borrowed() {
+                        ast::LambdaCaptureKind::Borrow
+                    } else if let Some(initializer) = capture.initializer() {
+                        ast::LambdaCaptureKind::Initialize(Box::new(lower_expression(initializer)))
+                    } else {
+                        ast::LambdaCaptureKind::Copy
+                    };
+                    ast::LambdaCapture {
+                        name,
+                        kind,
+                        span: capture_span,
+                    }
+                })
+                .collect();
+            let parameters = lambda
+                .parameter_list()
+                .into_iter()
+                .flat_map(|list| list.parameters())
+                .map(|parameter| {
+                    let parameter_span = span(&parameter);
+                    ast::Parameter {
+                        ty: parameter
+                            .ty()
+                            .map_or_else(|| error_type(parameter_span), |ty| lower_type(&ty)),
+                        name: parameter
+                            .name_token()
+                            .map_or_else(missing_name, |token| token.text().to_owned()),
+                        span: parameter_span,
+                    }
+                })
+                .collect();
+            let Some(body) = lambda.body() else {
+                return error_expression(expression_span);
+            };
+            ExpressionKind::Lambda {
+                captures,
+                parameters,
+                body: lower_block(&body),
             }
         }
         cst::Expression::Error(_) => ExpressionKind::Error,

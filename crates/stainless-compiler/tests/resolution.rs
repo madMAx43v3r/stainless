@@ -1,6 +1,9 @@
-use stainless_compiler::analyze;
-use stainless_compiler::interop::{ArgumentAdaptation, CallStyle, Receiver, RustLowering, TypeRef};
+use stainless_compiler::interop::{
+    ArgumentAdaptation, CallStyle, Receiver, RustLowering, TypeRef, parse_bindings_manifest,
+    standard_bindings,
+};
 use stainless_compiler::resolution::{CallTarget, Intrinsic, RustErrorMessage};
+use stainless_compiler::{analyze, analyze_with_bindings};
 
 #[test]
 fn resolves_reference_parser_fixtures_without_semantic_errors() {
@@ -10,7 +13,6 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
         include_str!("../../../docs/ref/13_range_for.stl"),
         include_str!("../../../docs/ref/15_checked_exception_subset.stl"),
         include_str!("../../../docs/ref/16_native_result_unwrap.stl"),
-        include_str!("../../../docs/ref/17_external_regex_wrapper.stl"),
     ] {
         let analysis = analyze(source);
 
@@ -20,6 +22,141 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
             analysis.diagnostics
         );
     }
+}
+
+#[test]
+fn resolves_external_reference_fixture_with_its_manifest() {
+    let external = parse_bindings_manifest(include_str!(
+        "../../../docs/ref/17_external_regex_wrapper.bindings.toml"
+    ))
+    .unwrap();
+    let bindings = standard_bindings().unwrap().merge(external).unwrap();
+    let analysis = analyze_with_bindings(
+        include_str!("../../../docs/ref/17_external_regex_wrapper.stl"),
+        &bindings,
+    );
+
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
+fn resolves_external_callback_fixture_with_its_manifest() {
+    let bindings = callback_bindings();
+    let analysis = analyze_with_bindings(
+        include_str!("../../../docs/ref/18_external_callbacks.stl"),
+        &bindings,
+    );
+
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:?}",
+        analysis.diagnostics
+    );
+    assert_eq!(analysis.semantics.callbacks.len(), 5);
+}
+
+#[test]
+fn callback_resolution_rejects_ambiguous_unsafe_and_non_contextual_forms() {
+    let bindings = callback_bindings();
+    let analysis = analyze_with_bindings(
+        r#"use rust::String;
+use rust::callback_fixture::Processor;
+
+struct CallbackError : stainless::Exception {};
+
+i32 throwing_callback(i32 value) throws CallbackError {
+    throw CallbackError{stainless::Exception("callback failure")};
+}
+
+void contextless_lambda() {
+    auto callback = [](i32 value) {
+        return value;
+    };
+}
+
+void invalid_callbacks(const i32& reference) {
+    Processor processor = Processor::new(1);
+    i32 captured = 2;
+    String owned = "not copyable";
+
+    processor.apply_fn_ptr(1, [captured](i32 value) {
+        return captured + value;
+    });
+    processor.inspect(1, [](i32 value) {
+        return captured + value;
+    });
+    processor.inspect(1, [owned](i32 value) {
+        return value;
+    });
+    processor.inspect(1, [reference](i32 value) {
+        return value;
+    });
+    processor.inspect(1, [captured = captured](i32 value) {
+        return captured + value;
+    });
+    processor.inspect(1, [](i32 value) {
+        return;
+    });
+    processor.inspect(1, throwing_callback);
+}
+"#,
+        &bindings,
+    );
+    let codes = analysis
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+
+    for expected in ["RES082", "RES085", "RES086", "RES088", "RES089", "RES090"] {
+        assert!(
+            codes.contains(&expected),
+            "missing {expected}: {:?}",
+            analysis.diagnostics
+        );
+    }
+    assert!(
+        analysis.diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("unresolved value name `captured`")),
+        "{:?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
+fn moved_callback_capture_invalidates_the_outer_binding() {
+    let bindings = callback_bindings();
+    let analysis = analyze_with_bindings(
+        r"use rust::callback_fixture::Processor;
+
+i32 invalid_after_capture() {
+    Processor processor = Processor::new(1);
+    i32 factor = 2;
+    i32 output = processor.inspect(
+        1,
+        [factor = move(factor)](i32 value) {
+            return factor * value;
+        }
+    );
+    return output + factor;
+}
+",
+        &bindings,
+    );
+
+    assert!(
+        analysis
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "OWN001"),
+        "{:?}",
+        analysis.diagnostics
+    );
 }
 
 #[test]
@@ -59,7 +196,7 @@ usize native_calls(const String& suffix) {
     assert_eq!(
         native_calls
             .iter()
-            .map(|call| (call.style, call.source_name))
+            .map(|call| (call.style, call.source_name.as_str()))
             .collect::<Vec<_>>(),
         [
             (CallStyle::Constructor, "Vec"),
@@ -79,7 +216,7 @@ usize native_calls(const String& suffix) {
     assert_eq!(
         default_vec.lowering,
         RustLowering::AssociatedFunction {
-            rust_path: "::std::vec::Vec::new"
+            rust_path: "::std::vec::Vec::new".to_owned()
         }
     );
 
@@ -432,4 +569,12 @@ i32 implicit_without_move(
             analysis.diagnostics
         );
     }
+}
+
+fn callback_bindings() -> stainless_compiler::interop::NativeBindings {
+    let external = parse_bindings_manifest(include_str!(
+        "../../../docs/ref/18_external_callbacks.bindings.toml"
+    ))
+    .unwrap();
+    standard_bindings().unwrap().merge(external).unwrap()
 }

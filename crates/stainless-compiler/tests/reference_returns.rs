@@ -108,14 +108,16 @@ fn method(
     return_borrow: ReturnBorrow,
 ) -> CallableBinding {
     CallableBinding {
-        source_name: name,
+        source_name: name.to_owned(),
         style: CallStyle::Method,
         receiver: Some(receiver),
         parameters: vec![],
         return_type,
         return_borrow: Some(return_borrow),
         requirements: vec![],
-        lowering: RustLowering::Method { rust_name: name },
+        lowering: RustLowering::Method {
+            rust_name: name.to_owned(),
+        },
     }
 }
 
@@ -126,7 +128,7 @@ fn associated(
     return_borrow: ReturnBorrow,
 ) -> CallableBinding {
     CallableBinding {
-        source_name: name,
+        source_name: name.to_owned(),
         style: CallStyle::AssociatedFunction,
         receiver: None,
         parameters,
@@ -134,15 +136,15 @@ fn associated(
         return_borrow: Some(return_borrow),
         requirements: vec![],
         lowering: RustLowering::AssociatedFunction {
-            rust_path: "::core::convert::identity",
+            rust_path: "::core::convert::identity".to_owned(),
         },
     }
 }
 
 fn native_type(callables: Vec<CallableBinding>) -> NativeTypeBinding {
     NativeTypeBinding {
-        stainless_path: TYPE_PATH,
-        rust_path: "::borrow_fixture::BorrowFixture",
+        stainless_path: TYPE_PATH.to_owned(),
+        rust_path: "::borrow_fixture::BorrowFixture".to_owned(),
         type_parameters: vec![],
         error_format: None,
         callables,
@@ -150,11 +152,11 @@ fn native_type(callables: Vec<CallableBinding>) -> NativeTypeBinding {
 }
 
 fn assert_invalid(callable: CallableBinding, reason: ReturnBorrowError) {
-    let callable_name = callable.source_name;
+    let callable_name = callable.source_name.clone();
     assert_eq!(
         NativeBindings::new(vec![native_type(vec![callable])]),
         Err(BindingError::InvalidReturnBorrow {
-            type_path: TYPE_PATH,
+            type_path: TYPE_PATH.to_owned(),
             callable: callable_name,
             reason,
         })

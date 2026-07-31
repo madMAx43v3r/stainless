@@ -202,7 +202,7 @@ pub enum CallTarget {
     /// A user-defined or synthesized struct constructor.
     Constructor(ConstructorId),
     /// A compiler-described native Rust callable.
-    Native(NativeCall),
+    Native(Box<NativeCall>),
     /// A compiler language operation.
     Intrinsic(Intrinsic),
 }
@@ -211,11 +211,11 @@ pub enum CallTarget {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeCall {
     /// Canonical Stainless type path, such as `rust::Vec`.
-    pub type_path: &'static str,
+    pub type_path: String,
     /// Constructor, associated-function, or method form.
     pub style: CallStyle,
     /// Source-visible callable name.
-    pub source_name: &'static str,
+    pub source_name: String,
     /// Receiver behavior for methods.
     pub receiver: Option<Receiver>,
     /// Concrete receiver type for generated method wrappers.
@@ -238,7 +238,7 @@ pub struct ResolvedTraitRequirement {
     /// Concrete type that must implement the trait.
     pub ty: TypeRef,
     /// Fully qualified Rust trait path.
-    pub rust_trait: &'static str,
+    pub rust_trait: String,
 }
 
 /// Compiler intrinsics accepted by the initial resolver.
@@ -293,13 +293,61 @@ pub struct RustResultAdaptation {
     pub error_message: RustErrorMessage,
 }
 
-/// Rust representation retained for one resolved native type.
+/// One callback-valued expression selected through contextual binding metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedCallback {
+    /// Lambda or named-function expression range.
+    pub span: Span,
+    /// Exact contextual callback type.
+    pub ty: TypeRef,
+    /// Source form supplying the callback.
+    pub target: CallbackTarget,
+}
+
+/// Source operation used to construct a contextual callback.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CallbackTarget {
+    /// A Stainless free-function item.
+    Function(FunctionId),
+    /// An explicit-capture lambda.
+    Lambda {
+        /// Validated captures in source order.
+        captures: Vec<ResolvedLambdaCapture>,
+    },
+}
+
+/// One validated explicit lambda capture.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedLambdaCapture {
+    /// Lambda-local and outer binding name.
+    pub name: String,
+    /// Resolved captured value type before applying borrow mode.
+    pub ty: TypeRef,
+    /// Capture ownership operation.
+    pub mode: LambdaCaptureMode,
+}
+
+/// Ownership operation performed when constructing a lambda.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LambdaCaptureMode {
+    /// Clone a Stainless-copyable value into the lambda.
+    Copy,
+    /// Move the value into the lambda and invalidate the outer binding.
+    Move,
+    /// Borrow the value for the duration of the native call.
+    Borrow {
+        /// Whether the outer binding permits mutable access.
+        mutable: bool,
+    },
+}
+
+/// Rust representation retained for one resolved native type.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedNativeType {
     /// Canonical Stainless path below `rust::`.
-    pub stainless_path: &'static str,
+    pub stainless_path: String,
     /// Fully qualified Rust type path.
-    pub rust_path: &'static str,
+    pub rust_path: String,
 }
 
 /// Successfully retained semantic facts for one source file.
@@ -321,6 +369,8 @@ pub struct SemanticModel {
     pub calls: Vec<ResolvedCall>,
     /// Target-typed native Result conversions in traversal order.
     pub rust_result_adaptations: Vec<RustResultAdaptation>,
+    /// Contextual callback expressions in traversal order.
+    pub callbacks: Vec<ResolvedCallback>,
 }
 
 impl SemanticModel {
@@ -328,9 +378,15 @@ impl SemanticModel {
     #[must_use]
     pub fn native_type(&self, path: &str) -> Option<&ResolvedNativeType> {
         self.native_types
-            .binary_search_by_key(&path, |native| native.stainless_path)
+            .binary_search_by_key(&path, |native| native.stainless_path.as_str())
             .ok()
             .map(|index| &self.native_types[index])
+    }
+
+    /// Finds callback metadata for an exact lambda or function-name expression.
+    #[must_use]
+    pub fn callback(&self, span: Span) -> Option<&ResolvedCallback> {
+        self.callbacks.iter().find(|callback| callback.span == span)
     }
 
     /// Finds a struct by its stable semantic ID.

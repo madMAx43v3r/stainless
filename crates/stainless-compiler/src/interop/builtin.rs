@@ -1,6 +1,6 @@
 use super::model::{
-    ArgumentAdaptation, CallStyle, CallableBinding, NativeBindings, NativeErrorFormat,
-    NativeTypeBinding, Parameter, Receiver, RustLowering, TraitRequirement, TypeRef, WrapperTarget,
+    ArgumentAdaptation, CallStyle, CallableBinding, NativeBindings, NativeTypeBinding, Parameter,
+    Receiver, RustLowering, TraitRequirement, TypeRef,
 };
 
 const T: &str = "T";
@@ -15,13 +15,11 @@ const T: &str = "T";
 /// Returns an error if compiler-provided metadata violates registry
 /// invariants. Such an error indicates a compiler implementation defect.
 pub fn standard_bindings() -> Result<NativeBindings, super::BindingError> {
-    let mut bindings = vec![string_binding(), vec_binding()];
-    bindings.extend(regex_bindings());
-    NativeBindings::new(bindings)
+    NativeBindings::new(vec![string_binding(), vec_binding()])
 }
 
 fn vec_binding() -> NativeTypeBinding {
-    let t = TypeRef::Parameter(T);
+    let t = TypeRef::Parameter(T.to_owned());
     let vec_t = vec_of(t.clone());
     let mut callables = vec_construction(&vec_t);
     callables.extend(vec_capacity_methods());
@@ -29,9 +27,9 @@ fn vec_binding() -> NativeTypeBinding {
     callables.extend(vec_trait_methods(&t, &vec_t));
 
     NativeTypeBinding {
-        stainless_path: "rust::Vec",
-        rust_path: "::std::vec::Vec",
-        type_parameters: vec![T],
+        stainless_path: "rust::Vec".to_owned(),
+        rust_path: "::std::vec::Vec".to_owned(),
+        type_parameters: vec![T.to_owned()],
         error_format: None,
         callables,
     }
@@ -44,7 +42,7 @@ fn vec_construction(vec_t: &TypeRef) -> Vec<CallableBinding> {
             vec![],
             vec_t.clone(),
             RustLowering::AssociatedFunction {
-                rust_path: "::std::vec::Vec::new",
+                rust_path: "::std::vec::Vec::new".to_owned(),
             },
         ),
         associated(
@@ -172,73 +170,12 @@ fn string_binding() -> NativeTypeBinding {
     callables.extend(string_query_methods(&string, &string_ref));
 
     NativeTypeBinding {
-        stainless_path: "rust::String",
-        rust_path: "::std::string::String",
+        stainless_path: "rust::String".to_owned(),
+        rust_path: "::std::string::String".to_owned(),
         type_parameters: vec![],
         error_format: None,
         callables,
     }
-}
-
-fn regex_bindings() -> Vec<NativeTypeBinding> {
-    let regex = TypeRef::native("rust::regex::Regex", vec![]);
-    let error = TypeRef::native("rust::regex::Error", vec![]);
-    let result = TypeRef::native("rust::Result", vec![regex.clone(), error]);
-    let string_ref = TypeRef::shared_ref(string_type());
-    let pattern = Parameter::adapted(
-        "pattern",
-        string_ref.clone(),
-        ArgumentAdaptation::StringRefToStr,
-    );
-    let text = Parameter::adapted("text", string_ref, ArgumentAdaptation::StringRefToStr);
-
-    vec![
-        NativeTypeBinding {
-            stainless_path: "rust::regex::Error",
-            rust_path: "::regex::Error",
-            type_parameters: vec![],
-            error_format: Some(NativeErrorFormat::Display),
-            callables: vec![],
-        },
-        NativeTypeBinding {
-            stainless_path: "rust::regex::Regex",
-            rust_path: "::regex::Regex",
-            type_parameters: vec![],
-            error_format: None,
-            callables: vec![
-                CallableBinding {
-                    source_name: "new",
-                    style: CallStyle::AssociatedFunction,
-                    receiver: None,
-                    parameters: vec![pattern],
-                    return_type: result,
-                    return_borrow: None,
-                    requirements: vec![],
-                    lowering: RustLowering::GeneratedWrapper {
-                        wrapper_name: "__stainless_wrapper_regex_Regex_new",
-                        target: WrapperTarget::Function {
-                            rust_path: "::regex::Regex::new",
-                        },
-                    },
-                },
-                CallableBinding {
-                    source_name: "is_match",
-                    style: CallStyle::Method,
-                    receiver: Some(Receiver::Shared),
-                    parameters: vec![text],
-                    return_type: TypeRef::Bool,
-                    return_borrow: None,
-                    requirements: vec![],
-                    lowering: RustLowering::GeneratedWrapper {
-                        wrapper_name: "__stainless_wrapper_regex_Regex_is_match",
-                        target: WrapperTarget::Method {
-                            rust_name: "is_match",
-                        },
-                    },
-                },
-            ],
-        },
-    ]
 }
 
 fn string_construction(string: &TypeRef, string_ref: &TypeRef) -> Vec<CallableBinding> {
@@ -248,7 +185,7 @@ fn string_construction(string: &TypeRef, string_ref: &TypeRef) -> Vec<CallableBi
             vec![],
             string.clone(),
             RustLowering::AssociatedFunction {
-                rust_path: "::std::string::String::new",
+                rust_path: "::std::string::String::new".to_owned(),
             },
         ),
         constructor(
@@ -404,7 +341,7 @@ fn constructor(
     lowering: RustLowering,
 ) -> CallableBinding {
     CallableBinding {
-        source_name,
+        source_name: source_name.to_owned(),
         style: CallStyle::Constructor,
         receiver: None,
         parameters,
@@ -422,14 +359,16 @@ fn associated(
     rust_path: &'static str,
 ) -> CallableBinding {
     CallableBinding {
-        source_name,
+        source_name: source_name.to_owned(),
         style: CallStyle::AssociatedFunction,
         receiver: None,
         parameters,
         return_type,
         return_borrow: None,
         requirements: vec![],
-        lowering: RustLowering::AssociatedFunction { rust_path },
+        lowering: RustLowering::AssociatedFunction {
+            rust_path: rust_path.to_owned(),
+        },
     }
 }
 
@@ -450,7 +389,7 @@ fn method_with_requirements(
     requirements: Vec<TraitRequirement>,
 ) -> CallableBinding {
     CallableBinding {
-        source_name,
+        source_name: source_name.to_owned(),
         style: CallStyle::Method,
         receiver: Some(receiver),
         parameters,
@@ -458,7 +397,7 @@ fn method_with_requirements(
         return_borrow: None,
         requirements,
         lowering: RustLowering::Method {
-            rust_name: source_name,
+            rust_name: source_name.to_owned(),
         },
     }
 }
@@ -489,8 +428,8 @@ fn string_ref_method(
 
 fn requirement(parameter: &'static str, rust_trait: &'static str) -> TraitRequirement {
     TraitRequirement {
-        parameter,
-        rust_trait,
+        parameter: parameter.to_owned(),
+        rust_trait: rust_trait.to_owned(),
     }
 }
 

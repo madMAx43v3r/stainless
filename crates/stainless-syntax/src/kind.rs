@@ -141,6 +141,9 @@ define_syntax_kinds! {
     InitializerList,
     FieldExpression,
     IndexExpression,
+    LambdaExpression,
+    CaptureList,
+    LambdaCapture,
     Error,
 }
 
