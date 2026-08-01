@@ -2326,6 +2326,7 @@ impl Resolver<'_> {
         temporary(canonical(expected))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn resolve_range_binding(
         &mut self,
         range: &ast::RangeForClause,
@@ -2346,82 +2347,153 @@ impl Resolver<'_> {
             }
             return;
         };
-        if *path != "rust::Vec" || arguments.len() != 1 {
+        let (elements, permits_mutable_iteration, structured) =
+            match (path.as_str(), arguments.as_slice()) {
+                ("rust::Vec" | "rust::List" | "rust::Queue", [element]) => {
+                    (vec![element.clone()], true, false)
+                }
+                ("rust::Set", [element]) => (vec![element.clone()], false, false),
+                ("rust::Map", [key, value]) => (vec![key.clone(), value.clone()], true, true),
+                _ => {
+                    self.push(
+                        "RES006",
+                        format!(
+                            "range iteration is not implemented for `{}`",
+                            display_type(&canonical_iterable)
+                        ),
+                        range.iterable.span,
+                    );
+                    return;
+                }
+            };
+        if range.bindings.len() != elements.len() {
             self.push(
-                "RES006",
-                format!(
-                    "range iteration is not implemented for `{}`",
-                    display_type(&canonical_iterable)
-                ),
-                range.iterable.span,
+                "RES007",
+                if structured {
+                    "map iteration requires `[key, value]` structured bindings".to_owned()
+                } else {
+                    format!("`{path}` iteration requires one element binding")
+                },
+                range.ty.span,
             );
             return;
         }
-        let element = arguments[0].clone();
-        let binding_type = if range.ty.is_inferred() {
-            if range.ty.is_reference {
-                TypeRef::Reference {
-                    mutable: !range.ty.is_const,
-                    target: Box::new(element.clone()),
-                }
-            } else {
-                element.clone()
-            }
-        } else {
-            self.resolve_type(&range.ty, &context.namespace, false)
-        };
-        self.reject_bare_interface_type(&binding_type, range.ty.span, "range binding");
-        if canonical(&binding_type) != element {
+        if structured && !range.ty.is_inferred() {
             self.push(
                 "RES007",
-                format!(
-                    "range binding type `{}` does not exactly match element type `{}`",
-                    display_type(&binding_type),
-                    display_type(&element)
-                ),
+                "map structured bindings require `auto`, `const auto&`, or `auto&`".to_owned(),
                 range.ty.span,
             );
         }
-        if matches!(binding_type, TypeRef::Reference { mutable: true, .. })
-            && iterable.category != ValueCategory::MutablePlace
+
+        let binding_types = if structured {
+            if range.ty.is_reference {
+                vec![
+                    TypeRef::shared_ref(elements[0].clone()),
+                    TypeRef::Reference {
+                        mutable: !range.ty.is_const,
+                        target: Box::new(elements[1].clone()),
+                    },
+                ]
+            } else {
+                elements.clone()
+            }
+        } else {
+            let element = &elements[0];
+            vec![if range.ty.is_inferred() {
+                if range.ty.is_reference {
+                    TypeRef::Reference {
+                        mutable: !range.ty.is_const,
+                        target: Box::new(element.clone()),
+                    }
+                } else {
+                    element.clone()
+                }
+            } else {
+                self.resolve_type(&range.ty, &context.namespace, false)
+            }]
+        };
+
+        for ((syntax, binding_type), element) in
+            range.bindings.iter().zip(&binding_types).zip(&elements)
         {
+            self.reject_bare_interface_type(binding_type, syntax.span, "range binding");
+            if canonical(binding_type) != *element {
+                self.push(
+                    "RES007",
+                    format!(
+                        "range binding type `{}` does not exactly match element type `{}`",
+                        display_type(binding_type),
+                        display_type(element)
+                    ),
+                    syntax.span,
+                );
+            }
+        }
+
+        let mutable_iteration = binding_types
+            .iter()
+            .any(|ty| matches!(ty, TypeRef::Reference { mutable: true, .. }));
+        if mutable_iteration && iterable.category != ValueCategory::MutablePlace {
             self.push(
                 "RES008",
                 "mutable range binding requires a mutable range".to_owned(),
                 range.iterable.span,
             );
         }
-        if !binding_type.is_reference()
-            && iterable.category != ValueCategory::Temporary
-            && !is_copyable(&element)
-        {
+        if mutable_iteration && !permits_mutable_iteration {
             self.push(
-                "RES009",
+                "RES008",
                 format!(
-                    "copying range elements of type `{}` is not implicit; consume the range with `move`",
-                    display_type(&element)
+                    "mutable range iteration is not supported for ordered collection `{path}` because changing an element could invalidate its order"
                 ),
                 range.ty.span,
             );
         }
+        if binding_types.iter().all(|ty| !ty.is_reference())
+            && iterable.category != ValueCategory::Temporary
+        {
+            for (syntax, element) in range.bindings.iter().zip(&elements) {
+                if !is_copyable(element) {
+                    self.push(
+                        "RES009",
+                        format!(
+                            "copying range elements of type `{}` is not implicit; consume the range with `move`",
+                            display_type(element)
+                        ),
+                        syntax.span,
+                    );
+                }
+            }
+        }
 
-        let variable = Variable {
-            mutable: matches!(binding_type, TypeRef::Reference { mutable: true, .. })
-                || (!binding_type.is_reference() && !range.ty.is_const),
-            ty: binding_type,
-            null_state: NullState::Unknown,
-        };
-        self.model.bindings.push(BindingResolution {
-            span: range.ty.span,
-            name: range.name.clone(),
-            ty: variable.ty.clone(),
-            mutable: variable.mutable,
-        });
+        let variables = range
+            .bindings
+            .iter()
+            .zip(binding_types)
+            .map(|(syntax, binding_type)| {
+                let variable = Variable {
+                    mutable: matches!(binding_type, TypeRef::Reference { mutable: true, .. })
+                        || (!binding_type.is_reference() && !range.ty.is_const),
+                    ty: binding_type,
+                    null_state: NullState::Unknown,
+                };
+                self.model.bindings.push(BindingResolution {
+                    span: syntax.span,
+                    name: syntax.name.clone(),
+                    ty: variable.ty.clone(),
+                    mutable: variable.mutable,
+                });
+                (syntax, variable)
+            })
+            .collect::<Vec<_>>();
         let scope = context
             .scopes
             .last_mut()
             .expect("a function context always has a scope");
-        self.insert_variable(scope, &range.name, variable, range.ty.span);
+        for (syntax, variable) in variables {
+            self.insert_variable(scope, &syntax.name, variable, syntax.span);
+        }
     }
 
     #[allow(clippy::too_many_lines)]
@@ -6965,6 +7037,10 @@ impl Resolver<'_> {
                     path.as_str(),
                     "rust::String"
                         | "rust::Vec"
+                        | "rust::List"
+                        | "rust::Map"
+                        | "rust::Queue"
+                        | "rust::Set"
                         | "rust::Option"
                         | "rust::Result"
                         | "rust::stainless_runtime::Var"

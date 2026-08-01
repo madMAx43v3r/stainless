@@ -7,7 +7,8 @@ Stainless is a new C++-like language that transpiles to Rust.
 > and Rowan parser, typed CST views, compiler-owned AST lowering, structural
 > diagnostics, an initial name/type/call resolver, a typed Rust-shaped HIR, and
 > structured Rust emission for the supported function/control-flow,
-> struct/class/interface, constructor, checked-exception, `Vec`/`String`, native
+> struct/class/interface, constructor, checked-exception, standard collections,
+> `Vec`/`String`, native
 > JSON, the local/function ownership-pointer family, mutex/condition
 > synchronization, owned/scoped threads, and first external-wrapper subset. The
 > workspace now includes the compact
@@ -167,6 +168,8 @@ implemented:
 - [`24_threads.stl`](docs/ref/24_threads.stl) — owned and scoped Rust threads,
   `Send` capture validation, move-only join handles, typed results, and checked
   thread-panic conversion.
+- [`25_collections.stl`](docs/ref/25_collections.stl) — doubly linked lists,
+  double-ended queues, and ordered maps and sets.
 
 `01_basics.stl`, `02_structs_and_data_inheritance.stl`,
 `11_vec_and_string.stl`, `13_range_for.stl`, and `14_constructors.stl` are
@@ -176,8 +179,9 @@ currently parsed, resolved, lowered to HIR, emitted as Rust, and compiled by
 `16_native_result_unwrap.stl` sample, and the formatting-macro
 `20_formatting_macros.stl` sample, and the ownership-pointer
 `22_pointer_family.stl` sample and the mutex/condition
-`23_mutex_and_condition.stl` sample, plus the owned/scoped thread
-`24_threads.stl` sample. The JSON
+`23_mutex_and_condition.stl` sample, the owned/scoped thread
+`24_threads.stl` sample, and the standard-collection `25_collections.stl`
+sample. The JSON
 `21_json_support.stl` sample is compiled and executed through Cargo against
 the real `stainless-runtime` and `serde_json`. The external
 `17_external_regex_wrapper.stl` sample is compiled and executed through Cargo
@@ -206,7 +210,8 @@ constructs with direct Rust equivalents:
   synchronized counterparts;
 - other safe Rust library types under their real names, imported through the
   reserved `rust` namespace, including `rust::Option<T>`, `rust::Result<T>`,
-  `rust::Vec<T>`, and `rust::String`;
+  `rust::Vec<T>`, `rust::String`, `rust::List<T>`, `rust::Queue<T>`,
+  `rust::Map<K, V>`, and `rust::Set<T>`;
 - compiler-native `var`, `null`, and JSON literals backed by the compact
   runtime, with checked parsing/mutation and reference-counted object/array
   identity;
@@ -488,13 +493,14 @@ Every native Rust item is rooted under the compiler-provided `rust` namespace:
 ```cpp
 use rust::Vec;
 use rust::{Option, Result, String};
-use rust::std::collections::HashMap;
+use rust::{List, Map, Queue, Set};
 use rust::regex::Regex;
 ```
 
 The virtual root exposes Rust prelude items such as `Vec` and `String` directly,
-standard crates below `rust::core`, `rust::alloc`, and `rust::std`, and each
-Cargo dependency below `rust::<dependency>`. Native Rust names do not enter a
+the Stainless collection aliases `List`, `Queue`, `Map`, and `Set`, standard
+crates below `rust::core`, `rust::alloc`, and `rust::std`, and each Cargo
+dependency below `rust::<dependency>`. Native Rust names do not enter a
 Stainless namespace automatically. Importing `use rust::Vec;` makes the short
 name `Vec` available in that scope; without the import it must be written
 `rust::Vec`.
@@ -612,11 +618,24 @@ compiler-managed locals, the binding's scope is the loop body, and normal
 through a direct reference return already proven to originate from the range's
 owner; it cannot be stored or captured independently.
 
-The initial semantic implementation will support `rust::Vec<T>`. Other native
-types require binding metadata for shared, mutable, and owned iteration modes.
-Rust `String` is not implicitly treated as a character range because it does
-not implement Rust's owned `IntoIterator` API. Structured bindings, index-aware
-range syntax, and C++ forwarding references such as `auto&&` are deferred.
+Range iteration is implemented for `rust::Vec<T>`, `rust::List<T>`,
+`rust::Queue<T>`, and `rust::Set<T>`. Ordered-set iteration permits shared,
+copied, and consuming bindings but rejects mutable element references because
+changing an element could invalidate the set's order. Ordered maps use C++
+structured bindings:
+
+```cpp
+for (const auto& [key, value] : values) {
+    println!("{} = {}", key, value);
+}
+```
+
+`auto& [key, value]` permits mutation through `value` while `key` remains a
+constant reference, preserving map order. Copied and explicitly consuming map
+bindings are also supported when both component types have the required value
+semantics. Rust `String` is not implicitly treated as a character range because
+it does not implement Rust's owned `IntoIterator` API. Index-aware range syntax
+and C++ forwarding references such as `auto&&` are deferred.
 
 ### Reserved implementation identifiers
 
@@ -2029,10 +2048,11 @@ metadata for the supported Rust toolchain's representable `core`, `alloc`, and
 validated; it can become machine-generated when the metadata format and
 generator are mature. This is type/trait/borrow metadata, not wrapper
 implementations or a second API. Its paths and names remain Rust's except for
-the explicit ownership mapping, its version is tied to the supported Rust
-toolchain, and generated calls are revalidated by that toolchain.
+the explicit ownership mapping and the `List`/`Queue`/`Map`/`Set` collection
+aliases, its version is tied to the supported Rust toolchain, and generated
+calls are revalidated by that toolchain.
 
-#### Implemented `Vec` and `String` subset
+#### Implemented `Vec`, `String`, and collection subset
 
 The compiler crate currently registers the following source-visible APIs:
 
@@ -2048,6 +2068,20 @@ The compiler crate currently registers the following source-visible APIs:
   `is_ascii`, `contains`, `starts_with`, `ends_with`,
   `eq_ignore_ascii_case`, `replace`, `repeat`, `to_lowercase`, and
   `to_uppercase`.
+- `rust::List<T>`: a doubly linked list backed by Rust `LinkedList<T>`, with
+  `List()`, `len`, `is_empty`, `clear`, `push_front`, `push_back`, `pop_front`,
+  `pop_back`, `append`, `contains`, and `clone`.
+- `rust::Queue<T>`: a double-ended queue backed by Rust `VecDeque<T>`, with
+  `Queue()`, `Queue::with_capacity`, capacity/reservation methods, `len`,
+  `is_empty`, `clear`, `truncate`, front/back push and pop, indexed `insert`
+  and `remove`, front/back swap removal, `append`, rotation, `contains`, and
+  `clone`.
+- `rust::Map<K, V>`: an ordered map backed by Rust `BTreeMap<K, V>`, with
+  `Map()`, `len`, `is_empty`, `clear`, `insert`, `remove`, `contains_key`,
+  `append`, `clone`, and key/value structured-binding range iteration.
+- `rust::Set<T>`: an ordered set backed by Rust `BTreeSet<T>`, with `Set()`,
+  `len`, `is_empty`, `clear`, `insert`, `replace`, `remove`, `take`,
+  `contains`, `append`, and `clone`.
 
 The metadata records `&self`, `&mut self`, and consuming `self` separately.
 Generic `Vec` methods also retain their Rust trait requirements: `clone`
@@ -2056,9 +2090,14 @@ requires `T: Ord`. Stainless `const String&` arguments to Rust string-slice
 parameters are resolved as exact Stainless parameters first and adapted to
 Rust `&str` only during lowering.
 
+Ordered map keys and set elements retain Rust's `Ord` requirement. Collection
+`clone` methods retain the corresponding element/key/value `Clone` bounds, and
+list/queue membership retains `PartialEq`. These are compile-checked again by
+the selected Rust toolchain.
+
 The binding model supports direct reference returns and records whether their
 borrow originates from the receiver or the callable's one reference parameter.
-None of the initial `Vec` and `String` bindings need such a return yet.
+None of the initial collection bindings need such a return yet.
 Reference-bearing values, iterator-producing APIs, and indexing are not exposed
 in this first subset: `Vec::get` returns `Option<&T>`, `Vec::iter` returns a
 borrowing iterator, and `String::as_str`, `String::split`, and `String::chars`
@@ -2403,7 +2442,8 @@ let result = transpile_with_bindings(stainless_source, &bindings);
 ```
 
 `load_package_bindings` starts with compiler-owned bindings such as
-`rust::String` and `rust::Vec`, then merges an optional
+`rust::String`, `rust::Vec`, `rust::List`, `rust::Queue`, `rust::Map`, and
+`rust::Set`, then merges an optional
 `stainless-bindings.toml` from the supplied package root. A missing file means
 there are no package-specific bindings. `load_bindings_manifest` loads only
 one manifest file, while `parse_bindings_manifest` accepts manifest text for
@@ -2624,10 +2664,10 @@ The initial `stainless_compiler::resolution` pass now provides:
 - consuming native `rust::Result<T, E>.unwrap()` resolution plus exact
   target-typed Result-to-success adaptation for initialization and assignment,
   both with checked `stainless::RustError` effects;
-- concrete `rust::Vec<T>`/`rust::String` constructor, associated-function, and
-  method resolution, including generic substitution, receiver mutability,
-  consuming-receiver checks, Rust argument adaptations, and default
-  construction;
+- concrete `rust::Vec<T>`/`rust::String` and standard collection constructor,
+  associated-function, and method resolution, including generic substitution,
+  receiver mutability, consuming-receiver checks, Rust argument adaptations,
+  trait requirements, and default construction;
 - retained Rust representations and generated-wrapper resolution for
   user-manifest-defined opaque external types, exercised with
   `rust::regex::Regex` and `rust::regex::Error`;
@@ -2638,8 +2678,10 @@ The initial `stainless_compiler::resolution` pass now provides:
 - owning stored callables with exact signature checking, shared `function`
   copies, move-only `function_mut`, owned captures, mutable invocation, and
   non-throwing named-function conversion;
-- `Vec<T>` range-element resolution for shared, mutable, copied, and explicitly
-  consumed range loops.
+- `Vec<T>`, `List<T>`, and `Queue<T>` range-element resolution for shared,
+  mutable, copied, and explicitly consumed loops, plus order-preserving
+  non-mutable `Set<T>` iteration and key/value structured bindings for
+  `Map<K, V>`.
 
 The initial `stainless_compiler::ownership` pass runs after successful
 resolution and before HIR construction. For the implemented subset it:
@@ -2893,8 +2935,9 @@ recorded inline so implemented syntax is not confused with planned work:
    Rust-trait lowering, and dynamic class-owner erasure. Namespace-scope pointer
    storage, `require(...)`, weak/atomic interface erasure, and general ownership
    through fields remain.
-5. **In progress:** the initial `Vec`, `String`, and JSON metadata is connected through
-   resolution and code generation. The versioned package binding manifest is
+5. **In progress:** the initial `Vec`, `String`, linked-list, queue, ordered
+   map/set, and JSON metadata is connected through resolution and code
+   generation. The versioned package binding manifest is
    parsed and merged with compiler built-ins; deterministic wrappers for its
    `regex::Regex::new` and `Regex::is_match` entries and call/thread callback
    entries are generated. Cargo rejects a deliberately stale target and checks

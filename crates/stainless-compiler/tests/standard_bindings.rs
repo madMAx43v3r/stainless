@@ -17,12 +17,95 @@ fn standard_registry_contains_builtin_types_in_path_order() {
     assert_eq!(
         paths,
         [
+            "rust::List",
+            "rust::Map",
+            "rust::Queue",
+            "rust::Set",
             "rust::String",
             "rust::Vec",
             "rust::stainless_runtime::JsonError",
             "rust::stainless_runtime::Var",
         ]
     );
+}
+
+#[test]
+fn collection_bindings_use_ordered_and_sequence_rust_representations() {
+    let bindings = standard_bindings().unwrap();
+    let expected = [
+        ("rust::List", "::std::collections::LinkedList", vec!["T"]),
+        ("rust::Map", "::std::collections::BTreeMap", vec!["K", "V"]),
+        ("rust::Queue", "::std::collections::VecDeque", vec!["T"]),
+        ("rust::Set", "::std::collections::BTreeSet", vec!["T"]),
+    ];
+
+    for (stainless_path, rust_path, parameters) in expected {
+        let binding = bindings.type_by_path(stainless_path).unwrap();
+        assert_eq!(binding.rust_path, rust_path);
+        assert_eq!(binding.type_parameters, parameters);
+        let short_name = stainless_path.rsplit("::").next().unwrap();
+        let constructor = binding
+            .find_callable(CallStyle::Constructor, short_name, &[])
+            .unwrap();
+        assert!(matches!(
+            constructor.lowering,
+            RustLowering::AssociatedFunction { .. }
+        ));
+    }
+}
+
+#[test]
+fn ordered_collections_preserve_ord_requirements() {
+    let bindings = standard_bindings().unwrap();
+    let map = bindings.type_by_path("rust::Map").unwrap();
+    let set = bindings.type_by_path("rust::Set").unwrap();
+    let k = TypeRef::Parameter("K".to_owned());
+    let v = TypeRef::Parameter("V".to_owned());
+    let t = TypeRef::Parameter("T".to_owned());
+
+    let map_insert = map
+        .find_callable(CallStyle::Method, "insert", &[k, v.clone()])
+        .unwrap();
+    assert_eq!(
+        map_insert.return_type,
+        TypeRef::native("rust::Option", vec![v])
+    );
+    assert_eq!(map_insert.requirements[0].parameter, "K");
+    assert_eq!(map_insert.requirements[0].rust_trait, "::core::cmp::Ord");
+
+    let set_insert = set
+        .find_callable(CallStyle::Method, "insert", std::slice::from_ref(&t))
+        .unwrap();
+    assert_eq!(set_insert.return_type, TypeRef::Bool);
+    assert_eq!(set_insert.requirements[0].parameter, "T");
+    assert_eq!(set_insert.requirements[0].rust_trait, "::core::cmp::Ord");
+}
+
+#[test]
+fn list_and_queue_expose_end_operations_with_mutable_receivers() {
+    let bindings = standard_bindings().unwrap();
+    let t = TypeRef::Parameter("T".to_owned());
+
+    for path in ["rust::List", "rust::Queue"] {
+        let binding = bindings.type_by_path(path).unwrap();
+        for method_name in ["push_front", "push_back"] {
+            let callable = binding
+                .find_callable(CallStyle::Method, method_name, std::slice::from_ref(&t))
+                .unwrap();
+            assert_eq!(callable.receiver, Some(Receiver::Mutable));
+            assert_eq!(callable.return_type, TypeRef::Void);
+        }
+        for method_name in ["pop_front", "pop_back"] {
+            let callable = binding
+                .find_callable(CallStyle::Method, method_name, &[])
+                .unwrap();
+            assert_eq!(callable.receiver, Some(Receiver::Mutable));
+            assert_eq!(
+                callable.return_type,
+                TypeRef::native("rust::Option", vec![t.clone()])
+            );
+        }
+    }
 }
 
 #[test]
@@ -388,6 +471,16 @@ fn unsupported_borrowing_and_iterator_methods_are_not_exposed() {
     let string_methods = method_names(string_binding);
     for unsupported in ["as_str", "as_bytes", "trim", "split", "chars", "bytes"] {
         assert!(!string_methods.contains(unsupported));
+    }
+
+    for path in ["rust::List", "rust::Map", "rust::Queue", "rust::Set"] {
+        let methods = method_names(bindings.type_by_path(path).unwrap());
+        for unsupported in ["get", "get_mut", "iter", "iter_mut", "front", "back"] {
+            assert!(
+                !methods.contains(unsupported),
+                "{path} exposed {unsupported}"
+            );
+        }
     }
 }
 

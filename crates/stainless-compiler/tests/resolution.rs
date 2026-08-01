@@ -23,6 +23,7 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
         include_str!("../../../docs/ref/22_pointer_family.stl"),
         include_str!("../../../docs/ref/23_mutex_and_condition.stl"),
         include_str!("../../../docs/ref/24_threads.stl"),
+        include_str!("../../../docs/ref/25_collections.stl"),
     ] {
         let analysis = analyze(source);
 
@@ -32,6 +33,55 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
             analysis.diagnostics
         );
     }
+}
+
+#[test]
+fn resolves_linked_queue_and_ordered_collection_bindings() {
+    let analysis = analyze(include_str!("../../../docs/ref/25_collections.stl"));
+
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+    for expected in ["rust::List", "rust::Map", "rust::Queue", "rust::Set"] {
+        assert!(
+            analysis.semantics.calls.iter().any(|call| matches!(
+                &call.target,
+                CallTarget::Native(native) if native.type_path == expected
+            )),
+            "missing native calls for {expected}"
+        );
+    }
+}
+
+#[test]
+fn invalid_map_binding_shape_and_mutable_set_iteration_are_rejected() {
+    let analysis = analyze(
+        r"use rust::{Map, Set};
+
+void invalid(Set<i32>& values, Map<i32, i32>& pairs) {
+    for (auto& value : values) {
+        value += 1;
+    }
+    for (const auto& pair : pairs) {
+    }
+    for (auto& [key, value] : pairs) {
+        key += 1;
+        value += 1;
+    }
+}
+",
+    );
+    let codes = analysis
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+
+    assert!(codes.contains(&"RES008"), "{:#?}", analysis.diagnostics);
+    assert!(codes.contains(&"RES007"), "{:#?}", analysis.diagnostics);
+    assert!(codes.contains(&"RES013"), "{:#?}", analysis.diagnostics);
 }
 
 #[test]

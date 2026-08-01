@@ -425,13 +425,24 @@ fn lower_for_clause(clause: cst::ForClause) -> ForClause {
     match clause {
         cst::ForClause::Range(range) => {
             let range_span = span(&range);
+            let mut bindings = range
+                .name_tokens()
+                .map(|token| ast::RangeBinding {
+                    name: token.text().to_owned(),
+                    span: Span::from_text_range(token.text_range()),
+                })
+                .collect::<Vec<_>>();
+            if bindings.is_empty() {
+                bindings.push(ast::RangeBinding {
+                    name: missing_name(),
+                    span: range_span,
+                });
+            }
             ForClause::Range(ast::RangeForClause {
                 ty: range
                     .ty()
                     .map_or_else(|| error_type(range_span), |ty| lower_type(&ty)),
-                name: range
-                    .name_token()
-                    .map_or_else(missing_name, |token| token.text().to_owned()),
+                bindings,
                 iterable: range
                     .iterable()
                     .map_or_else(|| error_expression(range_span), lower_expression),

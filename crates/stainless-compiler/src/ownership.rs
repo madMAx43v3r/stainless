@@ -568,12 +568,19 @@ impl Analyzer<'_> {
     }
 
     fn range_for(&mut self, range: &ast::RangeForClause, body: &ast::Statement) {
-        let Some(binding) = self.semantics.binding(range.ty.span).cloned() else {
+        let bindings = range
+            .bindings
+            .iter()
+            .filter_map(|syntax| self.semantics.binding(syntax.span).cloned())
+            .collect::<Vec<_>>();
+        if bindings.len() != range.bindings.len() {
             return;
-        };
+        }
         let moved_range = is_move_call(self.semantics, &range.iterable);
-        let mutable = matches!(binding.ty, TypeRef::Reference { mutable: true, .. });
-        let borrowed = binding.ty.is_reference() || !moved_range;
+        let mutable = bindings
+            .iter()
+            .any(|binding| matches!(binding.ty, TypeRef::Reference { mutable: true, .. }));
+        let borrowed = bindings.iter().any(|binding| binding.ty.is_reference()) || !moved_range;
         let origin = self.expression(
             &range.iterable,
             if moved_range {
@@ -588,10 +595,10 @@ impl Analyzer<'_> {
             .then(|| self.acquire_persistent_loan(origin, mutable, range.iterable.span))
             .flatten();
         let baseline = self.state.clone();
-        let first_state = self.range_iteration(&binding, body);
+        let first_state = self.range_iteration(&bindings, body);
         let repeated_state = first_state.as_ref().and_then(|first_state| {
             self.state = first_state.clone();
-            self.range_iteration(&binding, body)
+            self.range_iteration(&bindings, body)
         });
         let mut exits = vec![baseline.clone()];
         exits.extend(first_state);
@@ -612,7 +619,7 @@ impl Analyzer<'_> {
 
     fn range_iteration(
         &mut self,
-        binding: &crate::resolution::BindingResolution,
+        bindings: &[crate::resolution::BindingResolution],
         body: &ast::Statement,
     ) -> Option<FlowState> {
         let continue_start = self
@@ -622,14 +629,16 @@ impl Analyzer<'_> {
             .continue_states
             .len();
         self.state.push_scope();
-        self.state.declare(
-            binding.name.clone(),
-            binding.ty.clone(),
-            None,
-            binding.span,
-            self.last_uses.get(&binding.span).copied(),
-            self.loop_depth,
-        );
+        for binding in bindings {
+            self.state.declare(
+                binding.name.clone(),
+                binding.ty.clone(),
+                None,
+                binding.span,
+                self.last_uses.get(&binding.span).copied(),
+                self.loop_depth,
+            );
+        }
         let reachable = self.statement(body);
         self.state.pop_scope();
         let mut continuing = Vec::new();
@@ -1722,7 +1731,9 @@ impl UseCollector {
             }
             ForClause::Range(range) => {
                 self.expression(&range.iterable);
-                self.declare(&range.name, range.ty.span);
+                for binding in &range.bindings {
+                    self.declare(&binding.name, binding.span);
+                }
                 self.branch(&statement.body);
             }
             ForClause::Error => {}

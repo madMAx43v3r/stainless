@@ -1,0 +1,77 @@
+// Compiler-provided standard collection bindings. List is a doubly linked
+// list, Queue is a double-ended queue, and Map/Set retain sorted order.
+
+use rust::{List, Map, Queue, Set};
+
+namespace samples {
+
+i32 collection_order() {
+    // Default construction uses the corresponding Rust collection new().
+    List<i32> linked;
+    linked.push_back(2);
+    linked.push_front(1);
+
+    i32 linked_order = 0;
+    for (const auto& value : linked) {
+        linked_order = linked_order * 10 + value;
+    }
+
+    Queue<i32> pending = Queue::with_capacity(2);
+    pending.push_back(4);
+    pending.push_front(3);
+
+    i32 queue_order = 0;
+    for (const auto& value : pending) {
+        queue_order = queue_order * 10 + value;
+    }
+
+    Map<i32, i32> lookup;
+    lookup.insert(2, 20);
+    lookup.insert(1, 10);
+
+    i32 map_key_order = 0;
+    i32 map_value_total = 0;
+    for (auto& [key, value] : lookup) {
+        // Map keys remain immutable even in a mutable structured binding.
+        value += key;
+    }
+    for (const auto& [key, value] : lookup) {
+        map_key_order = map_key_order * 10 + key;
+        map_value_total += value;
+    }
+
+    Set<i32> sorted;
+    sorted.insert(3);
+    sorted.insert(1);
+    sorted.insert(2);
+
+    i32 set_order = 0;
+    for (auto value : sorted) {
+        set_order = set_order * 10 + value;
+    }
+
+    if (!lookup.contains_key(1) || !sorted.contains(2)) {
+        return 0;
+    }
+    return linked_order + queue_order + map_key_order + map_value_total
+        + set_order + i32(lookup.len());
+}
+
+i32 copied_and_moved_map_entries() {
+    Map<i32, i32> values;
+    values.insert(2, 20);
+    values.insert(1, 10);
+
+    i32 total = 0;
+    for (auto [key, value] : values) {
+        total += key + value;
+    }
+
+    Map<i32, i32> consumed = values.clone();
+    for (auto [key, value] : move(consumed)) {
+        total += key + value;
+    }
+    return total;
+}
+
+} // namespace samples

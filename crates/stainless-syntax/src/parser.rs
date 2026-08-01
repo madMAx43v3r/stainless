@@ -627,7 +627,21 @@ impl Parser<'_> {
     fn parse_range_for_clause(&mut self) {
         self.start(SyntaxKind::RangeForClause);
         self.parse_type(true);
-        self.expect(SyntaxKind::Identifier, "expected a range binding name");
+        if self.at(SyntaxKind::LBracket) {
+            self.bump();
+            self.expect(SyntaxKind::Identifier, "expected a map key binding name");
+            self.expect(
+                SyntaxKind::Comma,
+                "expected `,` between map key and value bindings",
+            );
+            self.expect(SyntaxKind::Identifier, "expected a map value binding name");
+            self.expect(
+                SyntaxKind::RBracket,
+                "expected `]` after map range bindings",
+            );
+        } else {
+            self.expect(SyntaxKind::Identifier, "expected a range binding name");
+        }
         self.expect(
             SyntaxKind::Colon,
             "expected `:` between range binding and expression",

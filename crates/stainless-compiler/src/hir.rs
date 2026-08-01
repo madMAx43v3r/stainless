@@ -340,10 +340,8 @@ pub enum Statement {
     RangeFor {
         /// Generated Rust loop label used by nested try blocks.
         label: String,
-        /// Rust binding identifier.
-        name: String,
-        /// Whether a copied value binding is mutable.
-        mutable: bool,
+        /// One element binding or the key/value bindings of a map loop.
+        bindings: Vec<RangeBinding>,
         /// Borrowing or consuming mode.
         mode: RangeMode,
         /// Collection expression.
@@ -441,8 +439,19 @@ pub enum RangeMode {
     Copy,
     /// `auto` for a user struct, lowered through `iter().cloned()`.
     Clone,
+    /// Copied map key/value bindings, cloned from each borrowed pair.
+    MapClone,
     /// `auto` over `move(range)`, lowered through `into_iter`.
     Move,
+}
+
+/// One Rust binding introduced by a generated range loop.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RangeBinding {
+    /// Generated Rust binding identifier.
+    pub name: String,
+    /// Whether a copied value binding is mutable.
+    pub mutable: bool,
 }
 
 /// A typed expression ready for Rust generation.

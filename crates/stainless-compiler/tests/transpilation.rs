@@ -232,6 +232,10 @@ fn transpiles_and_compiles_resolved_reference_programs() {
             "pointer-family",
             include_str!("../../../docs/ref/22_pointer_family.stl"),
         ),
+        (
+            "collections",
+            include_str!("../../../docs/ref/25_collections.stl"),
+        ),
     ] {
         let result = transpile(source);
         assert!(
@@ -242,6 +246,52 @@ fn transpiles_and_compiles_resolved_reference_programs() {
         let rust = result.rust.expect("valid source should emit Rust");
         compile_rust(name, &rust, CrateKind::Library);
     }
+}
+
+#[test]
+fn generated_collections_preserve_linked_queue_and_sorted_iteration_order() {
+    let result = transpile(include_str!("../../../docs/ref/25_collections.stl"));
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let function = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "collection_order"])
+        .expect("collection_order symbol")
+        .mangled_name
+        .clone();
+    let copied_and_moved = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "copied_and_moved_map_entries"])
+        .expect("copied_and_moved_map_entries symbol")
+        .mangled_name
+        .clone();
+    let mut rust = result.rust.expect("collections should emit Rust");
+    write!(
+        rust,
+        "\nfn main() {{\n    assert_eq!(__stainless_namespace_samples::{function}(), 216);\n    assert_eq!(__stainless_namespace_samples::{copied_and_moved}(), 66);\n}}\n"
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("collection-order", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .expect("generated collection program should run");
+    assert!(
+        output.status.success(),
+        "status: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    remove_temporary_parent(&binary);
 }
 
 #[test]

@@ -72,7 +72,8 @@ i32 sum(const Vec<i32>& values) {
     assert!(range.ty.is_inferred());
     assert!(range.ty.is_const);
     assert!(range.ty.is_reference);
-    assert_eq!(range.name, "value");
+    assert_eq!(range.bindings.len(), 1);
+    assert_eq!(range.bindings[0].name, "value");
 }
 
 #[test]

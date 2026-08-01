@@ -467,6 +467,7 @@ impl Emitter {
         Ok(quote!({ #(#statements)* }))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn statement(&mut self, statement: &hir::Statement) -> Result<TokenStream, String> {
         match statement {
             hir::Statement::Block(block) => self.block(block),
@@ -530,25 +531,40 @@ impl Emitter {
             ),
             hir::Statement::RangeFor {
                 label,
-                name,
-                mutable,
+                bindings,
                 mode,
                 iterable,
                 body,
             } => {
                 let label = rust_label(label);
-                let name = identifier(name)?;
-                let mutable = mutable.then(|| quote!(mut));
+                let bindings = bindings
+                    .iter()
+                    .map(|binding| {
+                        let name = identifier(&binding.name)?;
+                        let mutable = binding.mutable.then(|| quote!(mut));
+                        Ok(quote!(#mutable #name))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                let pattern = match bindings.as_slice() {
+                    [binding] => binding.clone(),
+                    [key, value] => quote!((#key, #value)),
+                    _ => return Err("range loop requires one or two bindings".to_owned()),
+                };
                 let iterable = self.expression(iterable)?;
                 let iterator = match mode {
                     hir::RangeMode::Shared => quote!((#iterable).iter()),
                     hir::RangeMode::Mutable => quote!((#iterable).iter_mut()),
                     hir::RangeMode::Copy => quote!((#iterable).iter().copied()),
                     hir::RangeMode::Clone => quote!((#iterable).iter().cloned()),
+                    hir::RangeMode::MapClone => quote!(
+                        (#iterable)
+                            .iter()
+                            .map(|(key, value)| ((*key).clone(), (*value).clone()))
+                    ),
                     hir::RangeMode::Move => quote!((#iterable).into_iter()),
                 };
                 let body = self.block(body)?;
-                Ok(quote!(#label: for #mutable #name in #iterator #body))
+                Ok(quote!(#label: for #pattern in #iterator #body))
             }
             hir::Statement::Break(label) => {
                 let label = rust_label(label);

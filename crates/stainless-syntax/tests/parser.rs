@@ -360,6 +360,41 @@ fn range_binding_variants_have_one_range_clause_shape() {
 }
 
 #[test]
+fn parses_map_structured_range_bindings_losslessly() {
+    let source = "void visit(Map<i32, i32>& values) { \
+        for (const auto& [key, value] : values) {} \
+        for (auto& [key, value] : values) { value += key; } \
+    }";
+    let parsed = parse(source);
+    let root = parsed.syntax();
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(root.to_string(), source);
+    assert_eq!(count_kind(&root, SyntaxKind::RangeForClause), 2);
+
+    let tree = parsed.tree();
+    let Item::FunctionDefinition(function) = tree.items().next().unwrap() else {
+        panic!("expected function");
+    };
+    for statement in function.body().unwrap().statements() {
+        let Statement::For(statement) = statement else {
+            panic!("expected range loop");
+        };
+        let Some(ForClause::Range(range)) = statement.clause() else {
+            panic!("expected range clause");
+        };
+        assert!(range.is_structured());
+        assert_eq!(
+            range
+                .name_tokens()
+                .map(|token| token.text().to_owned())
+                .collect::<Vec<_>>(),
+            ["key", "value"]
+        );
+    }
+}
+
+#[test]
 fn typed_tree_exposes_function_and_range_loop_structure() {
     let source = "i32 sum(const Vec<i32>& values) { \
         for (const auto& value : values) { return value; } \

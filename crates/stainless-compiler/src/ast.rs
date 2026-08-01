@@ -399,10 +399,19 @@ pub enum ForClause {
 pub struct RangeForClause {
     /// Binding type, including supported `auto` forms.
     pub ty: Type,
-    /// Per-iteration binding name.
-    pub name: String,
+    /// One ordinary binding or the key/value bindings of a map iteration.
+    pub bindings: Vec<RangeBinding>,
     /// Value being iterated.
     pub iterable: Expression,
+}
+
+/// One source binding introduced by a range loop.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RangeBinding {
+    /// Per-iteration binding name.
+    pub name: String,
+    /// Source range of the binding identifier.
+    pub span: Span,
 }
 
 /// A classic `initializer; condition; update` loop header.

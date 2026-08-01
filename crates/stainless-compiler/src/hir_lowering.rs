@@ -881,26 +881,48 @@ impl Lowerer<'_> {
                 })
             }
             ForClause::Range(range) => {
-                let Some(binding) = self.semantics.binding(range.ty.span) else {
-                    self.push(
-                        "HIR006",
-                        format!("resolved range binding `{}` is missing", range.name),
-                        range.ty.span,
-                    );
-                    return None;
-                };
-                let mode = match &binding.ty {
-                    TypeRef::Reference { mutable: true, .. } => hir::RangeMode::Mutable,
-                    TypeRef::Reference { mutable: false, .. } => hir::RangeMode::Shared,
-                    _ if is_move_call(self.semantics, &range.iterable) => hir::RangeMode::Move,
-                    TypeRef::Struct { .. } => hir::RangeMode::Clone,
-                    _ => hir::RangeMode::Copy,
+                let bindings = range
+                    .bindings
+                    .iter()
+                    .map(|syntax| {
+                        let binding = self.semantics.binding(syntax.span).or_else(|| {
+                            self.push(
+                                "HIR006",
+                                format!("resolved range binding `{}` is missing", syntax.name),
+                                syntax.span,
+                            );
+                            None
+                        })?;
+                        Some((
+                            binding.ty.clone(),
+                            hir::RangeBinding {
+                                name: binding_name(&syntax.name),
+                                mutable: binding.mutable && !binding.ty.is_reference(),
+                            },
+                        ))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                let structured = bindings.len() == 2;
+                let mode = if bindings
+                    .iter()
+                    .any(|(ty, _)| matches!(ty, TypeRef::Reference { mutable: true, .. }))
+                {
+                    hir::RangeMode::Mutable
+                } else if bindings.iter().all(|(ty, _)| ty.is_reference()) {
+                    hir::RangeMode::Shared
+                } else if is_move_call(self.semantics, &range.iterable) {
+                    hir::RangeMode::Move
+                } else if structured {
+                    hir::RangeMode::MapClone
+                } else if matches!(bindings[0].0, TypeRef::Struct { .. }) {
+                    hir::RangeMode::Clone
+                } else {
+                    hir::RangeMode::Copy
                 };
                 let body = self.lower_loop_body(&label, &statement.body)?;
                 Some(hir::Statement::RangeFor {
                     label,
-                    name: binding_name(&range.name),
-                    mutable: binding.mutable && !binding.ty.is_reference(),
+                    bindings: bindings.into_iter().map(|(_, binding)| binding).collect(),
                     mode,
                     iterable: self.lower_expression(&range.iterable, ExpressionMode::Reference)?,
                     body,

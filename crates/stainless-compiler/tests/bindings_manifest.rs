@@ -84,6 +84,10 @@ fn package_loader_merges_optional_manifest_with_compiler_builtins() {
     assert_eq!(
         paths,
         [
+            "rust::List",
+            "rust::Map",
+            "rust::Queue",
+            "rust::Set",
             "rust::String",
             "rust::Vec",
             "rust::regex::Error",

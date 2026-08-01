@@ -4,10 +4,12 @@ use super::model::{
 };
 
 const T: &str = "T";
+const K: &str = "K";
+const V: &str = "V";
 
 /// Returns the compiler-provided native Rust bindings implemented so far.
 ///
-/// These bindings expose the real Rust `Vec<T>` and `String` representations.
+/// These bindings expose real Rust standard-library representations.
 /// They are semantic/code-generation metadata, not runtime wrapper newtypes.
 ///
 /// # Errors
@@ -17,6 +19,10 @@ const T: &str = "T";
 pub fn standard_bindings() -> Result<NativeBindings, super::BindingError> {
     NativeBindings::new(vec![
         json_error_binding(),
+        list_binding(),
+        map_binding(),
+        queue_binding(),
+        set_binding(),
         string_binding(),
         var_binding(),
         vec_binding(),
@@ -214,6 +220,345 @@ fn vec_binding() -> NativeTypeBinding {
         type_parameters: vec![T.to_owned()],
         error_format: None,
         callables,
+    }
+}
+
+fn list_binding() -> NativeTypeBinding {
+    let t = TypeRef::Parameter(T.to_owned());
+    let list_t = list_of(t.clone());
+
+    NativeTypeBinding {
+        stainless_path: "rust::List".to_owned(),
+        rust_path: "::std::collections::LinkedList".to_owned(),
+        type_parameters: vec![T.to_owned()],
+        error_format: None,
+        callables: vec![
+            constructor(
+                "List",
+                vec![],
+                list_t.clone(),
+                RustLowering::AssociatedFunction {
+                    rust_path: "::std::collections::LinkedList::new".to_owned(),
+                },
+            ),
+            method("len", Receiver::Shared, vec![], TypeRef::Usize),
+            method("is_empty", Receiver::Shared, vec![], TypeRef::Bool),
+            method("clear", Receiver::Mutable, vec![], TypeRef::Void),
+            method(
+                "push_front",
+                Receiver::Mutable,
+                vec![Parameter::new("value", t.clone())],
+                TypeRef::Void,
+            ),
+            method(
+                "push_back",
+                Receiver::Mutable,
+                vec![Parameter::new("value", t.clone())],
+                TypeRef::Void,
+            ),
+            method("pop_front", Receiver::Mutable, vec![], option_of(t.clone())),
+            method("pop_back", Receiver::Mutable, vec![], option_of(t.clone())),
+            method(
+                "append",
+                Receiver::Mutable,
+                vec![Parameter::new(
+                    "other",
+                    TypeRef::mutable_ref(list_t.clone()),
+                )],
+                TypeRef::Void,
+            ),
+            method_with_requirements(
+                "contains",
+                Receiver::Shared,
+                vec![Parameter::new("value", TypeRef::shared_ref(t.clone()))],
+                TypeRef::Bool,
+                vec![requirement(T, "::core::cmp::PartialEq")],
+            ),
+            method_with_requirements(
+                "clone",
+                Receiver::Shared,
+                vec![],
+                list_t,
+                vec![requirement(T, "::core::clone::Clone")],
+            ),
+        ],
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn queue_binding() -> NativeTypeBinding {
+    let t = TypeRef::Parameter(T.to_owned());
+    let queue_t = queue_of(t.clone());
+
+    NativeTypeBinding {
+        stainless_path: "rust::Queue".to_owned(),
+        rust_path: "::std::collections::VecDeque".to_owned(),
+        type_parameters: vec![T.to_owned()],
+        error_format: None,
+        callables: vec![
+            constructor(
+                "Queue",
+                vec![],
+                queue_t.clone(),
+                RustLowering::AssociatedFunction {
+                    rust_path: "::std::collections::VecDeque::new".to_owned(),
+                },
+            ),
+            associated(
+                "with_capacity",
+                vec![Parameter::new("capacity", TypeRef::Usize)],
+                queue_t.clone(),
+                "::std::collections::VecDeque::with_capacity",
+            ),
+            method("len", Receiver::Shared, vec![], TypeRef::Usize),
+            method("is_empty", Receiver::Shared, vec![], TypeRef::Bool),
+            method("capacity", Receiver::Shared, vec![], TypeRef::Usize),
+            method(
+                "reserve",
+                Receiver::Mutable,
+                vec![Parameter::new("additional", TypeRef::Usize)],
+                TypeRef::Void,
+            ),
+            method(
+                "reserve_exact",
+                Receiver::Mutable,
+                vec![Parameter::new("additional", TypeRef::Usize)],
+                TypeRef::Void,
+            ),
+            method("shrink_to_fit", Receiver::Mutable, vec![], TypeRef::Void),
+            method(
+                "shrink_to",
+                Receiver::Mutable,
+                vec![Parameter::new("minimum_capacity", TypeRef::Usize)],
+                TypeRef::Void,
+            ),
+            method("clear", Receiver::Mutable, vec![], TypeRef::Void),
+            method(
+                "truncate",
+                Receiver::Mutable,
+                vec![Parameter::new("length", TypeRef::Usize)],
+                TypeRef::Void,
+            ),
+            method(
+                "push_front",
+                Receiver::Mutable,
+                vec![Parameter::new("value", t.clone())],
+                TypeRef::Void,
+            ),
+            method(
+                "push_back",
+                Receiver::Mutable,
+                vec![Parameter::new("value", t.clone())],
+                TypeRef::Void,
+            ),
+            method("pop_front", Receiver::Mutable, vec![], option_of(t.clone())),
+            method("pop_back", Receiver::Mutable, vec![], option_of(t.clone())),
+            method(
+                "insert",
+                Receiver::Mutable,
+                vec![
+                    Parameter::new("index", TypeRef::Usize),
+                    Parameter::new("value", t.clone()),
+                ],
+                TypeRef::Void,
+            ),
+            method(
+                "remove",
+                Receiver::Mutable,
+                vec![Parameter::new("index", TypeRef::Usize)],
+                option_of(t.clone()),
+            ),
+            method(
+                "swap_remove_front",
+                Receiver::Mutable,
+                vec![Parameter::new("index", TypeRef::Usize)],
+                option_of(t.clone()),
+            ),
+            method(
+                "swap_remove_back",
+                Receiver::Mutable,
+                vec![Parameter::new("index", TypeRef::Usize)],
+                option_of(t.clone()),
+            ),
+            method(
+                "append",
+                Receiver::Mutable,
+                vec![Parameter::new(
+                    "other",
+                    TypeRef::mutable_ref(queue_t.clone()),
+                )],
+                TypeRef::Void,
+            ),
+            method(
+                "rotate_left",
+                Receiver::Mutable,
+                vec![Parameter::new("middle", TypeRef::Usize)],
+                TypeRef::Void,
+            ),
+            method(
+                "rotate_right",
+                Receiver::Mutable,
+                vec![Parameter::new("middle", TypeRef::Usize)],
+                TypeRef::Void,
+            ),
+            method_with_requirements(
+                "contains",
+                Receiver::Shared,
+                vec![Parameter::new("value", TypeRef::shared_ref(t.clone()))],
+                TypeRef::Bool,
+                vec![requirement(T, "::core::cmp::PartialEq")],
+            ),
+            method_with_requirements(
+                "clone",
+                Receiver::Shared,
+                vec![],
+                queue_t,
+                vec![requirement(T, "::core::clone::Clone")],
+            ),
+        ],
+    }
+}
+
+fn map_binding() -> NativeTypeBinding {
+    let k = TypeRef::Parameter(K.to_owned());
+    let v = TypeRef::Parameter(V.to_owned());
+    let map_t = map_of(k.clone(), v.clone());
+    let key_ord = || vec![requirement(K, "::core::cmp::Ord")];
+
+    NativeTypeBinding {
+        stainless_path: "rust::Map".to_owned(),
+        rust_path: "::std::collections::BTreeMap".to_owned(),
+        type_parameters: vec![K.to_owned(), V.to_owned()],
+        error_format: None,
+        callables: vec![
+            constructor(
+                "Map",
+                vec![],
+                map_t.clone(),
+                RustLowering::AssociatedFunction {
+                    rust_path: "::std::collections::BTreeMap::new".to_owned(),
+                },
+            ),
+            method("len", Receiver::Shared, vec![], TypeRef::Usize),
+            method("is_empty", Receiver::Shared, vec![], TypeRef::Bool),
+            method("clear", Receiver::Mutable, vec![], TypeRef::Void),
+            method_with_requirements(
+                "insert",
+                Receiver::Mutable,
+                vec![
+                    Parameter::new("key", k.clone()),
+                    Parameter::new("value", v.clone()),
+                ],
+                option_of(v.clone()),
+                key_ord(),
+            ),
+            method_with_requirements(
+                "remove",
+                Receiver::Mutable,
+                vec![Parameter::new("key", TypeRef::shared_ref(k.clone()))],
+                option_of(v.clone()),
+                key_ord(),
+            ),
+            method_with_requirements(
+                "contains_key",
+                Receiver::Shared,
+                vec![Parameter::new("key", TypeRef::shared_ref(k))],
+                TypeRef::Bool,
+                key_ord(),
+            ),
+            method_with_requirements(
+                "append",
+                Receiver::Mutable,
+                vec![Parameter::new("other", TypeRef::mutable_ref(map_t.clone()))],
+                TypeRef::Void,
+                key_ord(),
+            ),
+            method_with_requirements(
+                "clone",
+                Receiver::Shared,
+                vec![],
+                map_t,
+                vec![
+                    requirement(K, "::core::clone::Clone"),
+                    requirement(V, "::core::clone::Clone"),
+                ],
+            ),
+        ],
+    }
+}
+
+fn set_binding() -> NativeTypeBinding {
+    let t = TypeRef::Parameter(T.to_owned());
+    let set_t = set_of(t.clone());
+    let element_ord = || vec![requirement(T, "::core::cmp::Ord")];
+
+    NativeTypeBinding {
+        stainless_path: "rust::Set".to_owned(),
+        rust_path: "::std::collections::BTreeSet".to_owned(),
+        type_parameters: vec![T.to_owned()],
+        error_format: None,
+        callables: vec![
+            constructor(
+                "Set",
+                vec![],
+                set_t.clone(),
+                RustLowering::AssociatedFunction {
+                    rust_path: "::std::collections::BTreeSet::new".to_owned(),
+                },
+            ),
+            method("len", Receiver::Shared, vec![], TypeRef::Usize),
+            method("is_empty", Receiver::Shared, vec![], TypeRef::Bool),
+            method("clear", Receiver::Mutable, vec![], TypeRef::Void),
+            method_with_requirements(
+                "insert",
+                Receiver::Mutable,
+                vec![Parameter::new("value", t.clone())],
+                TypeRef::Bool,
+                element_ord(),
+            ),
+            method_with_requirements(
+                "replace",
+                Receiver::Mutable,
+                vec![Parameter::new("value", t.clone())],
+                option_of(t.clone()),
+                element_ord(),
+            ),
+            method_with_requirements(
+                "remove",
+                Receiver::Mutable,
+                vec![Parameter::new("value", TypeRef::shared_ref(t.clone()))],
+                TypeRef::Bool,
+                element_ord(),
+            ),
+            method_with_requirements(
+                "take",
+                Receiver::Mutable,
+                vec![Parameter::new("value", TypeRef::shared_ref(t.clone()))],
+                option_of(t.clone()),
+                element_ord(),
+            ),
+            method_with_requirements(
+                "contains",
+                Receiver::Shared,
+                vec![Parameter::new("value", TypeRef::shared_ref(t))],
+                TypeRef::Bool,
+                element_ord(),
+            ),
+            method_with_requirements(
+                "append",
+                Receiver::Mutable,
+                vec![Parameter::new("other", TypeRef::mutable_ref(set_t.clone()))],
+                TypeRef::Void,
+                element_ord(),
+            ),
+            method_with_requirements(
+                "clone",
+                Receiver::Shared,
+                vec![],
+                set_t,
+                vec![requirement(T, "::core::clone::Clone")],
+            ),
+        ],
     }
 }
 
@@ -647,6 +992,22 @@ fn string_type() -> TypeRef {
 
 fn vec_of(element: TypeRef) -> TypeRef {
     TypeRef::native("rust::Vec", vec![element])
+}
+
+fn list_of(element: TypeRef) -> TypeRef {
+    TypeRef::native("rust::List", vec![element])
+}
+
+fn queue_of(element: TypeRef) -> TypeRef {
+    TypeRef::native("rust::Queue", vec![element])
+}
+
+fn map_of(key: TypeRef, value: TypeRef) -> TypeRef {
+    TypeRef::native("rust::Map", vec![key, value])
+}
+
+fn set_of(element: TypeRef) -> TypeRef {
+    TypeRef::native("rust::Set", vec![element])
 }
 
 fn option_of(value: TypeRef) -> TypeRef {

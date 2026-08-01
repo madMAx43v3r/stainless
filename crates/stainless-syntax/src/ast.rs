@@ -971,7 +971,16 @@ impl RangeForClause {
 
     #[must_use]
     pub fn name_token(&self) -> Option<SyntaxToken> {
-        token(self.syntax(), SyntaxKind::Identifier)
+        self.name_tokens().next()
+    }
+
+    pub fn name_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        direct_tokens(self.syntax()).filter(|token| token.kind() == SyntaxKind::Identifier)
+    }
+
+    #[must_use]
+    pub fn is_structured(&self) -> bool {
+        direct_tokens(self.syntax()).any(|token| token.kind() == SyntaxKind::LBracket)
     }
 
     #[must_use]
