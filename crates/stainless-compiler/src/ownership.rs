@@ -884,18 +884,6 @@ impl Analyzer<'_> {
             }
             CallTarget::Intrinsic(Intrinsic::MutexLock { .. }) => call_receiver(expression)
                 .and_then(|receiver| self.expression(receiver, Usage::BorrowShared)),
-            CallTarget::Intrinsic(Intrinsic::MutexGuardValue { mutable, .. }) => {
-                call_receiver(expression).and_then(|receiver| {
-                    self.expression(
-                        receiver,
-                        if *mutable {
-                            Usage::BorrowMutable
-                        } else {
-                            Usage::BorrowShared
-                        },
-                    )
-                })
-            }
             CallTarget::Intrinsic(Intrinsic::ConditionWait { .. }) => {
                 let mut condition_loan = None;
                 if let Some(receiver) = call_receiver(expression) {

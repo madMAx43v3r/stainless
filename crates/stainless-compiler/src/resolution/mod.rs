@@ -327,13 +327,6 @@ pub enum Intrinsic {
         /// Protected value type.
         target: TypeRef,
     },
-    /// Borrow the protected value from a scoped guard.
-    MutexGuardValue {
-        /// Protected value type.
-        target: TypeRef,
-        /// Whether the returned reference is mutable.
-        mutable: bool,
-    },
     /// Wait on a condition and rebind the same named guard.
     ConditionWait {
         /// Protected value type.

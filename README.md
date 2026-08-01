@@ -1793,17 +1793,17 @@ mutex<State> local = mutex<State>(State{false, 0});
 condition changed;
 
 auto guard = local.lock();
-guard.value().ready = true;
+guard.ready = true;
 changed.notify_one();
 ```
 
 `lock()` produces an internal guard type that source code cannot spell. The
 guard must be held in mutable `auto`, cannot be copied, explicitly moved,
 returned, used as a field, or passed as an ordinary function argument, and
-releases the mutex when its scope ends. `guard.value()` returns a reference to
-the protected `T`; a mutable guard binding yields `T&`, while a const guard
-binding yields `const T&`. Ordinary field and method access then follows the
-normal Stainless reference rules.
+releases the mutex when its scope ends. It automatically dereferences to the
+protected `T`, so its fields and methods are accessed directly with `.`, just
+like Stainless pointers and references. A mutable guard binding provides
+mutable access, while a const guard binding provides only const access.
 
 `condition.wait(guard)` is the sole special guard transfer. It atomically
 releases the mutex while waiting, reacquires it before returning, and
@@ -1812,7 +1812,7 @@ mutable named guard. Conditions may wake spuriously, so the state test must be
 in a loop:
 
 ```cpp
-for (; !guard.value().ready;) {
+for (; !guard.ready;) {
     changed.wait(guard);
 }
 ```

@@ -169,11 +169,13 @@ void invalid(Vec<i32> values) {
 #[test]
 fn condition_wait_rejects_a_guard_with_a_live_value_borrow() {
     let analysis = analyze(
-        r"i32 invalid_wait() {
-    mutex<i32> state = mutex<i32>(0);
+        r"struct State { i32 value; };
+
+i32 invalid_wait() {
+    mutex<State> state = mutex<State>(State{0});
     condition changed;
     auto guard = state.lock();
-    i32& value = guard.value();
+    i32& value = guard.value;
     changed.wait(guard);
     return value;
 }

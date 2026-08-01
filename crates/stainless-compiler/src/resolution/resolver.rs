@@ -3268,11 +3268,7 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
         receiver_info: &ExpressionInfo,
     ) -> (ExpressionInfo, Option<ResolvedCall>) {
-        let method_receiver = match canonical_ref(&receiver_info.ty) {
-            TypeRef::MutexGuard(_) => canonical_ref(&receiver_info.ty).clone(),
-            _ => self.refined_automatic_pointee(receiver, receiver_info, context, span),
-        };
-        match method_receiver {
+        match self.refined_automatic_pointee(receiver, receiver_info, context, span) {
             TypeRef::Struct { path } => {
                 let Some(structure) = self.struct_by_path.get(&path).copied() else {
                     return (error_info(), None);
@@ -3305,14 +3301,6 @@ impl Resolver<'_> {
             TypeRef::Mutex(target) => {
                 self.resolve_mutex_method(target.as_ref(), name, arguments, span, context)
             }
-            TypeRef::MutexGuard(target) => self.resolve_mutex_guard_method(
-                target.as_ref(),
-                receiver_info,
-                name,
-                arguments,
-                span,
-                context,
-            ),
             TypeRef::Condition => self.resolve_condition_method(name, arguments, span, context),
             TypeRef::Native {
                 path,
@@ -3428,50 +3416,6 @@ impl Resolver<'_> {
             throws: Vec::new(),
         };
         (temporary(return_type), Some(call))
-    }
-
-    fn resolve_mutex_guard_method(
-        &mut self,
-        target: &TypeRef,
-        receiver: &ExpressionInfo,
-        name: &ast::Path,
-        arguments: &[Expression],
-        span: Span,
-        context: &mut FunctionContext,
-    ) -> (ExpressionInfo, Option<ResolvedCall>) {
-        if name.segments.as_slice() != ["value"] || !arguments.is_empty() {
-            for argument in arguments {
-                self.resolve_expression(argument, None, context);
-            }
-            self.push(
-                "RES113",
-                if name.segments.as_slice() == ["value"] {
-                    format!(
-                        "`guard.value()` requires no arguments, found {}",
-                        arguments.len()
-                    )
-                } else {
-                    format!("a mutex guard has no method `{}`", name.display())
-                },
-                span,
-            );
-            return (error_info(), None);
-        }
-        let mutable = receiver.category == ValueCategory::MutablePlace;
-        let return_type = TypeRef::Reference {
-            mutable,
-            target: Box::new(target.clone()),
-        };
-        let call = ResolvedCall {
-            span,
-            target: CallTarget::Intrinsic(Intrinsic::MutexGuardValue {
-                target: target.clone(),
-                mutable,
-            }),
-            return_type: return_type.clone(),
-            throws: Vec::new(),
-        };
-        (info_for_return_type(return_type), Some(call))
     }
 
     fn resolve_condition_method(

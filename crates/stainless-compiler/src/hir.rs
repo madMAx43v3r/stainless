@@ -523,13 +523,6 @@ pub enum Expression {
     ConditionNew,
     /// Acquire a mutex, recovering its value if another thread panicked.
     MutexLock(Box<Expression>),
-    /// Borrow the protected value through a live guard.
-    MutexGuardValue {
-        /// Whether the resulting reference permits mutation.
-        mutable: bool,
-        /// Guard expression.
-        guard: Box<Expression>,
-    },
     /// Release a guard while waiting and transparently reacquire it.
     ConditionWait {
         /// Condition variable expression.

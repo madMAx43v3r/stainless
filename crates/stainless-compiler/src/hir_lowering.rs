@@ -1753,24 +1753,6 @@ impl Lowerer<'_> {
                     self.lower_expression(receiver, ExpressionMode::Reference)?,
                 )))
             }
-            CallTarget::Intrinsic(Intrinsic::MutexGuardValue { mutable, .. }) => {
-                let Some(ast::Expression {
-                    kind: ExpressionKind::Field { receiver, .. },
-                    ..
-                }) = callee
-                else {
-                    self.push(
-                        "HIR011",
-                        "mutex guard value access has no receiver".to_owned(),
-                        call.span,
-                    );
-                    return None;
-                };
-                Some(hir::Expression::MutexGuardValue {
-                    mutable: *mutable,
-                    guard: Box::new(self.lower_expression(receiver, ExpressionMode::Value)?),
-                })
-            }
             CallTarget::Intrinsic(Intrinsic::ConditionWait { .. }) => {
                 let Some(ast::Expression {
                     kind: ExpressionKind::Field { receiver, .. },

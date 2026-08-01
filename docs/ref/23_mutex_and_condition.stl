@@ -23,12 +23,12 @@ i32 wait_for_value(
     auto guard = state.lock();
 
     // Condition waits may wake spuriously, so always re-check the state.
-    for (; !guard.value().ready;) {
+    for (; !guard.ready;) {
         // wait() atomically unlocks the mutex, sleeps, locks it again, and
         // rebinds this same guard before continuing.
         changed.wait(guard);
     }
-    return guard.value().value;
+    return guard.value;
 }
 
 void publish_value(
@@ -36,8 +36,7 @@ void publish_value(
     shared_ptr<condition> changed,
     i32 value) {
     auto guard = state.lock();
-    guard.value().value = value;
-    guard.value().ready = true;
+    guard.value = value;
+    guard.ready = true;
     changed.notify_all();
 }
-

@@ -900,14 +900,6 @@ impl Emitter {
                     Err(#poisoned) => #poisoned.into_inner(),
                 }))
             }
-            hir::Expression::MutexGuardValue { mutable, guard } => {
-                let guard = self.expression(guard)?;
-                if *mutable {
-                    Ok(quote!(&mut *(#guard)))
-                } else {
-                    Ok(quote!(&*(#guard)))
-                }
-            }
             hir::Expression::ConditionWait { condition, guard } => {
                 let condition = self.expression(condition)?;
                 let guard = self.expression(guard)?;
