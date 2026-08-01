@@ -694,7 +694,8 @@ than a cast.
 
 Implicit coercion follows the restricted Rust-like rules documented elsewhere:
 literal type inference, mutable-to-const reborrowing, safe pointer receiver
-borrowing, data-base reference projection, and owning interface coercion.
+borrowing, data-base reference projection, shared-to-weak observation, and
+owning interface coercion.
 Stainless does not add C++ conversion sequences or use coercions to select an
 overload.
 
@@ -1665,7 +1666,11 @@ data:
 - Copy construction, assignment, and pass-by-value implicitly clone the
   underlying `Arc`; copying a null `shared_nullptr<T>` remains null.
 - `move(pointer)` transfers the handle without incrementing its reference count.
-- `lock(pointer)` returns a `shared_nullptr<T>` promoted from `weak_ptr<T>`.
+- A `shared_ptr<T>` implicitly converts to `weak_ptr<T>` during initialization,
+  assignment, argument passing, or return. `shared.__downgrade()` is the
+  equivalent explicit spelling; neither operation changes the strong count.
+- `observer.lock()` returns a `shared_nullptr<T>` promoted from a
+  `weak_ptr<T>`.
 
 #### Nullable owner conversions and refinement
 
@@ -1745,10 +1750,10 @@ provide mutable member access when borrowing permits it; a shared owner provides
 only const access. A nullable owner must first be proven non-null.
 
 The pointer wrappers do not expose the methods of `Box`, `Arc`, `Option`, or
-`Weak`. Their operations are the compiler-defined `move`, `drop`,
-`downgrade`, and `lock` functions plus the documented constructors and atomic
-slot operations. There is no `get`, `release`, `reset`, pointer arithmetic, or
-raw-pointer escape.
+`Weak`. Their operations are the compiler-defined `move` and `drop` functions,
+`shared.__downgrade()`, `observer.lock()`, the documented constructors, and
+atomic slot operations. There is no `get`, `release`, `reset`, pointer
+arithmetic, or raw-pointer escape.
 
 #### Thread safety
 
@@ -2606,7 +2611,8 @@ The initial `stainless_compiler::resolution` pass now provides:
 - all seven compiler-defined ownership pointer types; parenthesized and braced
   `make_unique<T>`/`make_shared<T>` allocation; nullable refinement and checked
   non-null recovery;
-  immutable shared pointee access; `downgrade`/`lock`; synchronized atomic
+  immutable shared pointee access; `shared.__downgrade()`/`observer.lock()`;
+  synchronized atomic
   `__load`/`__store`/`__swap`; and diagnostics for invalid copying, default
   construction, pointer-reference declarations, and move-only struct storage;
 - compiler-known `mutex<T>`/`condition` synchronization, inferred scoped lock

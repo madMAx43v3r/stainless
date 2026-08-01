@@ -3620,9 +3620,6 @@ impl Resolver<'_> {
                 );
                 (error_info(), None)
             }
-            ExpressionKind::Name(path) if matches!(path.segments.as_slice(), [name] if name == "downgrade" || name == "lock") => {
-                self.resolve_shared_pointer_builtin(&path.segments[0], arguments, span, context)
-            }
             ExpressionKind::Field { receiver, name } => {
                 let receiver_info = self.resolve_expression(receiver, None, context);
                 let pointee =
@@ -3903,6 +3900,23 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
         receiver_info: &ExpressionInfo,
     ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        if let TypeRef::Pointer { kind, target } = canonical(&receiver_info.ty)
+            && matches!(
+                name.segments.as_slice(),
+                [method]
+                    if method == "__downgrade"
+                        || (method == "lock" && kind == PointerKind::Weak)
+            )
+        {
+            return self.resolve_weak_pointer_method(
+                kind,
+                target.as_ref(),
+                name,
+                arguments,
+                span,
+                context,
+            );
+        }
         match self.refined_automatic_pointee(receiver, receiver_info, context, span) {
             TypeRef::Struct { path } | TypeRef::Class { path } | TypeRef::Interface { path } => {
                 let Some(structure) = self.struct_by_path.get(&path).copied() else {
@@ -4715,6 +4729,7 @@ impl Resolver<'_> {
                             );
                             self.is_derived_reference_binding(&parameter.ty, &adjusted.ty)
                                 || self.is_interface_owner_binding(&parameter.ty, &adjusted.ty)
+                                || Self::is_shared_to_weak_binding(&parameter.ty, &adjusted.ty)
                         })
                 })
                 .collect::<Vec<_>>()
@@ -5235,58 +5250,54 @@ impl Resolver<'_> {
         (temporary(return_type), Some(call))
     }
 
-    fn resolve_shared_pointer_builtin(
+    fn resolve_weak_pointer_method(
         &mut self,
-        name: &str,
+        kind: PointerKind,
+        target: &TypeRef,
+        name: &ast::Path,
         arguments: &[Expression],
         span: Span,
         context: &mut FunctionContext,
     ) -> (ExpressionInfo, Option<ResolvedCall>) {
-        if arguments.len() != 1 {
+        let method = name.segments.first().map_or("", String::as_str);
+        if !arguments.is_empty() {
             for argument in arguments {
                 self.resolve_expression(argument, None, context);
             }
             self.push(
                 "RES108",
-                format!("`{name}` requires exactly one pointer argument"),
+                format!(
+                    "`{}<T>.{method}()` requires no arguments, found {}",
+                    pointer_name(kind),
+                    arguments.len()
+                ),
                 span,
             );
             return (error_info(), None);
         }
-        let actual = self.resolve_expression(&arguments[0], None, context);
-        let TypeRef::Pointer { kind, target } = canonical(&actual.ty) else {
-            if actual.ty != TypeRef::Error {
-                self.push(
-                    "RES108",
-                    format!("`{name}` requires an ownership pointer"),
-                    arguments[0].span,
-                );
-            }
-            return (error_info(), None);
-        };
-        let (intrinsic, result_kind) = match (name, kind) {
-            ("downgrade", PointerKind::Shared) => (
+        let (intrinsic, result_kind) = match (method, kind) {
+            ("__downgrade", PointerKind::Shared) => (
                 Intrinsic::DowngradeShared {
-                    target: target.as_ref().clone(),
+                    target: target.clone(),
                 },
                 PointerKind::Weak,
             ),
             ("lock", PointerKind::Weak) => (
                 Intrinsic::LockWeak {
-                    target: target.as_ref().clone(),
+                    target: target.clone(),
                 },
                 PointerKind::SharedNullable,
             ),
             _ => {
                 self.push(
                     "RES108",
-                    format!("`{name}` does not accept `{}`", pointer_name(kind)),
-                    arguments[0].span,
+                    format!("`{}<T>` has no method `{method}`", pointer_name(kind)),
+                    span,
                 );
                 return (error_info(), None);
             }
         };
-        let return_type = TypeRef::pointer(result_kind, target.as_ref().clone());
+        let return_type = TypeRef::pointer(result_kind, target.clone());
         let call = ResolvedCall {
             span,
             target: CallTarget::Intrinsic(intrinsic),
@@ -5531,6 +5542,7 @@ impl Resolver<'_> {
                             );
                             self.is_derived_reference_binding(&parameter.ty, &adjusted.ty)
                                 || self.is_interface_owner_binding(&parameter.ty, &adjusted.ty)
+                                || Self::is_shared_to_weak_binding(&parameter.ty, &adjusted.ty)
                         })
                 })
                 .collect::<Vec<_>>()
@@ -5735,6 +5747,7 @@ impl Resolver<'_> {
                             canonical(&parameter.ty) == canonical(&argument.ty)
                                 || self.is_derived_reference_binding(&parameter.ty, &adjusted.ty)
                                 || self.is_interface_owner_binding(&parameter.ty, &adjusted.ty)
+                                || Self::is_shared_to_weak_binding(&parameter.ty, &adjusted.ty)
                         })
                 })
                 .collect::<Vec<_>>()
@@ -6092,6 +6105,7 @@ impl Resolver<'_> {
         }
         if !self.is_derived_reference_binding(expected, &actual.ty)
             && !self.is_interface_owner_binding(expected, &actual.ty)
+            && !Self::is_shared_to_weak_binding(expected, &actual.ty)
         {
             self.require_exact(expected, &actual.ty, span, description);
         }
@@ -6203,6 +6217,22 @@ impl Resolver<'_> {
                 self.class_implements_interface(*class, *interface)
                     && self.class_supports_interface_object(*class)
             })
+    }
+
+    fn is_shared_to_weak_binding(expected: &TypeRef, actual: &TypeRef) -> bool {
+        matches!(
+            (canonical_ref(expected), canonical_ref(actual)),
+            (
+                TypeRef::Pointer {
+                    kind: PointerKind::Weak,
+                    target: expected_target,
+                },
+                TypeRef::Pointer {
+                    kind: PointerKind::Shared,
+                    target: actual_target,
+                },
+            ) if canonical_ref(expected_target) == canonical_ref(actual_target)
+        )
     }
 
     fn class_supports_interface_object(&self, class: StructId) -> bool {

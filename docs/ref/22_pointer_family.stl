@@ -26,8 +26,8 @@ i32 pointer_family() {
 
     shared_ptr<Config> first = make_shared<Config>{5};
     shared_ptr<Config> copied = first;
-    weak_ptr<Config> observer = downgrade(copied);
-    shared_nullptr<Config> promoted = lock(observer);
+    weak_ptr<Config> observer = copied;
+    shared_nullptr<Config> promoted = observer.lock();
     if (!promoted) {
         return -1;
     }

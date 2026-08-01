@@ -1040,6 +1040,11 @@ impl Lowerer<'_> {
                 })
             }
         } else {
+            if resolution.is_some_and(|value| is_shared_to_weak_binding(expected, &value.ty)) {
+                return Some(hir::Expression::DowngradeShared(Box::new(
+                    self.lower_expression(expression, ExpressionMode::Reference)?,
+                )));
+            }
             let lowered = self.lower_expression(expression, ExpressionMode::Value)?;
             let interface_owner = resolution.and_then(|value| {
                 let TypeRef::Pointer {
@@ -1876,15 +1881,37 @@ impl Lowerer<'_> {
                 })
             }
             CallTarget::Intrinsic(Intrinsic::DowngradeShared { .. }) => {
-                let argument = arguments.first()?;
+                let Some(ast::Expression {
+                    kind: ast::ExpressionKind::Field { receiver, .. },
+                    ..
+                }) = callee
+                else {
+                    self.push(
+                        "HIR011",
+                        "shared pointer downgrade has no receiver".to_owned(),
+                        call.span,
+                    );
+                    return None;
+                };
                 Some(hir::Expression::DowngradeShared(Box::new(
-                    self.lower_expression(argument, ExpressionMode::Reference)?,
+                    self.lower_expression(receiver, ExpressionMode::Reference)?,
                 )))
             }
             CallTarget::Intrinsic(Intrinsic::LockWeak { .. }) => {
-                let argument = arguments.first()?;
+                let Some(ast::Expression {
+                    kind: ast::ExpressionKind::Field { receiver, .. },
+                    ..
+                }) = callee
+                else {
+                    self.push(
+                        "HIR011",
+                        "weak pointer lock has no receiver".to_owned(),
+                        call.span,
+                    );
+                    return None;
+                };
                 Some(hir::Expression::LockWeak(Box::new(
-                    self.lower_expression(argument, ExpressionMode::Reference)?,
+                    self.lower_expression(receiver, ExpressionMode::Reference)?,
                 )))
             }
             CallTarget::Intrinsic(Intrinsic::AtomicLoad { nullable, .. }) => {
@@ -2800,6 +2827,22 @@ fn nullable_test_kind(ty: &TypeRef) -> Option<PointerKind> {
         PointerKind::UniqueNullable | PointerKind::SharedNullable | PointerKind::Weak
     )
     .then_some(*kind)
+}
+
+fn is_shared_to_weak_binding(expected: &TypeRef, actual: &TypeRef) -> bool {
+    matches!(
+        (canonical_ref(expected), canonical_ref(actual)),
+        (
+            TypeRef::Pointer {
+                kind: PointerKind::Weak,
+                target: expected_target,
+            },
+            TypeRef::Pointer {
+                kind: PointerKind::Shared,
+                target: actual_target,
+            },
+        ) if canonical_ref(expected_target) == canonical_ref(actual_target)
+    )
 }
 
 fn nullable_owner_kind(ty: &TypeRef) -> Option<PointerKind> {

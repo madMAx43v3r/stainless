@@ -679,8 +679,8 @@ i32 pointer_behavior() {
 
     shared_ptr<Config> first = make_shared<Config>{5};
     shared_ptr<Config> copied = first;
-    weak_ptr<Config> weak = downgrade(copied);
-    shared_nullptr<Config> promoted = lock(weak);
+    weak_ptr<Config> weak = copied;
+    shared_nullptr<Config> promoted = weak.lock();
     if (!promoted) {
         return -1;
     }
@@ -713,9 +713,9 @@ i32 pointer_behavior() {
     weak_ptr<Config> expired;
     {
         shared_ptr<Config> temporary = make_shared<Config>{99};
-        expired = downgrade(temporary);
+        expired = temporary;
     }
-    shared_nullptr<Config> expired_lock = lock(expired);
+    shared_nullptr<Config> expired_lock = expired.lock();
     if (expired_lock) {
         return -3;
     }

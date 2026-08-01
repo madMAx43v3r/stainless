@@ -364,6 +364,14 @@ fn resolves_nullable_shared_weak_and_atomic_pointer_operations() {
     let analysis = analyze(
         r"struct Config { i32 version; };
 
+weak_ptr<Config> observe(shared_ptr<Config> shared) {
+    return shared;
+}
+
+shared_nullptr<Config> promote(weak_ptr<Config> observer) {
+    return observer.lock();
+}
+
 i32 pointer_family() {
     unique_nullptr<Config> maybe_unique;
     if (!maybe_unique) {
@@ -375,8 +383,9 @@ i32 pointer_family() {
     shared_ptr<Config> first = make_shared<Config>(Config{5});
     shared_ptr<Config> copied = first;
     shared_nullptr<Config> maybe_shared = shared_nullptr<Config>(first);
-    weak_ptr<Config> weak = downgrade(copied);
-    shared_nullptr<Config> promoted = lock(weak);
+    weak_ptr<Config> weak = copied;
+    weak_ptr<Config> returned_weak = observe(copied);
+    shared_nullptr<Config> promoted = promote(first);
     if (!promoted) {
         return -1;
     }
@@ -412,6 +421,34 @@ i32 pointer_family() {
             matches!(&binding.ty, TypeRef::Pointer { kind: actual, .. } if *actual == kind)
         }));
     }
+}
+
+#[test]
+fn weak_observation_operations_are_methods_not_free_functions() {
+    let analysis = analyze(
+        r"struct Config { i32 version; };
+
+void invalid_weak_api() {
+    shared_ptr<Config> shared = make_shared<Config>(Config{1});
+    weak_ptr<Config> observer = shared.__downgrade();
+
+    downgrade(shared);
+    lock(observer);
+    observer.__lock();
+    shared.__downgrade(1);
+    observer.lock(1);
+}
+",
+    );
+    let codes = analysis
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+
+    assert_eq!(codes.iter().filter(|code| **code == "RES017").count(), 2);
+    assert!(codes.contains(&"RES020"), "{:#?}", analysis.diagnostics);
+    assert_eq!(codes.iter().filter(|code| **code == "RES108").count(), 2);
 }
 
 #[test]

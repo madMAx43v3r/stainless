@@ -899,7 +899,10 @@ impl Analyzer<'_> {
                 None
             }
             CallTarget::Intrinsic(
-                Intrinsic::ConditionNotify { .. } | Intrinsic::AtomicLoad { .. },
+                Intrinsic::ConditionNotify { .. }
+                | Intrinsic::AtomicLoad { .. }
+                | Intrinsic::DowngradeShared { .. }
+                | Intrinsic::LockWeak { .. },
             ) => {
                 if let Some(receiver) = call_receiver(expression) {
                     let origin = self.expression(receiver, Usage::BorrowShared);
@@ -940,17 +943,6 @@ impl Analyzer<'_> {
                     let mut loans = Vec::new();
                     self.callback_argument(callback, &mut loans);
                     for loan in loans.into_iter().rev() {
-                        self.state.release(loan);
-                    }
-                }
-                None
-            }
-            CallTarget::Intrinsic(
-                Intrinsic::DowngradeShared { .. } | Intrinsic::LockWeak { .. },
-            ) => {
-                if let Some(argument) = arguments.first() {
-                    let origin = self.expression(argument, Usage::BorrowShared);
-                    if let Some(loan) = self.acquire_temporary_loan(origin, false, argument.span) {
                         self.state.release(loan);
                     }
                 }
