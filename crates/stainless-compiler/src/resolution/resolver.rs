@@ -8,7 +8,7 @@ use crate::ast::{
 };
 use crate::interop::{
     CallStyle, CallableBinding, CallbackKind, NativeBindings, NativeErrorFormat, NativeTypeBinding,
-    Receiver, StoredFunctionKind, TypeRef, VAR_TYPE_PATH,
+    PointerKind, Receiver, StoredFunctionKind, TypeRef, VAR_TYPE_PATH,
 };
 
 use super::imports::ImportTable;
@@ -85,6 +85,14 @@ struct Resolver<'bindings> {
 struct Variable {
     ty: TypeRef,
     mutable: bool,
+    null_state: NullState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NullState {
+    Null,
+    NonNull,
+    Unknown,
 }
 
 struct FunctionContext {
@@ -837,6 +845,7 @@ impl Resolver<'_> {
                 Variable {
                     ty: parameter.ty.clone(),
                     mutable: parameter_mutability(syntax, &parameter.ty),
+                    null_state: initial_null_state(&parameter.ty),
                 },
             );
         }
@@ -1020,7 +1029,7 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
     ) -> Option<ResolvedCall> {
         match canonical_ref(target) {
-            TypeRef::UniquePtr(_) => {
+            TypeRef::Pointer { .. } => {
                 for argument in arguments {
                     self.resolve_expression(argument, None, context);
                 }
@@ -1132,11 +1141,29 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
     ) -> Option<ResolvedCall> {
         match canonical_ref(target) {
-            TypeRef::UniquePtr(_) => {
+            TypeRef::Pointer { kind, target }
+                if matches!(
+                    kind,
+                    PointerKind::UniqueNullable
+                        | PointerKind::SharedNullable
+                        | PointerKind::Weak
+                        | PointerKind::AtomicNullable
+                ) =>
+            {
+                Some(ResolvedCall {
+                    span,
+                    target: CallTarget::Intrinsic(Intrinsic::PointerDefault {
+                        kind: *kind,
+                        target: target.as_ref().clone(),
+                    }),
+                    return_type: TypeRef::pointer(*kind, target.as_ref().clone()),
+                    throws: Vec::new(),
+                })
+            }
+            TypeRef::Pointer { kind, .. } => {
                 self.push(
                     "RES106",
-                    "`unique_ptr<T>` has no default constructor; use `make_unique<T>(...)`"
-                        .to_owned(),
+                    format!("`{}<T>` has no default constructor", pointer_name(*kind)),
                     span,
                 );
                 None
@@ -1201,6 +1228,7 @@ impl Resolver<'_> {
                 Variable {
                     ty: symbol_parameter.ty.clone(),
                     mutable: parameter_mutability(parameter, &symbol_parameter.ty),
+                    null_state: initial_null_state(&symbol_parameter.ty),
                 },
             );
         }
@@ -1236,6 +1264,7 @@ impl Resolver<'_> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn resolve_statement(&mut self, statement: &Statement, context: &mut FunctionContext) {
         match &statement.kind {
             StatementKind::Block(block) => self.resolve_block(block, context, true),
@@ -1274,18 +1303,45 @@ impl Resolver<'_> {
             StatementKind::If(if_statement) => {
                 let condition =
                     self.resolve_expression(&if_statement.condition, Some(&TypeRef::Bool), context);
-                self.require_exact(
-                    &TypeRef::Bool,
-                    &condition.ty,
-                    if_statement.condition.span,
-                    "if condition",
-                );
+                if canonical(&condition.ty) != TypeRef::Bool
+                    && !is_nullable_pointer_test(&condition.ty)
+                {
+                    self.push(
+                        "RES110",
+                        format!(
+                            "if condition requires `bool` or a nullable pointer, found `{}`",
+                            display_type(&condition.ty)
+                        ),
+                        if_statement.condition.span,
+                    );
+                }
+
+                let baseline = context.scopes.clone();
+                context.scopes = baseline.clone();
+                Self::refine_null_condition(&if_statement.condition, true, context);
                 self.resolve_statement(&if_statement.then_branch, context);
+                let then_scopes = context.scopes.clone();
+                let then_falls_through = statement_may_fall_through(&if_statement.then_branch);
+
+                context.scopes = baseline;
+                Self::refine_null_condition(&if_statement.condition, false, context);
                 if let Some(else_branch) = &if_statement.else_branch {
                     self.resolve_statement(else_branch, context);
                 }
+                let else_scopes = context.scopes.clone();
+                let else_falls_through = if_statement
+                    .else_branch
+                    .as_deref()
+                    .is_none_or(statement_may_fall_through);
+                context.scopes = merge_null_scopes(
+                    &then_scopes,
+                    then_falls_through,
+                    &else_scopes,
+                    else_falls_through,
+                );
             }
             StatementKind::For(for_statement) => {
+                let before_loop = context.scopes.clone();
                 context.scopes.push(BTreeMap::new());
                 match &for_statement.clause {
                     ForClause::Classic(classic) => {
@@ -1300,12 +1356,18 @@ impl Resolver<'_> {
                         if let Some(condition) = &classic.condition {
                             let actual =
                                 self.resolve_expression(condition, Some(&TypeRef::Bool), context);
-                            self.require_exact(
-                                &TypeRef::Bool,
-                                &actual.ty,
-                                condition.span,
-                                "for condition",
-                            );
+                            if canonical(&actual.ty) != TypeRef::Bool
+                                && !is_nullable_pointer_test(&actual.ty)
+                            {
+                                self.push(
+                                    "RES110",
+                                    format!(
+                                        "for condition requires `bool` or a nullable pointer, found `{}`",
+                                        display_type(&actual.ty)
+                                    ),
+                                    condition.span,
+                                );
+                            }
                         }
                         if let Some(update) = &classic.update {
                             self.resolve_expression(update, None, context);
@@ -1316,6 +1378,7 @@ impl Resolver<'_> {
                 }
                 self.resolve_statement(&for_statement.body, context);
                 context.scopes.pop();
+                context.scopes = merge_null_scopes(&before_loop, true, &context.scopes, true);
             }
             StatementKind::Expression(expression) => {
                 self.resolve_expression(expression, None, context);
@@ -1377,6 +1440,7 @@ impl Resolver<'_> {
         try_statement: &ast::TryStatement,
         context: &mut FunctionContext,
     ) {
+        let baseline_scopes = context.scopes.clone();
         let root = self.exception_root();
         let mut catches = Vec::new();
         let mut resolved_catches = Vec::new();
@@ -1434,8 +1498,14 @@ impl Resolver<'_> {
         context.handled_throws.push(catches.clone());
         self.resolve_block(&try_statement.body, context, true);
         context.handled_throws.pop();
+        let mut continuing_scopes = block_may_fall_through(&try_statement.body)
+            .then(|| context.scopes.clone())
+            .into_iter()
+            .collect::<Vec<_>>();
+        let exceptional_scopes = unknown_nullable_scopes(&baseline_scopes);
 
         for (catch, caught) in try_statement.catches.iter().zip(resolved_catches) {
+            context.scopes.clone_from(&exceptional_scopes);
             context.scopes.push(BTreeMap::new());
             if let Some(binding) = &catch.binding
                 && let Some(caught) = caught
@@ -1448,6 +1518,7 @@ impl Resolver<'_> {
                 let variable = Variable {
                     ty: ty.clone(),
                     mutable: false,
+                    null_state: NullState::NonNull,
                 };
                 self.model.bindings.push(BindingResolution {
                     span: binding.span,
@@ -1462,7 +1533,14 @@ impl Resolver<'_> {
             self.resolve_block(&catch.body, context, false);
             context.current_catch = previous;
             context.scopes.pop();
+            if block_may_fall_through(&catch.body) {
+                continuing_scopes.push(context.scopes.clone());
+            }
         }
+        context.scopes = continuing_scopes
+            .into_iter()
+            .reduce(|left, right| merge_null_scopes(&left, true, &right, true))
+            .unwrap_or(baseline_scopes);
     }
 
     fn validate_checked_effect(&mut self, thrown: StructId, span: Span, context: &FunctionContext) {
@@ -1564,6 +1642,10 @@ impl Resolver<'_> {
             ty
         };
 
+        let null_state = local.initializer.as_ref().map_or_else(
+            || default_constructed_null_state(&resolved_type),
+            |initializer| self.expression_null_state(initializer, context),
+        );
         let variable = Variable {
             mutable: if resolved_type.is_reference() {
                 matches!(resolved_type, TypeRef::Reference { mutable: true, .. })
@@ -1571,6 +1653,7 @@ impl Resolver<'_> {
                 !local.ty.is_const
             },
             ty: resolved_type,
+            null_state,
         };
         self.model.bindings.push(BindingResolution {
             span: local.span,
@@ -1583,6 +1666,124 @@ impl Resolver<'_> {
             .last_mut()
             .expect("a function context always has a scope");
         self.insert_variable(scope, &local.name, variable, local.span);
+    }
+
+    fn expression_null_state(
+        &self,
+        expression: &Expression,
+        context: &FunctionContext,
+    ) -> NullState {
+        match &expression.kind {
+            ExpressionKind::Name(path) if path.segments.len() == 1 => context
+                .scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get(&path.segments[0]))
+                .map_or(NullState::Unknown, |variable| variable.null_state),
+            ExpressionKind::Parenthesized(inner) => self.expression_null_state(inner, context),
+            ExpressionKind::Literal(ast::Literal {
+                kind: LiteralKind::Null,
+                ..
+            }) => NullState::Null,
+            ExpressionKind::Call { arguments, .. } => {
+                let intrinsic = self
+                    .model
+                    .expression(expression.span)
+                    .and_then(|resolution| resolution.call.as_ref())
+                    .and_then(|call| match &call.target {
+                        CallTarget::Intrinsic(intrinsic) => Some(intrinsic),
+                        _ => None,
+                    });
+                match intrinsic {
+                    Some(Intrinsic::PointerDefault { .. }) => NullState::Null,
+                    Some(Intrinsic::MakeOwner { .. }) => NullState::NonNull,
+                    Some(
+                        Intrinsic::Move
+                        | Intrinsic::ValueInitialization { .. }
+                        | Intrinsic::PointerConversion { .. },
+                    ) => arguments.first().map_or(NullState::Unknown, |argument| {
+                        self.expression_null_state(argument, context)
+                    }),
+                    Some(Intrinsic::LockWeak { .. } | Intrinsic::AtomicLoad { .. }) => {
+                        NullState::Unknown
+                    }
+                    _ => self
+                        .model
+                        .expression(expression.span)
+                        .map_or(NullState::Unknown, |resolution| {
+                            initial_null_state(&resolution.ty)
+                        }),
+                }
+            }
+            _ => self
+                .model
+                .expression(expression.span)
+                .map_or(NullState::Unknown, |resolution| {
+                    initial_null_state(&resolution.ty)
+                }),
+        }
+    }
+
+    fn refine_null_condition(expression: &Expression, truth: bool, context: &mut FunctionContext) {
+        match &expression.kind {
+            ExpressionKind::Parenthesized(inner) => {
+                Self::refine_null_condition(inner, truth, context);
+            }
+            ExpressionKind::Prefix {
+                operator: PrefixOperator::Not,
+                operand,
+            } => Self::refine_null_condition(operand, !truth, context),
+            ExpressionKind::Binary {
+                left,
+                operator: BinaryOperator::Equal | BinaryOperator::NotEqual,
+                right,
+            } if is_null_literal(left) || is_null_literal(right) => {
+                let pointer = if is_null_literal(left) { right } else { left };
+                let equal = matches!(
+                    &expression.kind,
+                    ExpressionKind::Binary {
+                        operator: BinaryOperator::Equal,
+                        ..
+                    }
+                );
+                let non_null = if equal { !truth } else { truth };
+                set_expression_null_state(
+                    pointer,
+                    if non_null {
+                        NullState::NonNull
+                    } else {
+                        NullState::Null
+                    },
+                    context,
+                );
+            }
+            ExpressionKind::Binary {
+                left,
+                operator: BinaryOperator::LogicalAnd,
+                right,
+            } if truth => {
+                Self::refine_null_condition(left, true, context);
+                Self::refine_null_condition(right, true, context);
+            }
+            ExpressionKind::Binary {
+                left,
+                operator: BinaryOperator::LogicalOr,
+                right,
+            } if !truth => {
+                Self::refine_null_condition(left, false, context);
+                Self::refine_null_condition(right, false, context);
+            }
+            ExpressionKind::Name(_) => set_expression_null_state(
+                expression,
+                if truth {
+                    NullState::NonNull
+                } else {
+                    NullState::Null
+                },
+                context,
+            ),
+            _ => {}
+        }
     }
 
     fn adapt_rust_result(
@@ -1707,6 +1908,7 @@ impl Resolver<'_> {
             mutable: matches!(binding_type, TypeRef::Reference { mutable: true, .. })
                 || (!binding_type.is_reference() && !range.ty.is_const),
             ty: binding_type,
+            null_state: NullState::Unknown,
         };
         self.model.bindings.push(BindingResolution {
             span: range.ty.span,
@@ -1759,14 +1961,27 @@ impl Resolver<'_> {
                 );
                 (error_info(), None, None)
             }
-            ExpressionKind::Literal(literal) => (
-                ExpressionInfo {
-                    ty: literal_type(literal.kind, &literal.text, expected),
-                    category: ValueCategory::Temporary,
-                },
-                None,
-                None,
-            ),
+            ExpressionKind::Literal(literal) => {
+                let ty = literal_type(literal.kind, &literal.text, expected);
+                if literal.kind == LiteralKind::Null
+                    && literal.text == "nullptr"
+                    && ty == TypeRef::Error
+                {
+                    self.push(
+                        "RES112",
+                        "`nullptr` requires a contextual nullable pointer type".to_owned(),
+                        expression.span,
+                    );
+                }
+                (
+                    ExpressionInfo {
+                        ty,
+                        category: ValueCategory::Temporary,
+                    },
+                    None,
+                    None,
+                )
+            }
             ExpressionKind::JsonArray { elements } => (
                 self.resolve_json_values(elements.iter(), context),
                 None,
@@ -2176,6 +2391,7 @@ impl Resolver<'_> {
                         Variable {
                             ty: outer_variable.ty.clone(),
                             mutable: is_mutable,
+                            null_state: outer_variable.null_state,
                         },
                     ))
                 }
@@ -2223,6 +2439,7 @@ impl Resolver<'_> {
                                 TypeRef::shared_ref(canonical(&outer_variable.ty))
                             },
                             mutable,
+                            null_state: outer_variable.null_state,
                         },
                     ))
                 }
@@ -2255,6 +2472,7 @@ impl Resolver<'_> {
                         Variable {
                             ty: captured_ty,
                             mutable: is_mutable,
+                            null_state: self.expression_null_state(initializer, outer),
                         },
                     ))
                 }
@@ -2300,6 +2518,7 @@ impl Resolver<'_> {
             }
             let variable = Variable {
                 mutable: parameter_mutability(parameter, &resolved),
+                null_state: initial_null_state(&resolved),
                 ty: resolved,
             };
             self.insert_variable(&mut lambda_scope, &parameter.name, variable, parameter.span);
@@ -2412,8 +2631,9 @@ impl Resolver<'_> {
                 None,
             );
         }
-        let TypeRef::Struct { path } = automatic_pointee(&receiver_info.ty) else {
-            if automatic_pointee(&receiver_info.ty) != &TypeRef::Error {
+        let pointee = self.refined_automatic_pointee(receiver, &receiver_info, context, span);
+        let TypeRef::Struct { path } = &pointee else {
+            if pointee != TypeRef::Error {
                 self.push(
                     "RES010",
                     format!(
@@ -2444,11 +2664,7 @@ impl Resolver<'_> {
         (
             ExpressionInfo {
                 ty,
-                category: match receiver_info.category {
-                    ValueCategory::MutablePlace => ValueCategory::MutablePlace,
-                    ValueCategory::Temporary => ValueCategory::Temporary,
-                    ValueCategory::SharedPlace => ValueCategory::SharedPlace,
-                },
+                category: pointee_category(&receiver_info.ty, receiver_info.category),
             },
             Some(ResolvedField { access_path }),
         )
@@ -2462,13 +2678,22 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
     ) -> ExpressionInfo {
         let operand_expected = match operator {
-            PrefixOperator::Not => Some(&TypeRef::Bool),
+            PrefixOperator::Not => None,
             _ => expected,
         };
         let actual = self.resolve_expression(operand, operand_expected, context);
         match operator {
             PrefixOperator::Not => {
-                self.require_exact(&TypeRef::Bool, &actual.ty, operand.span, "`!` operand");
+                if canonical(&actual.ty) != TypeRef::Bool && !is_nullable_pointer_test(&actual.ty) {
+                    self.push(
+                        "RES110",
+                        format!(
+                            "`!` requires `bool`, a nullable owner, or `weak_ptr`, found `{}`",
+                            display_type(&actual.ty)
+                        ),
+                        operand.span,
+                    );
+                }
                 temporary(TypeRef::Bool)
             }
             PrefixOperator::Increment | PrefixOperator::Decrement => {
@@ -2513,6 +2738,8 @@ impl Resolver<'_> {
                     let json_error = self.json_error_struct();
                     self.validate_checked_effect(json_error, left.span, context);
                 }
+                let null_state = self.expression_null_state(right, context);
+                set_expression_null_state(left, null_state, context);
             } else {
                 self.require_exact(&left_type, &right_info.ty, right.span, "assignment");
             }
@@ -2527,23 +2754,47 @@ impl Resolver<'_> {
             BinaryOperator::LogicalAnd | BinaryOperator::LogicalOr
         ) {
             let left_info = self.resolve_expression(left, Some(&TypeRef::Bool), context);
+            let baseline = context.scopes.clone();
+            Self::refine_null_condition(left, operator == BinaryOperator::LogicalAnd, context);
             let right_info = self.resolve_expression(right, Some(&TypeRef::Bool), context);
-            self.require_exact(&TypeRef::Bool, &left_info.ty, left.span, "logical operand");
-            self.require_exact(
-                &TypeRef::Bool,
-                &right_info.ty,
-                right.span,
-                "logical operand",
-            );
+            let with_right = context.scopes.clone();
+            context.scopes = merge_null_scopes(&baseline, true, &with_right, true);
+            for (syntax, actual) in [(left, &left_info), (right, &right_info)] {
+                if canonical(&actual.ty) != TypeRef::Bool && !is_nullable_pointer_test(&actual.ty) {
+                    self.push(
+                        "RES110",
+                        format!(
+                            "logical operand requires `bool` or a nullable pointer, found `{}`",
+                            display_type(&actual.ty)
+                        ),
+                        syntax.span,
+                    );
+                }
+            }
             return temporary(TypeRef::Bool);
         }
 
-        let left_info = self.resolve_expression(left, expected, context);
+        let (left_info, right_info) = if is_null_literal(left) {
+            let right_info = self.resolve_expression(right, expected, context);
+            let left_info =
+                self.resolve_expression(left, Some(&canonical(&right_info.ty)), context);
+            (left_info, right_info)
+        } else {
+            let left_info = self.resolve_expression(left, expected, context);
+            let right_info =
+                self.resolve_expression(right, Some(&canonical(&left_info.ty)), context);
+            (left_info, right_info)
+        };
         let left_type = canonical(&left_info.ty);
-        let right_info = self.resolve_expression(right, Some(&left_type), context);
         self.require_exact(&left_type, &right_info.ty, right.span, "binary operand");
         if is_json_var(&left_type)
             && matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual)
+        {
+            return temporary(TypeRef::Bool);
+        }
+        if is_nullable_pointer_test(&left_type)
+            && matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual)
+            && (is_null_literal(left) || is_null_literal(right))
         {
             return temporary(TypeRef::Bool);
         }
@@ -2571,9 +2822,38 @@ impl Resolver<'_> {
             ExpressionKind::GenericName {
                 path,
                 arguments: type_arguments,
-            } if matches!(path.segments.as_slice(), [name] if name == "make_unique") => {
-                self.resolve_make_unique(type_arguments, arguments, span, context)
-            }
+            } if matches!(path.segments.as_slice(), [name] if name == "make_unique") => self
+                .resolve_make_owner(
+                    PointerKind::Unique,
+                    "make_unique",
+                    type_arguments,
+                    arguments,
+                    span,
+                    context,
+                ),
+            ExpressionKind::GenericName {
+                path,
+                arguments: type_arguments,
+            } if matches!(path.segments.as_slice(), [name] if name == "make_shared") => self
+                .resolve_make_owner(
+                    PointerKind::Shared,
+                    "make_shared",
+                    type_arguments,
+                    arguments,
+                    span,
+                    context,
+                ),
+            ExpressionKind::GenericName {
+                path,
+                arguments: type_arguments,
+            } if path.segments.len() == 1 && pointer_kind(&path.segments).is_some() => self
+                .resolve_pointer_constructor(
+                    pointer_kind(&path.segments).expect("pointer kind was checked"),
+                    type_arguments,
+                    arguments,
+                    span,
+                    context,
+                ),
             ExpressionKind::GenericName { path, .. } => {
                 for argument in arguments {
                     self.resolve_expression(argument, None, context);
@@ -2605,16 +2885,33 @@ impl Resolver<'_> {
                 );
                 (error_info(), None)
             }
+            ExpressionKind::Name(path) if matches!(path.segments.as_slice(), [name] if name == "make_shared") =>
+            {
+                for argument in arguments {
+                    self.resolve_expression(argument, None, context);
+                }
+                self.push(
+                    "RES105",
+                    "`make_shared` requires one explicit pointee type argument".to_owned(),
+                    span,
+                );
+                (error_info(), None)
+            }
+            ExpressionKind::Name(path) if matches!(path.segments.as_slice(), [name] if name == "downgrade" || name == "lock") => {
+                self.resolve_shared_pointer_builtin(&path.segments[0], arguments, span, context)
+            }
             ExpressionKind::Field { receiver, name } => {
                 let receiver_info = self.resolve_expression(receiver, None, context);
-                if let TypeRef::Struct { path } = automatic_pointee(&receiver_info.ty).clone()
+                let pointee =
+                    self.refined_automatic_pointee(receiver, &receiver_info, context, span);
+                if let TypeRef::Struct { path } = pointee
                     && let Some(structure) = self.struct_by_path.get(&path).copied()
                     && let Some((ty @ TypeRef::Function(_), access_path)) =
                         self.lookup_struct_field(structure, name)
                 {
                     let callee_info = ExpressionInfo {
                         ty,
-                        category: receiver_info.category,
+                        category: pointee_category(&receiver_info.ty, receiver_info.category),
                     };
                     self.record_expression(
                         callee.span,
@@ -2869,15 +3166,30 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
         receiver_info: &ExpressionInfo,
     ) -> (ExpressionInfo, Option<ResolvedCall>) {
-        match automatic_pointee(&receiver_info.ty).clone() {
+        match self.refined_automatic_pointee(receiver, receiver_info, context, span) {
             TypeRef::Struct { path } => {
                 let Some(structure) = self.struct_by_path.get(&path).copied() else {
                     return (error_info(), None);
                 };
+                let mut pointee_receiver = receiver_info.clone();
+                pointee_receiver.category =
+                    pointee_category(&receiver_info.ty, receiver_info.category);
                 self.resolve_struct_method(
                     structure,
-                    receiver_info,
+                    &pointee_receiver,
                     receiver.span,
+                    name,
+                    arguments,
+                    span,
+                    context,
+                )
+            }
+            TypeRef::Pointer { kind, target }
+                if matches!(kind, PointerKind::Atomic | PointerKind::AtomicNullable) =>
+            {
+                self.resolve_atomic_pointer_method(
+                    kind,
+                    target.as_ref(),
                     name,
                     arguments,
                     span,
@@ -2932,6 +3244,128 @@ impl Resolver<'_> {
         }
     }
 
+    fn refined_automatic_pointee(
+        &mut self,
+        receiver: &Expression,
+        receiver_info: &ExpressionInfo,
+        context: &FunctionContext,
+        span: Span,
+    ) -> TypeRef {
+        match canonical_ref(&receiver_info.ty) {
+            TypeRef::Pointer {
+                kind: PointerKind::UniqueNullable | PointerKind::SharedNullable,
+                target,
+            } => {
+                if self.expression_null_state(receiver, context) == NullState::NonNull {
+                    canonical_ref(target).clone()
+                } else {
+                    self.push(
+                        "RES110",
+                        format!(
+                            "pointee access through `{}` requires a non-null guard",
+                            display_type(&receiver_info.ty)
+                        ),
+                        span,
+                    );
+                    TypeRef::Error
+                }
+            }
+            _ => automatic_pointee(&receiver_info.ty).clone(),
+        }
+    }
+
+    fn resolve_atomic_pointer_method(
+        &mut self,
+        kind: PointerKind,
+        target: &TypeRef,
+        name: &ast::Path,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        if name.segments.len() != 1 {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES109",
+                "atomic pointer operations cannot be qualified".to_owned(),
+                span,
+            );
+            return (error_info(), None);
+        }
+        let nullable = kind == PointerKind::AtomicNullable;
+        let value_kind = if nullable {
+            PointerKind::SharedNullable
+        } else {
+            PointerKind::Shared
+        };
+        let value_type = TypeRef::pointer(value_kind, target.clone());
+        let (intrinsic, return_type, expected_arity) = match name.segments[0].as_str() {
+            "__load" => (
+                Intrinsic::AtomicLoad {
+                    nullable,
+                    target: target.clone(),
+                },
+                value_type.clone(),
+                0,
+            ),
+            "__store" => (
+                Intrinsic::AtomicStore {
+                    nullable,
+                    target: target.clone(),
+                },
+                TypeRef::Void,
+                1,
+            ),
+            "__swap" => (
+                Intrinsic::AtomicSwap {
+                    nullable,
+                    target: target.clone(),
+                },
+                value_type.clone(),
+                1,
+            ),
+            operation => {
+                for argument in arguments {
+                    self.resolve_expression(argument, None, context);
+                }
+                self.push(
+                    "RES109",
+                    format!("unknown atomic pointer operation `{operation}`"),
+                    span,
+                );
+                return (error_info(), None);
+            }
+        };
+        if arguments.len() != expected_arity {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES109",
+                format!(
+                    "`{}` requires {expected_arity} argument(s), found {}",
+                    name.display(),
+                    arguments.len()
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+        if let Some(argument) = arguments.first() {
+            let actual = self.resolve_expression(argument, Some(&value_type), context);
+            self.validate_binding(&value_type, &actual, argument.span, "atomic pointer value");
+        }
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(intrinsic),
+            return_type: return_type.clone(),
+            throws: Vec::new(),
+        };
+        (info_for_return_type(return_type), Some(call))
+    }
+
     fn resolve_stored_function_call(
         &mut self,
         callee: &ExpressionInfo,
@@ -2966,7 +3400,8 @@ impl Resolver<'_> {
         }
         let actual = self.resolve_arguments(arguments, Some(&function.parameters), context);
         for ((expected, actual), syntax) in function.parameters.iter().zip(&actual).zip(arguments) {
-            self.validate_binding(expected, actual, syntax.span, "stored function argument");
+            let actual = self.adjusted_binding_actual(expected, actual, syntax, context);
+            self.validate_binding(expected, &actual, syntax.span, "stored function argument");
         }
         let mutable = function.kind == StoredFunctionKind::Mutable;
         if mutable && callee.category != ValueCategory::MutablePlace {
@@ -3106,7 +3541,31 @@ impl Resolver<'_> {
                     .eq(actual.iter().map(|argument| canonical(&argument.ty)))
             })
             .collect::<Vec<_>>();
-        if exact.len() != 1 {
+        let compatible = if exact.is_empty() {
+            candidates
+                .iter()
+                .copied()
+                .filter(|id| {
+                    self.model.functions[id.0]
+                        .parameters
+                        .iter()
+                        .zip(&actual)
+                        .zip(arguments)
+                        .all(|((parameter, argument), syntax)| {
+                            let adjusted = self.adjusted_binding_actual(
+                                &parameter.ty,
+                                argument,
+                                syntax,
+                                context,
+                            );
+                            self.is_derived_reference_binding(&parameter.ty, &adjusted.ty)
+                        })
+                })
+                .collect::<Vec<_>>()
+        } else {
+            exact
+        };
+        if compatible.len() != 1 {
             self.push(
                 "RES019",
                 format!(
@@ -3118,7 +3577,7 @@ impl Resolver<'_> {
             );
             return (error_info(), None);
         }
-        let id = exact[0];
+        let id = compatible[0];
         let symbol = self.model.functions[id.0].clone();
         if !symbol.has_definition {
             self.push(
@@ -3144,7 +3603,8 @@ impl Resolver<'_> {
         }
         for ((parameter, argument), syntax) in symbol.parameters.iter().zip(&actual).zip(arguments)
         {
-            self.validate_binding(&parameter.ty, argument, syntax.span, "argument");
+            let argument = self.adjusted_binding_actual(&parameter.ty, argument, syntax, context);
+            self.validate_binding(&parameter.ty, &argument, syntax.span, "argument");
         }
         let return_type = symbol.return_type;
         let call = ResolvedCall {
@@ -3195,8 +3655,10 @@ impl Resolver<'_> {
         (temporary(return_type), Some(call))
     }
 
-    fn resolve_make_unique(
+    fn resolve_make_owner(
         &mut self,
+        kind: PointerKind,
+        builtin_name: &str,
         type_arguments: &[ast::Type],
         arguments: &[Expression],
         span: Span,
@@ -3209,7 +3671,7 @@ impl Resolver<'_> {
             self.push(
                 "RES105",
                 format!(
-                    "`make_unique` requires one pointee type argument, found {}",
+                    "`{builtin_name}` requires one pointee type argument, found {}",
                     type_arguments.len()
                 ),
                 span,
@@ -3224,7 +3686,7 @@ impl Resolver<'_> {
             self.push(
                 "RES105",
                 format!(
-                    "`make_unique` cannot allocate pointee type `{}`",
+                    "`{builtin_name}` cannot allocate pointee type `{}`",
                     display_type(&target)
                 ),
                 type_arguments[0].span,
@@ -3241,16 +3703,268 @@ impl Resolver<'_> {
         else {
             return (error_info(), None);
         };
-        let return_type = TypeRef::unique_ptr(target.clone());
+        let return_type = TypeRef::pointer(kind, target.clone());
         let throws = construction.throws.clone();
         let call = ResolvedCall {
             span,
-            target: CallTarget::Intrinsic(Intrinsic::MakeUnique {
+            target: CallTarget::Intrinsic(Intrinsic::MakeOwner {
+                kind,
                 target,
                 construction: Box::new(construction),
             }),
             return_type: return_type.clone(),
             throws,
+        };
+        (temporary(return_type), Some(call))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn resolve_pointer_constructor(
+        &mut self,
+        kind: PointerKind,
+        type_arguments: &[ast::Type],
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        if type_arguments.len() != 1 {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES107",
+                format!(
+                    "`{}` requires one pointee type argument, found {}",
+                    pointer_name(kind),
+                    type_arguments.len()
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+        let target = self.resolve_type(&type_arguments[0], &context.namespace, false);
+        if target == TypeRef::Error {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            return (error_info(), None);
+        }
+        let return_type = TypeRef::pointer(kind, target.clone());
+        if arguments.is_empty() {
+            if matches!(
+                kind,
+                PointerKind::UniqueNullable
+                    | PointerKind::SharedNullable
+                    | PointerKind::Weak
+                    | PointerKind::AtomicNullable
+            ) {
+                let call = ResolvedCall {
+                    span,
+                    target: CallTarget::Intrinsic(Intrinsic::PointerDefault { kind, target }),
+                    return_type: return_type.clone(),
+                    throws: Vec::new(),
+                };
+                return (temporary(return_type), Some(call));
+            }
+            self.push(
+                "RES106",
+                format!("`{}<T>` has no default constructor", pointer_name(kind)),
+                span,
+            );
+            return (error_info(), None);
+        }
+        if arguments.len() != 1 {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES107",
+                format!(
+                    "`{}<T>` pointer conversion requires exactly one argument",
+                    pointer_name(kind)
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+        if matches!(
+            arguments[0].kind,
+            ExpressionKind::Literal(ast::Literal {
+                kind: LiteralKind::Null,
+                ref text,
+            }) if text == "nullptr"
+        ) && matches!(
+            kind,
+            PointerKind::UniqueNullable | PointerKind::SharedNullable | PointerKind::AtomicNullable
+        ) {
+            let call = ResolvedCall {
+                span,
+                target: CallTarget::Intrinsic(Intrinsic::PointerDefault { kind, target }),
+                return_type: return_type.clone(),
+                throws: Vec::new(),
+            };
+            return (temporary(return_type), Some(call));
+        }
+        let actual = self.resolve_expression(&arguments[0], None, context);
+        let TypeRef::Pointer {
+            kind: source_kind,
+            target: source_target,
+        } = canonical(&actual.ty)
+        else {
+            if actual.ty != TypeRef::Error {
+                self.push(
+                    "RES107",
+                    format!(
+                        "`{}<T>` requires a compatible pointer argument, found `{}`",
+                        pointer_name(kind),
+                        display_type(&actual.ty)
+                    ),
+                    arguments[0].span,
+                );
+            }
+            return (error_info(), None);
+        };
+        if canonical(&target) != canonical(&source_target) {
+            self.push(
+                "RES107",
+                format!(
+                    "pointer conversion requires pointee `{}`, found `{}`",
+                    display_type(&target),
+                    display_type(&source_target)
+                ),
+                arguments[0].span,
+            );
+            return (error_info(), None);
+        }
+        if source_kind == kind {
+            self.validate_binding(
+                &return_type,
+                &actual,
+                arguments[0].span,
+                "pointer constructor",
+            );
+            let call = ResolvedCall {
+                span,
+                target: CallTarget::Intrinsic(Intrinsic::ValueInitialization {
+                    target: return_type.clone(),
+                }),
+                return_type: return_type.clone(),
+                throws: Vec::new(),
+            };
+            return (temporary(return_type), Some(call));
+        }
+        let supported = match source_kind {
+            PointerKind::Unique => kind == PointerKind::UniqueNullable,
+            PointerKind::UniqueNullable => kind == PointerKind::Unique,
+            PointerKind::Shared => matches!(
+                kind,
+                PointerKind::SharedNullable | PointerKind::Atomic | PointerKind::AtomicNullable
+            ),
+            PointerKind::SharedNullable => {
+                matches!(kind, PointerKind::Shared | PointerKind::AtomicNullable)
+            }
+            PointerKind::Weak | PointerKind::Atomic | PointerKind::AtomicNullable => false,
+        };
+        if !supported {
+            self.push(
+                "RES107",
+                format!(
+                    "conversion from `{}` to `{}` requires non-null refinement or is not supported",
+                    pointer_name(source_kind),
+                    pointer_name(kind)
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+        if matches!(
+            (source_kind, kind),
+            (PointerKind::UniqueNullable, PointerKind::Unique)
+                | (PointerKind::SharedNullable, PointerKind::Shared)
+        ) && self.expression_null_state(&arguments[0], context) != NullState::NonNull
+        {
+            self.push(
+                "RES110",
+                format!(
+                    "conversion from `{}` to `{}` requires a non-null guard",
+                    pointer_name(source_kind),
+                    pointer_name(kind)
+                ),
+                arguments[0].span,
+            );
+            return (error_info(), None);
+        }
+        self.validate_value_use(&actual.ty, &actual, arguments[0].span, "pointer conversion");
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::PointerConversion {
+                from: source_kind,
+                to: kind,
+                target,
+            }),
+            return_type: return_type.clone(),
+            throws: Vec::new(),
+        };
+        (temporary(return_type), Some(call))
+    }
+
+    fn resolve_shared_pointer_builtin(
+        &mut self,
+        name: &str,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        if arguments.len() != 1 {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES108",
+                format!("`{name}` requires exactly one pointer argument"),
+                span,
+            );
+            return (error_info(), None);
+        }
+        let actual = self.resolve_expression(&arguments[0], None, context);
+        let TypeRef::Pointer { kind, target } = canonical(&actual.ty) else {
+            if actual.ty != TypeRef::Error {
+                self.push(
+                    "RES108",
+                    format!("`{name}` requires an ownership pointer"),
+                    arguments[0].span,
+                );
+            }
+            return (error_info(), None);
+        };
+        let (intrinsic, result_kind) = match (name, kind) {
+            ("downgrade", PointerKind::Shared) => (
+                Intrinsic::DowngradeShared {
+                    target: target.as_ref().clone(),
+                },
+                PointerKind::Weak,
+            ),
+            ("lock", PointerKind::Weak) => (
+                Intrinsic::LockWeak {
+                    target: target.as_ref().clone(),
+                },
+                PointerKind::SharedNullable,
+            ),
+            _ => {
+                self.push(
+                    "RES108",
+                    format!("`{name}` does not accept `{}`", pointer_name(kind)),
+                    arguments[0].span,
+                );
+                return (error_info(), None);
+            }
+        };
+        let return_type = TypeRef::pointer(result_kind, target.as_ref().clone());
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(intrinsic),
+            return_type: return_type.clone(),
+            throws: Vec::new(),
         };
         (temporary(return_type), Some(call))
     }
@@ -3467,8 +4181,15 @@ impl Resolver<'_> {
                         .parameters
                         .iter()
                         .zip(&actual)
-                        .all(|(parameter, argument)| {
-                            self.is_derived_reference_binding(&parameter.ty, &argument.ty)
+                        .zip(arguments)
+                        .all(|((parameter, argument), syntax)| {
+                            let adjusted = self.adjusted_binding_actual(
+                                &parameter.ty,
+                                argument,
+                                syntax,
+                                context,
+                            );
+                            self.is_derived_reference_binding(&parameter.ty, &adjusted.ty)
                         })
                 })
                 .collect::<Vec<_>>()
@@ -3537,9 +4258,11 @@ impl Resolver<'_> {
         for ((parameter, argument), expression) in
             symbol.parameters.iter().zip(&actual).zip(arguments)
         {
+            let argument =
+                self.adjusted_binding_actual(&parameter.ty, argument, expression, context);
             self.validate_binding(
                 &parameter.ty,
-                argument,
+                &argument,
                 expression.span,
                 "constructor argument",
             );
@@ -3646,9 +4369,16 @@ impl Resolver<'_> {
                         .parameters
                         .iter()
                         .zip(&actual)
-                        .all(|(parameter, argument)| {
+                        .zip(arguments)
+                        .all(|((parameter, argument), syntax)| {
+                            let adjusted = self.adjusted_binding_actual(
+                                &parameter.ty,
+                                argument,
+                                syntax,
+                                context,
+                            );
                             canonical(&parameter.ty) == canonical(&argument.ty)
-                                || self.is_derived_reference_binding(&parameter.ty, &argument.ty)
+                                || self.is_derived_reference_binding(&parameter.ty, &adjusted.ty)
                         })
                 })
                 .collect::<Vec<_>>()
@@ -3687,7 +4417,9 @@ impl Resolver<'_> {
         for ((parameter, argument), expression) in
             symbol.parameters.iter().zip(&actual).zip(arguments)
         {
-            self.validate_binding(&parameter.ty, argument, expression.span, "argument");
+            let argument =
+                self.adjusted_binding_actual(&parameter.ty, argument, expression, context);
+            self.validate_binding(&parameter.ty, &argument, expression.span, "argument");
         }
         let return_type = symbol.return_type;
         let call = ResolvedCall {
@@ -3961,6 +4693,32 @@ impl Resolver<'_> {
         }
     }
 
+    fn adjusted_binding_actual(
+        &self,
+        expected: &TypeRef,
+        actual: &ExpressionInfo,
+        expression: &Expression,
+        context: &FunctionContext,
+    ) -> ExpressionInfo {
+        if !expected.is_reference()
+            || self.expression_null_state(expression, context) != NullState::NonNull
+        {
+            return actual.clone();
+        }
+        let TypeRef::Pointer { kind, target } = canonical_ref(&actual.ty) else {
+            return actual.clone();
+        };
+        let non_null_kind = match kind {
+            PointerKind::UniqueNullable => PointerKind::Unique,
+            PointerKind::SharedNullable => PointerKind::Shared,
+            _ => return actual.clone(),
+        };
+        ExpressionInfo {
+            ty: TypeRef::pointer(non_null_kind, target.as_ref().clone()),
+            category: pointee_category(&actual.ty, actual.category),
+        }
+    }
+
     fn validate_binding(
         &mut self,
         expected: &TypeRef,
@@ -3981,7 +4739,8 @@ impl Resolver<'_> {
         }
         match expected {
             TypeRef::Reference { mutable: true, .. }
-                if actual.category != ValueCategory::MutablePlace =>
+                if actual.category != ValueCategory::MutablePlace
+                    || is_shared_owner(&actual.ty) =>
             {
                 self.push(
                     "RES026",
@@ -4307,7 +5066,7 @@ impl Resolver<'_> {
             }
             TypeKind::Named(named) => {
                 let segments = &named.path.segments;
-                if matches!(segments.as_slice(), [name] if name == "unique_ptr") {
+                if let Some(kind) = pointer_kind(segments) {
                     let arguments = named
                         .arguments
                         .iter()
@@ -4317,7 +5076,8 @@ impl Resolver<'_> {
                         self.push(
                             "RES104",
                             format!(
-                                "`unique_ptr` expects one type argument, found {}",
+                                "`{}` expects one type argument, found {}",
+                                pointer_name(kind),
                                 arguments.len()
                             ),
                             ty.span,
@@ -4326,12 +5086,16 @@ impl Resolver<'_> {
                     } else if matches!(arguments[0], TypeRef::Void | TypeRef::Reference { .. }) {
                         self.push(
                             "RES104",
-                            format!("`unique_ptr` cannot own `{}`", display_type(&arguments[0])),
+                            format!(
+                                "`{}` cannot use pointee type `{}`",
+                                pointer_name(kind),
+                                display_type(&arguments[0])
+                            ),
                             ty.span,
                         );
                         TypeRef::Error
                     } else {
-                        TypeRef::unique_ptr(arguments[0].clone())
+                        TypeRef::pointer(kind, arguments[0].clone())
                     }
                 } else if matches!(segments.as_slice(), [name] if name == "var") {
                     if !named.arguments.is_empty() {
@@ -4383,7 +5147,17 @@ impl Resolver<'_> {
                             || native_container_arity(&path),
                             |binding| Some(binding.type_parameters.len()),
                         );
-                        if expected_arity == Some(arguments.len()) {
+                        if path == "rust::Option"
+                            && matches!(arguments.as_slice(), [TypeRef::Pointer { .. }])
+                        {
+                            self.push(
+                                "RES111",
+                                "`rust::Option<T>` cannot contain a Stainless pointer type; use the corresponding nullable pointer"
+                                    .to_owned(),
+                                ty.span,
+                            );
+                            TypeRef::Error
+                        } else if expected_arity == Some(arguments.len()) {
                             TypeRef::Native { path, arguments }
                         } else {
                             self.push(
@@ -4409,11 +5183,24 @@ impl Resolver<'_> {
                     ty.span,
                 );
                 TypeRef::Error
-            } else if matches!(value, TypeRef::UniquePtr(_)) {
+            } else if matches!(
+                value,
+                TypeRef::Pointer {
+                    kind: PointerKind::Atomic | PointerKind::AtomicNullable,
+                    ..
+                }
+            ) {
+                TypeRef::Reference {
+                    mutable: !ty.is_const,
+                    target: Box::new(value),
+                }
+            } else if let TypeRef::Pointer { kind, .. } = &value {
                 self.push(
                     "RES106",
-                    "references to `unique_ptr<T>` are not allowed; pass the owner by value or borrow its pointee"
-                        .to_owned(),
+                    format!(
+                        "references to `{}<T>` are not allowed; pass the owner by value or borrow its pointee",
+                        pointer_name(*kind)
+                    ),
                     ty.span,
                 );
                 TypeRef::Error
@@ -4669,7 +5456,7 @@ impl Resolver<'_> {
             | TypeRef::Parameter(_)
             | TypeRef::Callback(_)
             | TypeRef::Function(_)
-            | TypeRef::UniquePtr(_)
+            | TypeRef::Pointer { .. }
             | TypeRef::Struct { .. }
             | TypeRef::Reference { .. }
             | TypeRef::Error => false,
@@ -4753,7 +5540,9 @@ fn substitute(ty: &TypeRef, substitutions: &BTreeMap<String, TypeRef>) -> TypeRe
                 .collect(),
             substitute(&function.return_type, substitutions),
         ),
-        TypeRef::UniquePtr(target) => TypeRef::unique_ptr(substitute(target, substitutions)),
+        TypeRef::Pointer { kind, target } => {
+            TypeRef::pointer(*kind, substitute(target, substitutions))
+        }
         TypeRef::Struct { .. } => ty.clone(),
         TypeRef::Reference { mutable, target } => TypeRef::Reference {
             mutable: *mutable,
@@ -4796,8 +5585,49 @@ fn canonical_ref(ty: &TypeRef) -> &TypeRef {
 
 fn automatic_pointee(ty: &TypeRef) -> &TypeRef {
     match canonical_ref(ty) {
-        TypeRef::UniquePtr(target) => canonical_ref(target),
+        TypeRef::Pointer {
+            kind: PointerKind::Unique | PointerKind::Shared,
+            target,
+        } => canonical_ref(target),
         target => target,
+    }
+}
+
+fn is_shared_owner(ty: &TypeRef) -> bool {
+    matches!(
+        canonical_ref(ty),
+        TypeRef::Pointer {
+            kind: PointerKind::Shared | PointerKind::SharedNullable,
+            ..
+        }
+    )
+}
+
+fn pointee_category(ty: &TypeRef, category: ValueCategory) -> ValueCategory {
+    if is_shared_owner(ty) {
+        ValueCategory::SharedPlace
+    } else {
+        category
+    }
+}
+
+fn initial_null_state(ty: &TypeRef) -> NullState {
+    match canonical_ref(ty) {
+        TypeRef::Pointer {
+            kind: PointerKind::Unique | PointerKind::Shared | PointerKind::Atomic,
+            ..
+        } => NullState::NonNull,
+        _ => NullState::Unknown,
+    }
+}
+
+fn default_constructed_null_state(ty: &TypeRef) -> NullState {
+    match canonical_ref(ty) {
+        TypeRef::Pointer {
+            kind: PointerKind::UniqueNullable | PointerKind::SharedNullable | PointerKind::Weak,
+            ..
+        } => NullState::Null,
+        _ => initial_null_state(ty),
     }
 }
 
@@ -4827,8 +5657,28 @@ fn primitive_type(segments: &[String]) -> Option<TypeRef> {
     }
 }
 
+fn pointer_kind(segments: &[String]) -> Option<PointerKind> {
+    if segments.len() != 1 {
+        return None;
+    }
+    match segments[0].as_str() {
+        "unique_ptr" => Some(PointerKind::Unique),
+        "unique_nullptr" => Some(PointerKind::UniqueNullable),
+        "shared_ptr" => Some(PointerKind::Shared),
+        "shared_nullptr" => Some(PointerKind::SharedNullable),
+        "weak_ptr" => Some(PointerKind::Weak),
+        "atomic_ptr" => Some(PointerKind::Atomic),
+        "atomic_nullptr" => Some(PointerKind::AtomicNullable),
+        _ => None,
+    }
+}
+
 fn literal_type(kind: LiteralKind, text: &str, expected: Option<&TypeRef>) -> TypeRef {
     match kind {
+        LiteralKind::Null if text == "nullptr" => expected
+            .filter(|ty| is_nullable_pointer_test(ty))
+            .cloned()
+            .unwrap_or(TypeRef::Error),
         LiteralKind::Null => json_var_type(),
         LiteralKind::Boolean => TypeRef::Bool,
         LiteralKind::Character => TypeRef::Char,
@@ -4838,6 +5688,124 @@ fn literal_type(kind: LiteralKind, text: &str, expected: Option<&TypeRef>) -> Ty
         LiteralKind::Integer => integer_suffix(text)
             .or_else(|| expected.filter(|ty| is_integer(ty)).cloned())
             .unwrap_or(TypeRef::I32),
+    }
+}
+
+fn is_null_literal(expression: &Expression) -> bool {
+    match &expression.kind {
+        ExpressionKind::Literal(ast::Literal {
+            kind: LiteralKind::Null,
+            ..
+        }) => true,
+        ExpressionKind::Parenthesized(inner) => is_null_literal(inner),
+        _ => false,
+    }
+}
+
+fn is_nullable_pointer_test(ty: &TypeRef) -> bool {
+    matches!(
+        canonical_ref(ty),
+        TypeRef::Pointer {
+            kind: PointerKind::UniqueNullable | PointerKind::SharedNullable | PointerKind::Weak,
+            ..
+        }
+    )
+}
+
+fn set_expression_null_state(
+    expression: &Expression,
+    null_state: NullState,
+    context: &mut FunctionContext,
+) {
+    let expression = match &expression.kind {
+        ExpressionKind::Parenthesized(inner) => inner.as_ref(),
+        _ => expression,
+    };
+    let ExpressionKind::Name(path) = &expression.kind else {
+        return;
+    };
+    let [name] = path.segments.as_slice() else {
+        return;
+    };
+    if let Some(variable) = context
+        .scopes
+        .iter_mut()
+        .rev()
+        .find_map(|scope| scope.get_mut(name))
+        && is_nullable_pointer_test(&variable.ty)
+    {
+        variable.null_state = null_state;
+    }
+}
+
+fn merge_null_scopes(
+    left: &[BTreeMap<String, Variable>],
+    left_continues: bool,
+    right: &[BTreeMap<String, Variable>],
+    right_continues: bool,
+) -> Vec<BTreeMap<String, Variable>> {
+    if !left_continues {
+        return right.to_vec();
+    }
+    if !right_continues {
+        return left.to_vec();
+    }
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| {
+            left.iter()
+                .map(|(name, variable)| {
+                    let mut merged = variable.clone();
+                    if right
+                        .get(name)
+                        .is_none_or(|other| other.null_state != variable.null_state)
+                    {
+                        merged.null_state = NullState::Unknown;
+                    }
+                    (name.clone(), merged)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn unknown_nullable_scopes(
+    scopes: &[BTreeMap<String, Variable>],
+) -> Vec<BTreeMap<String, Variable>> {
+    let mut scopes = scopes.to_vec();
+    for variable in scopes.iter_mut().flat_map(BTreeMap::values_mut) {
+        if is_nullable_pointer_test(&variable.ty) {
+            variable.null_state = NullState::Unknown;
+        }
+    }
+    scopes
+}
+
+fn block_may_fall_through(block: &ast::Block) -> bool {
+    block
+        .statements
+        .last()
+        .is_none_or(statement_may_fall_through)
+}
+
+fn statement_may_fall_through(statement: &Statement) -> bool {
+    match &statement.kind {
+        StatementKind::Return(_)
+        | StatementKind::Throw(_)
+        | StatementKind::Break
+        | StatementKind::Continue => false,
+        StatementKind::Block(block) => block
+            .statements
+            .last()
+            .is_none_or(statement_may_fall_through),
+        StatementKind::If(statement) => {
+            statement_may_fall_through(&statement.then_branch)
+                || statement
+                    .else_branch
+                    .as_deref()
+                    .is_none_or(statement_may_fall_through)
+        }
+        _ => true,
     }
 }
 
@@ -5001,6 +5969,13 @@ fn is_copyable(ty: &TypeRef) -> bool {
     ) || is_json_var(ty)
         || matches!(
             ty,
+            TypeRef::Pointer {
+                kind: PointerKind::Shared | PointerKind::SharedNullable | PointerKind::Weak,
+                ..
+            }
+        )
+        || matches!(
+            ty,
             TypeRef::Function(function) if function.kind == StoredFunctionKind::Shared
         )
 }
@@ -5016,7 +5991,13 @@ fn callable_signature(ty: &TypeRef) -> Option<(&[TypeRef], &TypeRef)> {
 fn contains_move_only_storage(ty: &TypeRef) -> bool {
     match ty {
         TypeRef::Function(function) => function.kind == StoredFunctionKind::Mutable,
-        TypeRef::UniquePtr(_) => true,
+        TypeRef::Pointer { kind, .. } => matches!(
+            kind,
+            PointerKind::Unique
+                | PointerKind::UniqueNullable
+                | PointerKind::Atomic
+                | PointerKind::AtomicNullable
+        ),
         TypeRef::Native { arguments, .. } => arguments.iter().any(contains_move_only_storage),
         TypeRef::Reference { target, .. } => contains_move_only_storage(target),
         _ => false,
@@ -5123,7 +6104,9 @@ fn display_type(ty: &TypeRef) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        TypeRef::UniquePtr(target) => format!("unique_ptr<{}>", display_type(target)),
+        TypeRef::Pointer { kind, target } => {
+            format!("{}<{}>", pointer_name(*kind), display_type(target))
+        }
         TypeRef::Struct { path } => display_path(path),
         TypeRef::Reference { mutable, target } => {
             if *mutable {
@@ -5132,6 +6115,18 @@ fn display_type(ty: &TypeRef) -> String {
                 format!("const {}&", display_type(target))
             }
         }
+    }
+}
+
+fn pointer_name(kind: PointerKind) -> &'static str {
+    match kind {
+        PointerKind::Unique => "unique_ptr",
+        PointerKind::UniqueNullable => "unique_nullptr",
+        PointerKind::Shared => "shared_ptr",
+        PointerKind::SharedNullable => "shared_nullptr",
+        PointerKind::Weak => "weak_ptr",
+        PointerKind::Atomic => "atomic_ptr",
+        PointerKind::AtomicNullable => "atomic_nullptr",
     }
 }
 

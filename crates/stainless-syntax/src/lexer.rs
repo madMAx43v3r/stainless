@@ -87,6 +87,7 @@ enum RawToken {
     TrueKw,
     #[token("false")]
     FalseKw,
+    #[token("nullptr")]
     #[token("null")]
     NullKw,
     #[token("move")]

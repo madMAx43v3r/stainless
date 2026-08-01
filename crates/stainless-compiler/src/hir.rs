@@ -2,7 +2,7 @@
 
 use crate::ast::{BinaryOperator, LiteralKind, PrefixOperator, Span};
 use crate::interop::{
-    ArgumentAdaptation, CallbackKind, Receiver, StoredFunctionKind, WrapperTarget,
+    ArgumentAdaptation, CallbackKind, PointerKind, Receiver, StoredFunctionKind, WrapperTarget,
 };
 
 /// A source file after successful semantic resolution and backend lowering.
@@ -167,8 +167,13 @@ pub enum Type {
         /// Exact return type.
         return_type: Box<Type>,
     },
-    /// A non-null unique owner represented by Rust `Box<T>`.
-    UniquePtr(Box<Type>),
+    /// A compiler-known ownership pointer.
+    Pointer {
+        /// Ownership representation.
+        kind: PointerKind,
+        /// Pointee type.
+        target: Box<Type>,
+    },
     /// A user-defined Stainless struct.
     User {
         /// Fully qualified generated Rust path.
@@ -447,8 +452,65 @@ pub enum Expression {
     /// Explicitly consume a binding, even when the surrounding context borrows
     /// the resulting temporary.
     Move(Box<Expression>),
-    /// Allocate a value into a non-null unique owner.
-    MakeUnique(Box<Expression>),
+    /// Allocate a value into a non-null unique or shared owner.
+    MakeOwner {
+        /// Allocation representation.
+        kind: PointerKind,
+        /// Constructed pointee.
+        value: Box<Expression>,
+    },
+    /// Default-construct a nullable owner, weak observer, or nullable atomic slot.
+    PointerDefault(PointerKind),
+    /// Convert between compatible pointer representations.
+    PointerConversion {
+        /// Source representation.
+        from: PointerKind,
+        /// Destination representation.
+        to: PointerKind,
+        /// Adapted source value.
+        value: Box<Expression>,
+    },
+    /// Demote an `Arc<T>` to `Weak<T>`.
+    DowngradeShared(Box<Expression>),
+    /// Promote `Weak<T>` to `Option<Arc<T>>`.
+    LockWeak(Box<Expression>),
+    /// Test a nullable owner or weak observer for a live pointee.
+    PointerHasValue {
+        /// Pointer representation being tested.
+        kind: PointerKind,
+        /// Tested handle.
+        value: Box<Expression>,
+    },
+    /// Project a statically proven non-null nullable owner to its pointee.
+    PointerPointee {
+        /// Nullable owner representation.
+        kind: PointerKind,
+        /// Whether exclusive pointee access is required.
+        mutable: bool,
+        /// Owner expression.
+        owner: Box<Expression>,
+    },
+    /// Clone a snapshot from an atomic pointer slot.
+    AtomicLoad {
+        /// Whether the stored handle is nullable.
+        nullable: bool,
+        /// Slot expression.
+        slot: Box<Expression>,
+    },
+    /// Replace an atomic pointer slot without returning its previous value.
+    AtomicStore {
+        /// Slot expression.
+        slot: Box<Expression>,
+        /// New stored handle.
+        value: Box<Expression>,
+    },
+    /// Replace an atomic pointer slot and return its previous handle.
+    AtomicSwap {
+        /// Slot expression.
+        slot: Box<Expression>,
+        /// New stored handle.
+        value: Box<Expression>,
+    },
     /// Consume a native Rust Result, converting `Err` to checked `RustError`.
     UnwrapRustResult {
         /// Native `Result<T, E>` expression.

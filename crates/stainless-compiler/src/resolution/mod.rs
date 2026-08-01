@@ -258,11 +258,60 @@ pub enum Intrinsic {
     /// Explicitly consume a named value.
     Move,
     /// Allocate a constructed value into a non-null unique owner.
-    MakeUnique {
+    MakeOwner {
+        /// Unique or shared allocation representation.
+        kind: crate::interop::PointerKind,
         /// Allocated pointee type.
         target: TypeRef,
         /// Constructor or direct-initialization operation run before boxing.
         construction: Box<ResolvedCall>,
+    },
+    /// Default construction of a nullable owner, weak observer, or nullable atomic slot.
+    PointerDefault {
+        /// Constructed pointer representation.
+        kind: crate::interop::PointerKind,
+        /// Pointee type.
+        target: TypeRef,
+    },
+    /// Convert between compatible ownership pointer representations.
+    PointerConversion {
+        /// Source representation.
+        from: crate::interop::PointerKind,
+        /// Destination representation.
+        to: crate::interop::PointerKind,
+        /// Pointee type shared by both representations.
+        target: TypeRef,
+    },
+    /// Demote a shared owner to a weak observer.
+    DowngradeShared {
+        /// Observed pointee type.
+        target: TypeRef,
+    },
+    /// Attempt to promote a weak observer to a nullable shared owner.
+    LockWeak {
+        /// Observed pointee type.
+        target: TypeRef,
+    },
+    /// Load a shared snapshot from an atomic pointer slot.
+    AtomicLoad {
+        /// Whether the loaded snapshot is nullable.
+        nullable: bool,
+        /// Pointee type.
+        target: TypeRef,
+    },
+    /// Store a shared snapshot into an atomic pointer slot.
+    AtomicStore {
+        /// Whether the stored snapshot is nullable.
+        nullable: bool,
+        /// Pointee type.
+        target: TypeRef,
+    },
+    /// Swap a shared snapshot through an atomic pointer slot.
+    AtomicSwap {
+        /// Whether the exchanged snapshot is nullable.
+        nullable: bool,
+        /// Pointee type.
+        target: TypeRef,
     },
     /// Invoke a non-null stored `function` or `function_mut` value.
     StoredFunctionCall {

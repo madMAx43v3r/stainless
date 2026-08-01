@@ -1,0 +1,53 @@
+// Implemented ownership-pointer subset.
+
+namespace samples {
+
+struct Config {
+    i32 version;
+};
+
+shared_ptr<Config> load_slot(const atomic_ptr<Config>& slot) {
+    return slot.__load();
+}
+
+void store_slot(const atomic_ptr<Config>& slot, shared_ptr<Config> replacement) {
+    slot.__store(replacement);
+}
+
+i32 pointer_family() {
+    unique_nullptr<Config> maybe_unique;
+    if (maybe_unique == nullptr) {
+        maybe_unique = unique_nullptr<Config>(
+            make_unique<Config>(Config{3}));
+    }
+    maybe_unique.version = 4;
+    unique_ptr<Config> unique =
+        unique_ptr<Config>(move(maybe_unique));
+
+    shared_ptr<Config> first = make_shared<Config>(Config{5});
+    shared_ptr<Config> copied = first;
+    weak_ptr<Config> observer = downgrade(copied);
+    shared_nullptr<Config> promoted = lock(observer);
+    if (!promoted) {
+        return -1;
+    }
+    shared_ptr<Config> recovered = shared_ptr<Config>(promoted);
+
+    atomic_ptr<Config> required = atomic_ptr<Config>(first);
+    shared_ptr<Config> snapshot = load_slot(required);
+    store_slot(required, recovered);
+    shared_ptr<Config> previous = required.__swap(copied);
+
+    atomic_nullptr<Config> optional = atomic_nullptr<Config>(nullptr);
+    shared_nullptr<Config> empty = optional.__load();
+    optional.__store(shared_nullptr<Config>(snapshot));
+    shared_nullptr<Config> installed = optional.__swap(move(empty));
+    if (installed == nullptr) {
+        return -2;
+    }
+
+    return unique.version + snapshot.version + previous.version
+        + installed.version;
+}
+
+} // namespace samples

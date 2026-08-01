@@ -4,7 +4,8 @@ use crate::Diagnostic;
 use crate::ast::{self, ExpressionKind, ForClause, Item, StatementKind};
 use crate::hir;
 use crate::interop::{
-    ArgumentAdaptation, Receiver, RustLowering, StoredFunctionKind, TypeRef, VAR_TYPE_PATH,
+    ArgumentAdaptation, PointerKind, Receiver, RustLowering, StoredFunctionKind, TypeRef,
+    VAR_TYPE_PATH,
 };
 use crate::resolution::{
     CallTarget, CallbackTarget, FunctionSymbol, Intrinsic, LambdaCaptureMode, NativeCall,
@@ -572,8 +573,7 @@ impl Lowerer<'_> {
             }
             StatementKind::Try(try_statement) => self.lower_try_statement(try_statement),
             StatementKind::If(if_statement) => {
-                let condition =
-                    self.lower_expression(&if_statement.condition, ExpressionMode::Value)?;
+                let condition = self.lower_condition(&if_statement.condition)?;
                 let then_branch = self.statement_as_block(&if_statement.then_branch)?;
                 let else_branch = match &if_statement.else_branch {
                     Some(branch) => Some(Box::new(self.lower_statement(branch)?)),
@@ -729,9 +729,7 @@ impl Lowerer<'_> {
                     None => None,
                 };
                 let condition = match &classic.condition {
-                    Some(expression) => {
-                        Some(self.lower_expression(expression, ExpressionMode::Value)?)
-                    }
+                    Some(expression) => Some(self.lower_condition(expression)?),
                     None => None,
                 };
                 let update = match &classic.update {
@@ -819,11 +817,33 @@ impl Lowerer<'_> {
         }
     }
 
+    fn lower_condition(&mut self, expression: &ast::Expression) -> Option<hir::Expression> {
+        let lowered = self.lower_expression(expression, ExpressionMode::Value)?;
+        let kind = self
+            .semantics
+            .expression(expression.span)
+            .and_then(|resolution| nullable_test_kind(canonical_ref(&resolution.ty)));
+        Some(if let Some(kind) = kind {
+            hir::Expression::PointerHasValue {
+                kind,
+                value: Box::new(lowered),
+            }
+        } else {
+            lowered
+        })
+    }
+
     fn lower_bound_expression(
         &mut self,
         expression: &ast::Expression,
         expected: &TypeRef,
     ) -> Option<hir::Expression> {
+        if is_nullptr_literal(expression)
+            && let Some(kind) = nullable_test_kind(canonical_ref(expected))
+            && kind != PointerKind::Weak
+        {
+            return Some(hir::Expression::PointerDefault(kind));
+        }
         if let Some(adaptation) = self.semantics.rust_result_adaptation(expression.span) {
             return Some(hir::Expression::UnwrapRustResult {
                 expression: Box::new(self.lower_expression(expression, ExpressionMode::Value)?),
@@ -855,7 +875,15 @@ impl Lowerer<'_> {
                 },
             )?;
             let actual_target = resolution.map(|value| canonical_ref(&value.ty));
-            let projection = match (actual_target, canonical_ref(expected_target)) {
+            if let Some(kind) = actual_target.and_then(nullable_owner_kind) {
+                lowered = hir::Expression::PointerPointee {
+                    kind,
+                    mutable: *mutable && kind == PointerKind::UniqueNullable,
+                    owner: Box::new(lowered),
+                };
+            }
+            let projection_target = actual_target.map(automatic_pointee_type);
+            let projection = match (projection_target, canonical_ref(expected_target)) {
                 (Some(TypeRef::Struct { path: derived }), TypeRef::Struct { path: base }) => {
                     self.struct_projection(derived, base).unwrap_or_default()
                 }
@@ -883,6 +911,13 @@ impl Lowerer<'_> {
                     canonical_ref(expected),
                     TypeRef::Function(function)
                         if function.kind == StoredFunctionKind::Shared
+                )
+                || matches!(
+                    canonical_ref(expected),
+                    TypeRef::Pointer {
+                        kind: PointerKind::Shared | PointerKind::SharedNullable | PointerKind::Weak,
+                        ..
+                    }
                 )
                 || is_json_type(canonical_ref(expected)))
                 && resolution.is_some_and(|value| value.category != ValueCategory::Temporary)
@@ -992,6 +1027,18 @@ impl Lowerer<'_> {
                         prefix: true,
                     }
                 }
+                ast::PrefixOperator::Not
+                    if self
+                        .semantics
+                        .expression(operand.span)
+                        .and_then(|resolution| nullable_test_kind(canonical_ref(&resolution.ty)))
+                        .is_some() =>
+                {
+                    hir::Expression::Prefix {
+                        operator: *operator,
+                        operand: Box::new(self.lower_condition(operand)?),
+                    }
+                }
                 _ => hir::Expression::Prefix {
                     operator: *operator,
                     operand: Box::new(self.lower_expression(operand, ExpressionMode::Value)?),
@@ -1039,18 +1086,53 @@ impl Lowerer<'_> {
                         error_message: hir::RustErrorMessage::Display,
                         target: self.exception_target.clone(),
                     }
+                } else if matches!(
+                    operator,
+                    ast::BinaryOperator::Equal | ast::BinaryOperator::NotEqual
+                ) && (is_null_literal(left) || is_null_literal(right))
+                    && {
+                        let pointer = if is_null_literal(left) { right } else { left };
+                        self.semantics
+                            .expression(pointer.span)
+                            .and_then(|resolution| {
+                                nullable_test_kind(canonical_ref(&resolution.ty))
+                            })
+                            .is_some()
+                    }
+                {
+                    let pointer = if is_null_literal(left) { right } else { left };
+                    let tested = self.lower_condition(pointer)?;
+                    if *operator == ast::BinaryOperator::Equal {
+                        hir::Expression::Prefix {
+                            operator: ast::PrefixOperator::Not,
+                            operand: Box::new(tested),
+                        }
+                    } else {
+                        tested
+                    }
                 } else {
+                    let logical = matches!(
+                        operator,
+                        ast::BinaryOperator::LogicalAnd | ast::BinaryOperator::LogicalOr
+                    );
+                    let lowered_left = if logical {
+                        self.lower_condition(left)?
+                    } else {
+                        self.lower_expression(left, ExpressionMode::Value)?
+                    };
                     let right = if *operator == ast::BinaryOperator::Assign {
                         if let Some(resolution) = self.semantics.expression(left.span) {
                             self.lower_bound_expression(right, canonical_ref(&resolution.ty))?
                         } else {
                             self.lower_expression(right, ExpressionMode::Value)?
                         }
+                    } else if logical {
+                        self.lower_condition(right)?
                     } else {
                         self.lower_expression(right, ExpressionMode::Value)?
                     };
                     hir::Expression::Binary {
-                        left: Box::new(self.lower_expression(left, ExpressionMode::Value)?),
+                        left: Box::new(lowered_left),
                         operator: *operator,
                         right: Box::new(right),
                     }
@@ -1175,8 +1257,27 @@ impl Lowerer<'_> {
                     .expression(expression.span)
                     .and_then(|resolution| resolution.field.as_ref());
                 if let Some(field) = field {
+                    let mut lowered_receiver =
+                        self.lower_expression(receiver, ExpressionMode::Value)?;
+                    if let Some(kind) = self
+                        .semantics
+                        .expression(receiver.span)
+                        .and_then(|resolution| nullable_owner_kind(canonical_ref(&resolution.ty)))
+                    {
+                        let mutable =
+                            self.semantics
+                                .expression(expression.span)
+                                .is_some_and(|resolution| {
+                                    resolution.category == ValueCategory::MutablePlace
+                                });
+                        lowered_receiver = hir::Expression::PointerPointee {
+                            kind,
+                            mutable: mutable && kind == PointerKind::UniqueNullable,
+                            owner: Box::new(lowered_receiver),
+                        };
+                    }
                     hir::Expression::Field {
-                        receiver: Box::new(self.lower_expression(receiver, ExpressionMode::Value)?),
+                        receiver: Box::new(lowered_receiver),
                         access_path: field.access_path.clone(),
                     }
                 } else if self
@@ -1410,9 +1511,7 @@ impl Lowerer<'_> {
     ) -> Option<hir::Expression> {
         let handles_checked_effect = matches!(
             call.target,
-            CallTarget::Intrinsic(
-                Intrinsic::UnwrapRustResult { .. } | Intrinsic::MakeUnique { .. }
-            )
+            CallTarget::Intrinsic(Intrinsic::UnwrapRustResult { .. } | Intrinsic::MakeOwner { .. })
         ) || matches!(
             &call.target,
             CallTarget::Native(native) if native.result_adaptation.is_some()
@@ -1519,9 +1618,118 @@ impl Lowerer<'_> {
                     self.lower_expression(argument, ExpressionMode::Value)?,
                 )))
             }
-            CallTarget::Intrinsic(Intrinsic::MakeUnique { construction, .. }) => {
+            CallTarget::Intrinsic(Intrinsic::MakeOwner {
+                kind, construction, ..
+            }) => {
                 let value = self.lower_resolved_call(construction, None, arguments)?;
-                Some(hir::Expression::MakeUnique(Box::new(value)))
+                Some(hir::Expression::MakeOwner {
+                    kind: *kind,
+                    value: Box::new(value),
+                })
+            }
+            CallTarget::Intrinsic(Intrinsic::PointerDefault { kind, .. }) => {
+                Some(hir::Expression::PointerDefault(*kind))
+            }
+            CallTarget::Intrinsic(Intrinsic::PointerConversion {
+                from, to, target, ..
+            }) => {
+                let argument = arguments.first()?;
+                Some(hir::Expression::PointerConversion {
+                    from: *from,
+                    to: *to,
+                    value: Box::new(self.lower_bound_expression(
+                        argument,
+                        &TypeRef::pointer(*from, target.clone()),
+                    )?),
+                })
+            }
+            CallTarget::Intrinsic(Intrinsic::DowngradeShared { .. }) => {
+                let argument = arguments.first()?;
+                Some(hir::Expression::DowngradeShared(Box::new(
+                    self.lower_expression(argument, ExpressionMode::Reference)?,
+                )))
+            }
+            CallTarget::Intrinsic(Intrinsic::LockWeak { .. }) => {
+                let argument = arguments.first()?;
+                Some(hir::Expression::LockWeak(Box::new(
+                    self.lower_expression(argument, ExpressionMode::Reference)?,
+                )))
+            }
+            CallTarget::Intrinsic(Intrinsic::AtomicLoad { nullable, .. }) => {
+                let Some(ast::Expression {
+                    kind: ExpressionKind::Field { receiver, .. },
+                    ..
+                }) = callee
+                else {
+                    self.push(
+                        "HIR011",
+                        "atomic pointer load has no receiver".to_owned(),
+                        call.span,
+                    );
+                    return None;
+                };
+                Some(hir::Expression::AtomicLoad {
+                    nullable: *nullable,
+                    slot: Box::new(self.lower_expression(receiver, ExpressionMode::Reference)?),
+                })
+            }
+            CallTarget::Intrinsic(Intrinsic::AtomicStore { nullable, target }) => {
+                let Some(ast::Expression {
+                    kind: ExpressionKind::Field { receiver, .. },
+                    ..
+                }) = callee
+                else {
+                    self.push(
+                        "HIR011",
+                        "atomic pointer store has no receiver".to_owned(),
+                        call.span,
+                    );
+                    return None;
+                };
+                let value = arguments.first()?;
+                let kind = if *nullable {
+                    PointerKind::SharedNullable
+                } else {
+                    PointerKind::Shared
+                };
+                Some(hir::Expression::AtomicStore {
+                    slot: Box::new(self.lower_expression(receiver, ExpressionMode::Reference)?),
+                    value: Box::new(
+                        self.lower_bound_expression(
+                            value,
+                            &TypeRef::pointer(kind, target.clone()),
+                        )?,
+                    ),
+                })
+            }
+            CallTarget::Intrinsic(Intrinsic::AtomicSwap { nullable, target }) => {
+                let Some(ast::Expression {
+                    kind: ExpressionKind::Field { receiver, .. },
+                    ..
+                }) = callee
+                else {
+                    self.push(
+                        "HIR011",
+                        "atomic pointer swap has no receiver".to_owned(),
+                        call.span,
+                    );
+                    return None;
+                };
+                let value = arguments.first()?;
+                let kind = if *nullable {
+                    PointerKind::SharedNullable
+                } else {
+                    PointerKind::Shared
+                };
+                Some(hir::Expression::AtomicSwap {
+                    slot: Box::new(self.lower_expression(receiver, ExpressionMode::Reference)?),
+                    value: Box::new(
+                        self.lower_bound_expression(
+                            value,
+                            &TypeRef::pointer(kind, target.clone()),
+                        )?,
+                    ),
+                })
             }
             CallTarget::Intrinsic(Intrinsic::StoredFunctionCall { .. }) => {
                 let callee = callee?;
@@ -1925,9 +2133,10 @@ impl Lowerer<'_> {
                     .collect::<Option<Vec<_>>>()?,
                 return_type: Box::new(self.lower_type(&function.return_type, span)?),
             },
-            TypeRef::UniquePtr(target) => {
-                hir::Type::UniquePtr(Box::new(self.lower_type(target, span)?))
-            }
+            TypeRef::Pointer { kind, target } => hir::Type::Pointer {
+                kind: *kind,
+                target: Box::new(self.lower_type(target, span)?),
+            },
             TypeRef::Struct { path } => hir::Type::User {
                 rust_path: user_type_path(path),
             },
@@ -2155,6 +2364,57 @@ fn is_move_call(semantics: &SemanticModel, expression: &ast::Expression) -> bool
         .expression(expression.span)
         .and_then(|resolution| resolution.call.as_ref())
         .is_some_and(|call| matches!(&call.target, CallTarget::Intrinsic(Intrinsic::Move)))
+}
+
+fn is_null_literal(expression: &ast::Expression) -> bool {
+    match &expression.kind {
+        ExpressionKind::Literal(ast::Literal {
+            kind: ast::LiteralKind::Null,
+            ..
+        }) => true,
+        ExpressionKind::Parenthesized(inner) => is_null_literal(inner),
+        _ => false,
+    }
+}
+
+fn is_nullptr_literal(expression: &ast::Expression) -> bool {
+    match &expression.kind {
+        ExpressionKind::Literal(ast::Literal {
+            kind: ast::LiteralKind::Null,
+            text,
+        }) => text == "nullptr",
+        ExpressionKind::Parenthesized(inner) => is_nullptr_literal(inner),
+        _ => false,
+    }
+}
+
+fn nullable_test_kind(ty: &TypeRef) -> Option<PointerKind> {
+    let TypeRef::Pointer { kind, .. } = canonical_ref(ty) else {
+        return None;
+    };
+    matches!(
+        kind,
+        PointerKind::UniqueNullable | PointerKind::SharedNullable | PointerKind::Weak
+    )
+    .then_some(*kind)
+}
+
+fn nullable_owner_kind(ty: &TypeRef) -> Option<PointerKind> {
+    nullable_test_kind(ty).filter(|kind| *kind != PointerKind::Weak)
+}
+
+fn automatic_pointee_type(ty: &TypeRef) -> &TypeRef {
+    match canonical_ref(ty) {
+        TypeRef::Pointer {
+            kind:
+                PointerKind::Unique
+                | PointerKind::UniqueNullable
+                | PointerKind::Shared
+                | PointerKind::SharedNullable,
+            target,
+        } => canonical_ref(target),
+        ty => ty,
+    }
 }
 
 fn block_definitely_returns(block: &ast::Block) -> bool {

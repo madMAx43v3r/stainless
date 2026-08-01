@@ -17,6 +17,7 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
         include_str!("../../../docs/ref/16_native_result_unwrap.stl"),
         include_str!("../../../docs/ref/19_stored_functions.stl"),
         include_str!("../../../docs/ref/20_formatting_macros.stl"),
+        include_str!("../../../docs/ref/22_pointer_family.stl"),
     ] {
         let analysis = analyze(source);
 
@@ -152,14 +153,16 @@ i32 use_unique() {
     assert!(analysis.semantics.bindings.iter().any(|binding| {
         matches!(
             &binding.ty,
-            TypeRef::UniquePtr(target)
-                if matches!(target.as_ref(), TypeRef::Struct { path } if path == &["Config"])
+            TypeRef::Pointer {
+                kind: stainless_compiler::interop::PointerKind::Unique,
+                target,
+            } if matches!(target.as_ref(), TypeRef::Struct { path } if path == &["Config"])
         )
     }));
     assert!(analysis.semantics.calls.iter().any(|call| {
         matches!(
             call.target,
-            CallTarget::Intrinsic(Intrinsic::MakeUnique { .. })
+            CallTarget::Intrinsic(Intrinsic::MakeOwner { .. })
         )
     }));
 }
@@ -223,6 +226,117 @@ i32 invalid_unique_move() {
         "{:#?}",
         analysis.diagnostics
     );
+}
+
+#[test]
+fn resolves_nullable_shared_weak_and_atomic_pointer_operations() {
+    let analysis = analyze(
+        r"struct Config { i32 version; };
+
+i32 pointer_family() {
+    unique_nullptr<Config> maybe_unique;
+    if (!maybe_unique) {
+        maybe_unique = unique_nullptr<Config>(make_unique<Config>(Config{3}));
+    }
+    maybe_unique.version = 4;
+    unique_ptr<Config> unique = unique_ptr<Config>(move(maybe_unique));
+
+    shared_ptr<Config> first = make_shared<Config>(Config{5});
+    shared_ptr<Config> copied = first;
+    shared_nullptr<Config> maybe_shared = shared_nullptr<Config>(first);
+    weak_ptr<Config> weak = downgrade(copied);
+    shared_nullptr<Config> promoted = lock(weak);
+    if (!promoted) {
+        return -1;
+    }
+    shared_ptr<Config> recovered = shared_ptr<Config>(promoted);
+
+    atomic_ptr<Config> slot = atomic_ptr<Config>(first);
+    shared_ptr<Config> snapshot = slot.__load();
+    slot.__store(recovered);
+    shared_ptr<Config> previous = slot.__swap(copied);
+
+    atomic_nullptr<Config> optional_slot;
+    optional_slot.__store(move(maybe_shared));
+    shared_nullptr<Config> optional_snapshot = optional_slot.__load();
+    return unique.version + snapshot.version + previous.version;
+}
+",
+    );
+
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+    for kind in [
+        stainless_compiler::interop::PointerKind::UniqueNullable,
+        stainless_compiler::interop::PointerKind::Shared,
+        stainless_compiler::interop::PointerKind::SharedNullable,
+        stainless_compiler::interop::PointerKind::Weak,
+        stainless_compiler::interop::PointerKind::Atomic,
+        stainless_compiler::interop::PointerKind::AtomicNullable,
+    ] {
+        assert!(analysis.semantics.bindings.iter().any(|binding| {
+            matches!(&binding.ty, TypeRef::Pointer { kind: actual, .. } if *actual == kind)
+        }));
+    }
+}
+
+#[test]
+fn pointer_family_rejects_unchecked_null_access_shared_mutation_and_slot_copying() {
+    let analysis = analyze(
+        r"use rust::Option;
+
+struct Config {
+    i32 version;
+    void bump();
+};
+
+void Config::bump() {
+    version += 1;
+}
+
+void mutate(Config& config) {
+    config.version += 1;
+}
+
+void invalid_pointers() {
+    shared_ptr<Config> shared = make_shared<Config>(Config{1});
+    shared.version = 2;
+    shared.bump();
+    mutate(shared);
+
+    shared_nullptr<Config> maybe;
+    i32 unchecked = maybe.version;
+    shared_ptr<Config> recovered = shared_ptr<Config>(maybe);
+
+    unique_nullptr<Config> unique = unique_nullptr<Config>(
+        make_unique<Config>(Config{2}));
+    unique_nullptr<Config> copied_unique = unique;
+
+    atomic_ptr<Config> slot = atomic_ptr<Config>(shared);
+    atomic_ptr<Config> copied_slot = slot;
+    Option<shared_ptr<Config>> nested_pointer;
+    auto untyped_null = nullptr;
+}
+",
+    );
+    let codes = analysis
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+
+    for expected in [
+        "RES013", "RES024", "RES026", "RES027", "RES110", "RES111", "RES112",
+    ] {
+        assert!(
+            codes.contains(&expected),
+            "missing {expected}: {:#?}",
+            analysis.diagnostics
+        );
+    }
 }
 
 #[test]

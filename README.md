@@ -8,7 +8,8 @@ Stainless is a new C++-like language that transpiles to Rust.
 > diagnostics, an initial name/type/call resolver, a typed Rust-shaped HIR, and
 > structured Rust emission for the supported function/control-flow,
 > data-only-struct, constructor, checked-exception, `Vec`/`String`, native
-> JSON, non-null `unique_ptr<T>`, and first external-wrapper subset. The
+> JSON, the local/function ownership-pointer family, and first external-wrapper
+> subset. The
 > workspace now includes the compact
 > `stainless-runtime` used by generated JSON code. An initial move/borrow
 > dataflow pass validates that subset; classes and interfaces have not started
@@ -156,6 +157,9 @@ implemented:
   and `null`, JSON array/object literals, null-safe access, reference-counted
   shared aggregate mutation, parsing strings/files, serialization, scalar
   coercion, and checked `stainless::JsonError` failures.
+- [`22_pointer_family.stl`](docs/ref/22_pointer_family.stl) — the implemented
+  unique/nullable/shared/weak/atomic ownership-pointer subset, including
+  nullable guards and synchronized slots.
 
 `01_basics.stl`, `02_structs_and_data_inheritance.stl`,
 `11_vec_and_string.stl`, `13_range_for.stl`, and `14_constructors.stl` are
@@ -163,7 +167,8 @@ currently parsed, resolved, lowered to HIR, emitted as Rust, and compiled by
 `rustc` in the test suite, as is the focused
 `15_checked_exception_subset.stl` sample, the native-Result
 `16_native_result_unwrap.stl` sample, and the formatting-macro
-`20_formatting_macros.stl` sample. The JSON
+`20_formatting_macros.stl` sample, and the ownership-pointer
+`22_pointer_family.stl` sample. The JSON
 `21_json_support.stl` sample is compiled and executed through Cargo against
 the real `stainless-runtime` and `serde_json`. The external
 `17_external_regex_wrapper.stl` sample is compiled and executed through Cargo
@@ -1577,14 +1582,16 @@ not aliases that expose every method of their Rust lowering:
 | `atomic_ptr<T>` | Initially `RwLock<Arc<T>>` | Replaceable non-null shared slot |
 | `atomic_nullptr<T>` | Initially `RwLock<Option<Arc<T>>>` | Replaceable nullable shared slot |
 
-The compiler currently implements the non-null `unique_ptr<T>` row for local,
-parameter, and return values. `make_unique<T>(...)` runs the selected Stainless
-or native constructor and lowers the result to `Box<T>`; checked constructor
-exceptions propagate normally. Pointee fields and methods use `.`, and a
-unique owner may bind directly to a compatible pointee reference parameter.
-The owner is move-only, has no default constructor, and cannot be stored in an
-implicitly copyable struct. The nullable, shared, weak, and atomic rows remain
-specified but unimplemented.
+The compiler implements all rows in this table for local, parameter, and return
+values. `make_unique<T>(...)` and `make_shared<T>(...)` run the selected
+Stainless or native constructor before allocating; checked constructor
+exceptions propagate normally. Pointee fields and methods use `.`, shared and
+weak handles copy by cloning their Rust handle, and unique plus atomic values
+participate in the move checker. Nullable facts are tracked for named bindings
+through construction, assignment, guards, `nullptr` comparisons, and
+continuing branch merges. Namespace-scope pointer initialization, thread-spawn
+contracts, interface pointees, and the `require(...)` declaration shorthand
+remain later slices.
 
 Native `rust::Option<T>` remains available for ordinary optional values, but
 Stainless rejects a pointer or synchronized pointer-slot type as its direct
@@ -2445,10 +2452,11 @@ The initial `stainless_compiler::resolution` pass now provides:
   derived-struct-to-base-reference projection is the sole struct conversion;
 - classification of Stainless calls, compiler intrinsics such as `move` and
   primitive casts, and registered native Rust calls;
-- non-null `unique_ptr<T>` types and `make_unique<T>(...)` constructor
-  selection, automatic pointee field/method access and reference binding, and
-  diagnostics for copying, forbidden default construction, pointer-reference
-  declarations, and move-only storage inside structs;
+- all seven compiler-defined ownership pointer types; `make_unique<T>(...)`
+  and `make_shared<T>(...)`; nullable refinement and checked non-null recovery;
+  immutable shared pointee access; `downgrade`/`lock`; synchronized atomic
+  `__load`/`__store`/`__swap`; and diagnostics for invalid copying, default
+  construction, pointer-reference declarations, and move-only struct storage;
 - exception-struct hierarchy validation, normalized checked `throws` sets,
   mandatory catch-or-declare checking, ordered base/derived handlers, and
   propagation through calls and constructor initialization;
@@ -2494,8 +2502,9 @@ resolution and before HIR construction. For the implemented subset it:
 - applies owned lambda captures when constructing a stored callable, treats
   shared `function` handles as implicit copies, and tracks `function_mut` as a
   move-only value;
-- tracks `unique_ptr<T>` as a move-only binding, applies ordinary loan checks
-  to pointee borrows, and diagnoses use after an explicit owner move;
+- tracks unique and atomic pointers as move-only bindings, treats shared and
+  weak handles as implicit handle copies, applies ordinary loan checks to
+  pointee borrows, and diagnoses use after an explicit owner move;
 - verifies that a direct reference return ultimately originates from the
   function's single reference parameter.
 
@@ -2517,9 +2526,11 @@ the accepted subset it now:
   casts, explicit moves, struct copies, aggregate construction, inherited-field
   paths, base-reference projections, fluent member receivers, constructor
   field initialization, and implicit native/user default construction explicit;
-- lowers non-null `unique_ptr<T>` to `Box<T>` and `make_unique<T>(...)` to
-  checked pointee construction followed by `Box::new`, without double
-  propagation for throwing constructors;
+- lowers unique owners to `Box`/`Option<Box>`, shared owners to
+  `Arc`/`Option<Arc>`, weak observers to `Weak`, and atomic slots to
+  `RwLock<Arc>`/`RwLock<Option<Arc>>`; allocation, nullable recovery, handle
+  cloning, weak promotion, and poison-tolerant atomic replacement are explicit
+  HIR operations;
 - lowers classic loops without breaking C++ `continue`/update ordering and
   lowers shared, mutable, copied, and consuming `Vec<T>` range loops to the
   corresponding Rust iterator form;
@@ -2710,10 +2721,11 @@ recorded inline so implemented syntax is not confused with planned work:
    initial single-file name/type/call resolver, move/borrow analysis, and
    resolved HIR construction are implemented for the function/control-flow and
    first struct subsets, including checked exceptions and throwing
-   constructors, shared `function` and move-only `function_mut` values, and
-   non-null `unique_ptr<T>` allocation and movement. Classes, interfaces,
-   nullable/shared pointer families, and general ownership through fields
-   remain.
+   constructors, shared `function` and move-only `function_mut` values, and the
+   local/function ownership-pointer family with nullable flow tracking, shared
+   handle copies, weak promotion, and atomic slots. Classes, interfaces,
+   namespace-scope pointer storage, `require(...)`, and general ownership
+   through fields remain.
 5. **In progress:** the initial `Vec`, `String`, and JSON metadata is connected through
    resolution and code generation. The versioned package binding manifest is
    parsed and merged with compiler built-ins; deterministic wrappers for its

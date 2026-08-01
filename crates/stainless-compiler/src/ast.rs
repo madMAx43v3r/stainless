@@ -549,7 +549,7 @@ pub enum LiteralKind {
     String,
     Character,
     Boolean,
-    /// JSON `null`.
+    /// JSON `null` or pointer `nullptr`; contextual typing distinguishes them.
     Null,
 }
 

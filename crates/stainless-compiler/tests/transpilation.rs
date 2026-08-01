@@ -216,6 +216,10 @@ fn transpiles_and_compiles_resolved_reference_programs() {
             "formatting-macros",
             include_str!("../../../docs/ref/20_formatting_macros.stl"),
         ),
+        (
+            "pointer-family",
+            include_str!("../../../docs/ref/22_pointer_family.stl"),
+        ),
     ] {
         let result = transpile(source);
         assert!(
@@ -442,6 +446,125 @@ fn main() {{
     assert!(
         output.status.success(),
         "generated throwing make_unique binary failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    remove_temporary_parent(&binary);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn pointer_family_lowers_to_rust_owners_and_preserves_runtime_behavior() {
+    let source = r"struct Config { i32 version; };
+
+shared_ptr<Config> load_slot(const atomic_ptr<Config>& slot) {
+    return slot.__load();
+}
+
+void bump(Config& config) {
+    config.version += 1;
+}
+
+i32 read_version(const Config& config) {
+    return config.version;
+}
+
+void store_slot(const atomic_ptr<Config>& slot, shared_ptr<Config> replacement) {
+    slot.__store(replacement);
+}
+
+i32 pointer_behavior() {
+    unique_nullptr<Config> maybe_unique;
+    if (!maybe_unique) {
+        maybe_unique = unique_nullptr<Config>(make_unique<Config>(Config{3}));
+    }
+    maybe_unique.version = 4;
+    bump(maybe_unique);
+    unique_ptr<Config> unique = unique_ptr<Config>(move(maybe_unique));
+
+    shared_ptr<Config> first = make_shared<Config>(Config{5});
+    shared_ptr<Config> copied = first;
+    weak_ptr<Config> weak = downgrade(copied);
+    shared_nullptr<Config> promoted = lock(weak);
+    if (!promoted) {
+        return -1;
+    }
+    i32 promoted_version = read_version(promoted);
+    shared_ptr<Config> recovered = shared_ptr<Config>(promoted);
+
+    atomic_ptr<Config> slot = atomic_ptr<Config>(first);
+    shared_ptr<Config> snapshot = slot.__load();
+    slot.__store(recovered);
+    shared_ptr<Config> previous = slot.__swap(copied);
+    shared_ptr<Config> through_reference = load_slot(slot);
+    store_slot(slot, recovered);
+
+    atomic_nullptr<Config> initialized_optional =
+        atomic_nullptr<Config>(snapshot);
+    shared_nullptr<Config> initialized_snapshot =
+        initialized_optional.__load();
+    if (!initialized_snapshot) {
+        return -4;
+    }
+
+    atomic_nullptr<Config> optional_slot = atomic_nullptr<Config>(nullptr);
+    shared_nullptr<Config> empty = optional_slot.__load();
+    optional_slot.__store(shared_nullptr<Config>(snapshot));
+    shared_nullptr<Config> installed = optional_slot.__swap(move(empty));
+    if (!installed) {
+        return -2;
+    }
+
+    weak_ptr<Config> expired;
+    {
+        shared_ptr<Config> temporary = make_shared<Config>(Config{99});
+        expired = downgrade(temporary);
+    }
+    shared_nullptr<Config> expired_lock = lock(expired);
+    if (expired_lock) {
+        return -3;
+    }
+    return unique.version + snapshot.version + previous.version
+        + installed.version + through_reference.version
+        + initialized_snapshot.version + promoted_version;
+}
+";
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let mut rust = result.rust.expect("pointer family should emit Rust");
+    assert!(rust.contains("::std::boxed::Box<"), "{rust}");
+    assert!(rust.contains("::std::sync::Arc<"), "{rust}");
+    assert!(rust.contains("::std::sync::Weak<"), "{rust}");
+    assert!(rust.contains("::std::sync::RwLock<"), "{rust}");
+    let function = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["pointer_behavior"])
+        .expect("pointer behavior function")
+        .mangled_name
+        .clone();
+    write!(
+        rust,
+        r"
+fn main() {{
+    assert_eq!({function}(), 35);
+}}
+"
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("pointer-family", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run {}: {error}", binary.display()));
+    assert!(
+        output.status.success(),
+        "generated pointer-family binary failed:\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

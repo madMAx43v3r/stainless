@@ -54,8 +54,16 @@ fn encode_type(ty: &TypeRef, output: &mut String) {
             output.push_str("_r_");
             encode_type(&function.return_type, output);
         }
-        TypeRef::UniquePtr(target) => {
-            output.push_str("unique_");
+        TypeRef::Pointer { kind, target } => {
+            output.push_str(match kind {
+                crate::interop::PointerKind::Unique => "unique_",
+                crate::interop::PointerKind::UniqueNullable => "unique_nullable_",
+                crate::interop::PointerKind::Shared => "shared_",
+                crate::interop::PointerKind::SharedNullable => "shared_nullable_",
+                crate::interop::PointerKind::Weak => "weak_",
+                crate::interop::PointerKind::Atomic => "atomic_",
+                crate::interop::PointerKind::AtomicNullable => "atomic_nullable_",
+            });
             encode_type(target, output);
         }
         TypeRef::Reference { target, .. } => encode_type(target, output),

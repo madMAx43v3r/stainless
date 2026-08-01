@@ -7,7 +7,7 @@ use crate::ast::{
     self, BinaryOperator, ExpressionKind, ForClause, ForInitializer, Item, PrefixOperator,
     StatementKind,
 };
-use crate::interop::{Receiver, TypeRef};
+use crate::interop::{PointerKind, Receiver, TypeRef};
 use crate::resolution::{CallTarget, FunctionSymbol, Intrinsic, SemanticModel};
 
 /// Validates ownership rules over an otherwise successfully resolved file.
@@ -870,8 +870,43 @@ impl Analyzer<'_> {
                 }
                 None
             }
-            CallTarget::Intrinsic(Intrinsic::MakeUnique { construction, .. }) => {
+            CallTarget::Intrinsic(Intrinsic::MakeOwner { construction, .. }) => {
                 self.construction_arguments(construction, arguments);
+                None
+            }
+            CallTarget::Intrinsic(Intrinsic::PointerDefault { .. }) => None,
+            CallTarget::Intrinsic(
+                Intrinsic::DowngradeShared { .. } | Intrinsic::LockWeak { .. },
+            ) => {
+                if let Some(argument) = arguments.first() {
+                    let origin = self.expression(argument, Usage::BorrowShared);
+                    if let Some(loan) = self.acquire_temporary_loan(origin, false, argument.span) {
+                        self.state.release(loan);
+                    }
+                }
+                None
+            }
+            CallTarget::Intrinsic(Intrinsic::AtomicLoad { .. }) => {
+                if let Some(receiver) = call_receiver(expression) {
+                    let origin = self.expression(receiver, Usage::BorrowShared);
+                    if let Some(loan) = self.acquire_temporary_loan(origin, false, receiver.span) {
+                        self.state.release(loan);
+                    }
+                }
+                None
+            }
+            CallTarget::Intrinsic(Intrinsic::AtomicStore { .. } | Intrinsic::AtomicSwap { .. }) => {
+                let mut loan = None;
+                if let Some(receiver) = call_receiver(expression) {
+                    let origin = self.expression(receiver, Usage::BorrowShared);
+                    loan = self.acquire_temporary_loan(origin, false, receiver.span);
+                }
+                if let Some(argument) = arguments.first() {
+                    self.expression(argument, Usage::Read);
+                }
+                if let Some(loan) = loan {
+                    self.state.release(loan);
+                }
                 None
             }
             CallTarget::Intrinsic(Intrinsic::StoredFunctionCall { mutable }) => {
@@ -902,7 +937,8 @@ impl Analyzer<'_> {
                 Intrinsic::PrimitiveCast { .. }
                 | Intrinsic::JsonCast { .. }
                 | Intrinsic::JsonWrap
-                | Intrinsic::ExceptionRoot { .. },
+                | Intrinsic::ExceptionRoot { .. }
+                | Intrinsic::PointerConversion { .. },
             ) => {
                 if let Some(argument) = arguments.first() {
                     self.expression(argument, Usage::Read);
@@ -1460,6 +1496,12 @@ fn is_copyable(ty: &TypeRef) -> bool {
         ty,
         TypeRef::Native { path, arguments }
             if path == "rust::stainless_runtime::Var" && arguments.is_empty()
+    ) || matches!(
+        ty,
+        TypeRef::Pointer {
+            kind: PointerKind::Shared | PointerKind::SharedNullable | PointerKind::Weak,
+            ..
+        }
     ) || matches!(
         ty,
         TypeRef::Function(function)

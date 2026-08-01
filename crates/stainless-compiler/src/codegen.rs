@@ -5,6 +5,7 @@ use quote::quote;
 
 use crate::ast::{BinaryOperator, LiteralKind, PrefixOperator};
 use crate::hir;
+use crate::interop::PointerKind;
 
 pub(crate) fn emit(program: &hir::Program) -> Result<String, String> {
     let mut emitter = Emitter { temporary_index: 0 };
@@ -755,9 +756,136 @@ impl Emitter {
                     #temporary
                 }))
             }
-            hir::Expression::MakeUnique(expression) => {
-                let expression = self.expression(expression)?;
-                Ok(quote!(::std::boxed::Box::new(#expression)))
+            hir::Expression::MakeOwner { kind, value } => {
+                let value = self.expression(value)?;
+                match kind {
+                    crate::interop::PointerKind::Unique => {
+                        Ok(quote!(::std::boxed::Box::new(#value)))
+                    }
+                    crate::interop::PointerKind::Shared => {
+                        Ok(quote!(::std::sync::Arc::new(#value)))
+                    }
+                    _ => Err(
+                        "nullable, weak, or atomic owner reached allocation lowering".to_owned(),
+                    ),
+                }
+            }
+            hir::Expression::PointerDefault(kind) => match kind {
+                crate::interop::PointerKind::UniqueNullable
+                | crate::interop::PointerKind::SharedNullable => {
+                    Ok(quote!(::core::option::Option::None))
+                }
+                crate::interop::PointerKind::Weak => Ok(quote!(::std::sync::Weak::new())),
+                crate::interop::PointerKind::AtomicNullable => Ok(quote!(
+                    ::std::sync::RwLock::new(::core::option::Option::None)
+                )),
+                _ => Err("non-default-constructible pointer reached code generation".to_owned()),
+            },
+            hir::Expression::PointerConversion { from, to, value } => {
+                let value = self.expression(value)?;
+                match (from, to) {
+                    (PointerKind::Unique, PointerKind::UniqueNullable)
+                    | (PointerKind::Shared, PointerKind::SharedNullable) => {
+                        Ok(quote!(::core::option::Option::Some(#value)))
+                    }
+                    (PointerKind::Shared, PointerKind::Atomic)
+                    | (PointerKind::SharedNullable, PointerKind::AtomicNullable) => {
+                        Ok(quote!(::std::sync::RwLock::new(#value)))
+                    }
+                    (PointerKind::Shared, PointerKind::AtomicNullable) => Ok(quote!(
+                        ::std::sync::RwLock::new(::core::option::Option::Some(#value))
+                    )),
+                    (PointerKind::UniqueNullable, PointerKind::Unique)
+                    | (PointerKind::SharedNullable, PointerKind::Shared) => {
+                        Ok(quote!(match #value {
+                            ::core::option::Option::Some(value) => value,
+                            ::core::option::Option::None => ::core::unreachable!(
+                                "Stainless non-null refinement was violated"
+                            ),
+                        }))
+                    }
+                    _ => Err("unsupported pointer conversion reached code generation".to_owned()),
+                }
+            }
+            hir::Expression::DowngradeShared(value) => {
+                let value = self.expression(value)?;
+                Ok(quote!(::std::sync::Arc::downgrade(&(#value))))
+            }
+            hir::Expression::LockWeak(value) => {
+                let value = self.expression(value)?;
+                Ok(quote!(::std::sync::Weak::upgrade(&(#value))))
+            }
+            hir::Expression::PointerHasValue { kind, value } => {
+                let value = self.expression(value)?;
+                match kind {
+                    crate::interop::PointerKind::UniqueNullable
+                    | crate::interop::PointerKind::SharedNullable => Ok(quote!((#value).is_some())),
+                    crate::interop::PointerKind::Weak => Ok(quote!((#value).strong_count() != 0)),
+                    _ => Err("non-nullable pointer reached null-test lowering".to_owned()),
+                }
+            }
+            hir::Expression::PointerPointee {
+                kind,
+                mutable,
+                owner,
+            } => {
+                let owner = self.expression(owner)?;
+                match (kind, mutable) {
+                    (crate::interop::PointerKind::UniqueNullable, true) => {
+                        Ok(quote!(*(#owner).as_mut().expect(
+                            "Stainless non-null refinement was violated"
+                        )))
+                    }
+                    (
+                        crate::interop::PointerKind::UniqueNullable
+                        | crate::interop::PointerKind::SharedNullable,
+                        false,
+                    ) => Ok(quote!(*(#owner).as_ref().expect(
+                        "Stainless non-null refinement was violated"
+                    ))),
+                    _ => Err(
+                        "invalid nullable pointer projection reached code generation".to_owned(),
+                    ),
+                }
+            }
+            hir::Expression::AtomicLoad { slot, .. } => {
+                let slot = self.expression(slot)?;
+                let poisoned = self.temporary("poisoned_atomic_pointer")?;
+                Ok(quote!(match (#slot).read() {
+                    Ok(guard) => ::core::clone::Clone::clone(&*guard),
+                    Err(#poisoned) => {
+                        ::core::clone::Clone::clone(&*#poisoned.into_inner())
+                    }
+                }))
+            }
+            hir::Expression::AtomicStore { slot, value } => {
+                let slot = self.expression(slot)?;
+                let value = self.expression(value)?;
+                let replacement = self.temporary("atomic_pointer_replacement")?;
+                let poisoned = self.temporary("poisoned_atomic_pointer")?;
+                Ok(quote!({
+                    let #replacement = #value;
+                    match (#slot).write() {
+                        Ok(mut guard) => { *guard = #replacement; }
+                        Err(#poisoned) => { *#poisoned.into_inner() = #replacement; }
+                    }
+                }))
+            }
+            hir::Expression::AtomicSwap { slot, value } => {
+                let slot = self.expression(slot)?;
+                let value = self.expression(value)?;
+                let replacement = self.temporary("atomic_pointer_replacement")?;
+                let poisoned = self.temporary("poisoned_atomic_pointer")?;
+                Ok(quote!({
+                    let #replacement = #value;
+                    match (#slot).write() {
+                        Ok(mut guard) => ::core::mem::replace(&mut *guard, #replacement),
+                        Err(#poisoned) => ::core::mem::replace(
+                            &mut *#poisoned.into_inner(),
+                            #replacement,
+                        ),
+                    }
+                }))
             }
             hir::Expression::UnwrapRustResult {
                 expression,
@@ -1102,9 +1230,25 @@ fn type_tokens(ty: &hir::Type, lifetime: Option<&syn::Lifetime>) -> Result<Token
                 ),
             })
         }
-        hir::Type::UniquePtr(target) => {
+        hir::Type::Pointer { kind, target } => {
             let target = type_tokens(target, None)?;
-            Ok(quote!(::std::boxed::Box<#target>))
+            Ok(match kind {
+                crate::interop::PointerKind::Unique => quote!(::std::boxed::Box<#target>),
+                crate::interop::PointerKind::UniqueNullable => {
+                    quote!(::core::option::Option<::std::boxed::Box<#target>>)
+                }
+                crate::interop::PointerKind::Shared => quote!(::std::sync::Arc<#target>),
+                crate::interop::PointerKind::SharedNullable => {
+                    quote!(::core::option::Option<::std::sync::Arc<#target>>)
+                }
+                crate::interop::PointerKind::Weak => quote!(::std::sync::Weak<#target>),
+                crate::interop::PointerKind::Atomic => {
+                    quote!(::std::sync::RwLock<::std::sync::Arc<#target>>)
+                }
+                crate::interop::PointerKind::AtomicNullable => quote!(
+                    ::std::sync::RwLock<::core::option::Option<::std::sync::Arc<#target>>>
+                ),
+            })
         }
         hir::Type::User { rust_path } => {
             let path = path(rust_path)?;
