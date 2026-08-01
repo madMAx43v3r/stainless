@@ -257,6 +257,13 @@ pub struct ResolvedTraitRequirement {
 pub enum Intrinsic {
     /// Explicitly consume a named value.
     Move,
+    /// Allocate a constructed value into a non-null unique owner.
+    MakeUnique {
+        /// Allocated pointee type.
+        target: TypeRef,
+        /// Constructor or direct-initialization operation run before boxing.
+        construction: Box<ResolvedCall>,
+    },
     /// Invoke a non-null stored `function` or `function_mut` value.
     StoredFunctionCall {
         /// Whether invocation requires mutable access to the callable.

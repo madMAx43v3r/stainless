@@ -1007,6 +1007,13 @@ impl NameExpression {
             )
         })
     }
+
+    /// Explicit type arguments on a generic call target.
+    pub fn generic_arguments(&self) -> impl Iterator<Item = TypeReference> + '_ {
+        child::<GenericArgumentList>(self.syntax())
+            .into_iter()
+            .flat_map(|arguments| arguments.types().collect::<Vec<_>>())
+    }
 }
 
 impl LiteralExpression {

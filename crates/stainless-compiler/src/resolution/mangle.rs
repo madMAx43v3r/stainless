@@ -54,6 +54,10 @@ fn encode_type(ty: &TypeRef, output: &mut String) {
             output.push_str("_r_");
             encode_type(&function.return_type, output);
         }
+        TypeRef::UniquePtr(target) => {
+            output.push_str("unique_");
+            encode_type(target, output);
+        }
         TypeRef::Reference { target, .. } => encode_type(target, output),
         TypeRef::Parameter(name) => {
             output.push_str("t_");

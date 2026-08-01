@@ -307,6 +307,148 @@ fn main() {{
 }
 
 #[test]
+fn unique_ptr_lowers_to_box_and_preserves_move_and_borrow_behavior() {
+    let source = r"struct Config {
+    i32 version;
+    Config(i32 version);
+    void bump(i32 delta);
+};
+
+Config::Config(i32 version) : version(version) {
+}
+
+void Config::bump(i32 delta) {
+    version += delta;
+}
+
+i32 read_version(const Config& config) {
+    return config.version;
+}
+
+unique_ptr<Config> make_config(i32 version) {
+    unique_ptr<Config> owner = make_unique<Config>(version);
+    return move(owner);
+}
+
+i32 unique_behavior() {
+    unique_ptr<Config> owner = make_config(4);
+    i32 before = read_version(owner);
+    owner.bump(3);
+    unique_ptr<Config> relocated = move(owner);
+    return before * 10 + relocated.version;
+}
+";
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let mut rust = result.rust.expect("unique owner source should emit Rust");
+    assert!(rust.contains("::std::boxed::Box<"), "{rust}");
+    assert!(rust.contains("::std::boxed::Box::new"), "{rust}");
+    let function = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["unique_behavior"])
+        .expect("unique behavior function")
+        .mangled_name
+        .clone();
+    write!(
+        rust,
+        r"
+fn main() {{
+    assert_eq!({function}(), 47);
+}}
+"
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("unique-ptr", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run {}: {error}", binary.display()));
+    assert!(
+        output.status.success(),
+        "generated unique_ptr binary failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    remove_temporary_parent(&binary);
+}
+
+#[test]
+fn make_unique_propagates_throwing_constructor_errors_once() {
+    let source = r#"struct AllocationError : stainless::Exception {
+};
+
+struct Resource {
+    i32 value;
+    Resource(bool fail) throws AllocationError;
+};
+
+Resource::Resource(bool fail) throws AllocationError : value(7) {
+    if (fail) {
+        throw AllocationError{stainless::Exception("allocation failed")};
+    }
+}
+
+unique_ptr<Resource> allocate(bool fail) throws AllocationError {
+    return make_unique<Resource>(fail);
+}
+
+i32 allocation_behavior(bool fail) {
+    try {
+        unique_ptr<Resource> resource = allocate(fail);
+        return resource.value;
+    } catch (const AllocationError& error) {
+        return -1;
+    }
+}
+"#;
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let mut rust = result
+        .rust
+        .expect("throwing make_unique source should emit Rust");
+    let function = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["allocation_behavior"])
+        .expect("allocation behavior function")
+        .mangled_name
+        .clone();
+    write!(
+        rust,
+        r"
+fn main() {{
+    assert_eq!({function}(false), 7);
+    assert_eq!({function}(true), -1);
+}}
+"
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("throwing-make-unique", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run {}: {error}", binary.display()));
+    assert!(
+        output.status.success(),
+        "generated throwing make_unique binary failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    remove_temporary_parent(&binary);
+}
+
+#[test]
 fn constructors_initialize_bases_fields_and_synthesized_defaults() {
     let source = r#"use rust::{String, Vec};
 

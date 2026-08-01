@@ -438,6 +438,13 @@ pub enum LambdaCaptureKind {
 pub enum ExpressionKind {
     /// A qualified value or callable name.
     Name(Path),
+    /// A call target with explicit generic type arguments.
+    GenericName {
+        /// Qualified target name.
+        path: Path,
+        /// Source-provided type arguments.
+        arguments: Vec<Type>,
+    },
     /// A scalar or string literal.
     Literal(Literal),
     /// A parenthesized expression.

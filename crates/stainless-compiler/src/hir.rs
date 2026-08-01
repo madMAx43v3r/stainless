@@ -167,6 +167,8 @@ pub enum Type {
         /// Exact return type.
         return_type: Box<Type>,
     },
+    /// A non-null unique owner represented by Rust `Box<T>`.
+    UniquePtr(Box<Type>),
     /// A user-defined Stainless struct.
     User {
         /// Fully qualified generated Rust path.
@@ -445,6 +447,8 @@ pub enum Expression {
     /// Explicitly consume a binding, even when the surrounding context borrows
     /// the resulting temporary.
     Move(Box<Expression>),
+    /// Allocate a value into a non-null unique owner.
+    MakeUnique(Box<Expression>),
     /// Consume a native Rust Result, converting `Err` to checked `RustError`.
     UnwrapRustResult {
         /// Native `Result<T, E>` expression.

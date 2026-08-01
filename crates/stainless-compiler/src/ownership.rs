@@ -700,7 +700,9 @@ impl Analyzer<'_> {
                 self.check_usage(id, usage, expression.span);
                 Some(id)
             }
-            ExpressionKind::Literal(_) | ExpressionKind::Error => None,
+            ExpressionKind::GenericName { .. }
+            | ExpressionKind::Literal(_)
+            | ExpressionKind::Error => None,
             ExpressionKind::Lambda { .. } => {
                 let mut loans = Vec::new();
                 self.callback_argument(expression, &mut loans);
@@ -868,6 +870,10 @@ impl Analyzer<'_> {
                 }
                 None
             }
+            CallTarget::Intrinsic(Intrinsic::MakeUnique { construction, .. }) => {
+                self.construction_arguments(construction, arguments);
+                None
+            }
             CallTarget::Intrinsic(Intrinsic::StoredFunctionCall { mutable }) => {
                 let ExpressionKind::Call { callee, .. } = &expression.kind else {
                     return None;
@@ -997,6 +1003,34 @@ impl Analyzer<'_> {
             self.capture_exception_state();
         }
         result
+    }
+
+    fn construction_arguments(
+        &mut self,
+        construction: &crate::resolution::ResolvedCall,
+        arguments: &[ast::Expression],
+    ) {
+        match &construction.target {
+            CallTarget::Constructor(id) => {
+                if let Some(constructor) = self.semantics.constructor(*id) {
+                    self.call_arguments(
+                        arguments,
+                        constructor.parameters.iter().map(|parameter| &parameter.ty),
+                    );
+                }
+            }
+            CallTarget::Native(native) => {
+                self.call_arguments(arguments, native.parameter_types.iter());
+            }
+            CallTarget::Intrinsic(Intrinsic::ValueInitialization { target }) => {
+                self.call_arguments(arguments, std::iter::once(target));
+            }
+            _ => {
+                for argument in arguments {
+                    self.expression(argument, Usage::Read);
+                }
+            }
+        }
     }
 
     fn call_arguments<'a>(
@@ -1608,7 +1642,10 @@ impl UseCollector {
                     self.last_uses.insert(declaration, expression.span);
                 }
             }
-            ExpressionKind::Name(_) | ExpressionKind::Literal(_) | ExpressionKind::Error => {}
+            ExpressionKind::Name(_)
+            | ExpressionKind::GenericName { .. }
+            | ExpressionKind::Literal(_)
+            | ExpressionKind::Error => {}
             ExpressionKind::Parenthesized(inner)
             | ExpressionKind::Prefix { operand: inner, .. }
             | ExpressionKind::Postfix { operand: inner, .. } => self.expression(inner),

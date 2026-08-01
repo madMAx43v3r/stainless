@@ -954,6 +954,17 @@ impl Lowerer<'_> {
                     hir::Expression::Name(binding_name(&path.segments[0]))
                 }
             }
+            ExpressionKind::GenericName { path, .. } => {
+                self.push(
+                    "HIR007",
+                    format!(
+                        "generic call target `{}` reached HIR lowering as a value",
+                        path.display()
+                    ),
+                    expression.span,
+                );
+                return None;
+            }
             ExpressionKind::Literal(literal) if literal.kind == ast::LiteralKind::Null => {
                 hir::Expression::JsonNull
             }
@@ -1399,7 +1410,9 @@ impl Lowerer<'_> {
     ) -> Option<hir::Expression> {
         let handles_checked_effect = matches!(
             call.target,
-            CallTarget::Intrinsic(Intrinsic::UnwrapRustResult { .. })
+            CallTarget::Intrinsic(
+                Intrinsic::UnwrapRustResult { .. } | Intrinsic::MakeUnique { .. }
+            )
         ) || matches!(
             &call.target,
             CallTarget::Native(native) if native.result_adaptation.is_some()
@@ -1505,6 +1518,10 @@ impl Lowerer<'_> {
                 Some(hir::Expression::Move(Box::new(
                     self.lower_expression(argument, ExpressionMode::Value)?,
                 )))
+            }
+            CallTarget::Intrinsic(Intrinsic::MakeUnique { construction, .. }) => {
+                let value = self.lower_resolved_call(construction, None, arguments)?;
+                Some(hir::Expression::MakeUnique(Box::new(value)))
             }
             CallTarget::Intrinsic(Intrinsic::StoredFunctionCall { .. }) => {
                 let callee = callee?;
@@ -1908,6 +1925,9 @@ impl Lowerer<'_> {
                     .collect::<Option<Vec<_>>>()?,
                 return_type: Box::new(self.lower_type(&function.return_type, span)?),
             },
+            TypeRef::UniquePtr(target) => {
+                hir::Type::UniquePtr(Box::new(self.lower_type(target, span)?))
+            }
             TypeRef::Struct { path } => hir::Type::User {
                 rust_path: user_type_path(path),
             },

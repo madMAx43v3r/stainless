@@ -755,6 +755,10 @@ impl Emitter {
                     #temporary
                 }))
             }
+            hir::Expression::MakeUnique(expression) => {
+                let expression = self.expression(expression)?;
+                Ok(quote!(::std::boxed::Box::new(#expression)))
+            }
             hir::Expression::UnwrapRustResult {
                 expression,
                 exception,
@@ -1097,6 +1101,10 @@ fn type_tokens(ty: &hir::Type, lifetime: Option<&syn::Lifetime>) -> Result<Token
                     >
                 ),
             })
+        }
+        hir::Type::UniquePtr(target) => {
+            let target = type_tokens(target, None)?;
+            Ok(quote!(::std::boxed::Box<#target>))
         }
         hir::Type::User { rust_path } => {
             let path = path(rust_path)?;

@@ -364,7 +364,18 @@ fn lower_for_clause(clause: cst::ForClause) -> ForClause {
 fn lower_expression(expression: cst::Expression) -> Expression {
     let expression_span = span(&expression);
     let kind = match expression {
-        cst::Expression::Name(name) => ExpressionKind::Name(path_from_tokens(name.path_tokens())),
+        cst::Expression::Name(name) => {
+            let path = path_from_tokens(name.path_tokens());
+            let arguments = name
+                .generic_arguments()
+                .map(|argument| lower_type(&argument))
+                .collect::<Vec<_>>();
+            if arguments.is_empty() {
+                ExpressionKind::Name(path)
+            } else {
+                ExpressionKind::GenericName { path, arguments }
+            }
+        }
         cst::Expression::Literal(literal) => {
             lower_literal(&literal).unwrap_or(ExpressionKind::Error)
         }

@@ -7,8 +7,9 @@ Stainless is a new C++-like language that transpiles to Rust.
 > and Rowan parser, typed CST views, compiler-owned AST lowering, structural
 > diagnostics, an initial name/type/call resolver, a typed Rust-shaped HIR, and
 > structured Rust emission for the supported function/control-flow,
-> data-only-struct, constructor, checked-exception, `Vec`/`String`, native JSON,
-> and first external-wrapper subset. The workspace now includes the compact
+> data-only-struct, constructor, checked-exception, `Vec`/`String`, native
+> JSON, non-null `unique_ptr<T>`, and first external-wrapper subset. The
+> workspace now includes the compact
 > `stainless-runtime` used by generated JSON code. An initial move/borrow
 > dataflow pass validates that subset; classes and interfaces have not started
 > yet.
@@ -1576,6 +1577,15 @@ not aliases that expose every method of their Rust lowering:
 | `atomic_ptr<T>` | Initially `RwLock<Arc<T>>` | Replaceable non-null shared slot |
 | `atomic_nullptr<T>` | Initially `RwLock<Option<Arc<T>>>` | Replaceable nullable shared slot |
 
+The compiler currently implements the non-null `unique_ptr<T>` row for local,
+parameter, and return values. `make_unique<T>(...)` runs the selected Stainless
+or native constructor and lowers the result to `Box<T>`; checked constructor
+exceptions propagate normally. Pointee fields and methods use `.`, and a
+unique owner may bind directly to a compatible pointee reference parameter.
+The owner is move-only, has no default constructor, and cannot be stored in an
+implicitly copyable struct. The nullable, shared, weak, and atomic rows remain
+specified but unimplemented.
+
 Native `rust::Option<T>` remains available for ordinary optional values, but
 Stainless rejects a pointer or synchronized pointer-slot type as its direct
 `T`. Pointer nullability must use `unique_nullptr<T>` or
@@ -2387,7 +2397,8 @@ The current recursive-descent grammar handles:
   `continue`, and empty statements;
 - classic `for (init; condition; update)` and range
   `for (binding : expression)` statements;
-- names and paths, literals, parenthesized expressions, calls, member access,
+- names and paths, literals, parenthesized expressions, calls with narrowly
+  parsed explicit generic targets such as `make_unique<T>`, member access,
   indexing, ordinary and explicitly base-qualified struct fields,
   prefix/postfix operators, assignment, precedence-aware binary expressions,
   and typed lambdas with explicit capture lists, arbitrary owned initializer
@@ -2434,6 +2445,10 @@ The initial `stainless_compiler::resolution` pass now provides:
   derived-struct-to-base-reference projection is the sole struct conversion;
 - classification of Stainless calls, compiler intrinsics such as `move` and
   primitive casts, and registered native Rust calls;
+- non-null `unique_ptr<T>` types and `make_unique<T>(...)` constructor
+  selection, automatic pointee field/method access and reference binding, and
+  diagnostics for copying, forbidden default construction, pointer-reference
+  declarations, and move-only storage inside structs;
 - exception-struct hierarchy validation, normalized checked `throws` sets,
   mandatory catch-or-declare checking, ordered base/derived handlers, and
   propagation through calls and constructor initialization;
@@ -2479,6 +2494,8 @@ resolution and before HIR construction. For the implemented subset it:
 - applies owned lambda captures when constructing a stored callable, treats
   shared `function` handles as implicit copies, and tracks `function_mut` as a
   move-only value;
+- tracks `unique_ptr<T>` as a move-only binding, applies ordinary loan checks
+  to pointee borrows, and diagnoses use after an explicit owner move;
 - verifies that a direct reference return ultimately originates from the
   function's single reference parameter.
 
@@ -2500,6 +2517,9 @@ the accepted subset it now:
   casts, explicit moves, struct copies, aggregate construction, inherited-field
   paths, base-reference projections, fluent member receivers, constructor
   field initialization, and implicit native/user default construction explicit;
+- lowers non-null `unique_ptr<T>` to `Box<T>` and `make_unique<T>(...)` to
+  checked pointee construction followed by `Box::new`, without double
+  propagation for throwing constructors;
 - lowers classic loops without breaking C++ `continue`/update ordering and
   lowers shared, mutable, copied, and consuming `Vec<T>` range loops to the
   corresponding Rust iterator form;
@@ -2526,11 +2546,13 @@ the accepted subset it now:
   checked exceptions, throwing constructors, native `Result` conversion,
   external-wrapper validation, all four initial Rust callback kinds, and
   shared/mutable stored callable behavior, and synchronized reference-counted
-  JSON mutation.
+  JSON mutation, plus non-null unique allocation, borrowing, member access,
+  moves, and throwing pointee construction.
 
 This is still not full semantic validation. Classes, interfaces, access
-control, ownership pointers, cross-file modules, ownership through fields and
-future pointer types, full path-sensitive loop-exit precision, general borrow
+control, nullable/shared/weak/atomic pointer families, cross-file modules,
+ownership through fields and future pointer types, full path-sensitive
+loop-exit precision, general borrow
 lifetimes, member/native returned-reference provenance, and generalized native
 trait satisfaction remain unresolved. Thread-transferable, throwing,
 reference-returning, async, and FFI callback forms are also deferred.
@@ -2688,8 +2710,10 @@ recorded inline so implemented syntax is not confused with planned work:
    initial single-file name/type/call resolver, move/borrow analysis, and
    resolved HIR construction are implemented for the function/control-flow and
    first struct subsets, including checked exceptions and throwing
-   constructors plus shared `function` and move-only `function_mut` values.
-   Classes, interfaces, and general ownership through fields remain.
+   constructors, shared `function` and move-only `function_mut` values, and
+   non-null `unique_ptr<T>` allocation and movement. Classes, interfaces,
+   nullable/shared pointer families, and general ownership through fields
+   remain.
 5. **In progress:** the initial `Vec`, `String`, and JSON metadata is connected through
    resolution and code generation. The versioned package binding manifest is
    parsed and merged with compiler built-ins; deterministic wrappers for its

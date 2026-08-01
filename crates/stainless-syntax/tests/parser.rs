@@ -160,6 +160,25 @@ fn pratt_parser_preserves_operator_precedence() {
 }
 
 #[test]
+fn parses_generic_call_targets_without_consuming_comparisons() {
+    let source = r"struct Config { i32 value; };
+
+bool compare(i32 left, i32 right) {
+    unique_ptr<Config> owner = make_unique<Config>(Config{left});
+    return left < right;
+}
+";
+    let parsed = parse(source);
+    let root = parsed.syntax();
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(root.to_string(), source);
+    assert_eq!(count_kind(&root, SyntaxKind::GenericArgumentList), 2);
+    assert_eq!(count_kind(&root, SyntaxKind::CallExpression), 1);
+    assert_eq!(count_kind(&root, SyntaxKind::BinaryExpression), 1);
+}
+
+#[test]
 fn parses_explicit_capture_lambdas_losslessly() {
     let source = r"void callbacks(i32 value, i32& total) {
     apply([](i32 item) { return item; });

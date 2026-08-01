@@ -264,10 +264,10 @@ impl Resolver<'_> {
                                     field.ty.span,
                                 );
                             }
-                            if contains_unique_function_storage(&ty) {
+                            if contains_move_only_storage(&ty) {
                                 self.push(
                                     "RES092",
-                                    "a move-only `function_mut` cannot be stored in an implicitly copyable struct"
+                                    "move-only ownership cannot be stored in an implicitly copyable struct"
                                         .to_owned(),
                                     field.ty.span,
                                 );
@@ -1020,6 +1020,17 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
     ) -> Option<ResolvedCall> {
         match canonical_ref(target) {
+            TypeRef::UniquePtr(_) => {
+                for argument in arguments {
+                    self.resolve_expression(argument, None, context);
+                }
+                self.push(
+                    "RES106",
+                    "constructing a nested `unique_ptr` pointee is not implemented".to_owned(),
+                    span,
+                );
+                None
+            }
             TypeRef::Struct { path } => {
                 let structure = self.struct_by_path.get(path).copied()?;
                 let has_arity = self
@@ -1121,6 +1132,15 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
     ) -> Option<ResolvedCall> {
         match canonical_ref(target) {
+            TypeRef::UniquePtr(_) => {
+                self.push(
+                    "RES106",
+                    "`unique_ptr<T>` has no default constructor; use `make_unique<T>(...)`"
+                        .to_owned(),
+                    span,
+                );
+                None
+            }
             TypeRef::Struct { path } => {
                 let structure = self.struct_by_path.get(path).copied()?;
                 self.resolve_user_constructor(structure, &[], span, context)
@@ -1727,6 +1747,17 @@ impl Resolver<'_> {
                     let (info, field) = self.resolve_value_name(path, expression.span, context);
                     (info, None, field)
                 }
+            }
+            ExpressionKind::GenericName { path, .. } => {
+                self.push(
+                    "RES104",
+                    format!(
+                        "generic target `{}` is only valid as a compiler-supported call",
+                        path.display()
+                    ),
+                    expression.span,
+                );
+                (error_info(), None, None)
             }
             ExpressionKind::Literal(literal) => (
                 ExpressionInfo {
@@ -2381,8 +2412,8 @@ impl Resolver<'_> {
                 None,
             );
         }
-        let TypeRef::Struct { path } = canonical(&receiver_info.ty) else {
-            if canonical(&receiver_info.ty) != TypeRef::Error {
+        let TypeRef::Struct { path } = automatic_pointee(&receiver_info.ty) else {
+            if automatic_pointee(&receiver_info.ty) != &TypeRef::Error {
                 self.push(
                     "RES010",
                     format!(
@@ -2395,7 +2426,7 @@ impl Resolver<'_> {
             }
             return (error_info(), None);
         };
-        let Some(structure) = self.struct_by_path.get(&path).copied() else {
+        let Some(structure) = self.struct_by_path.get(path).copied() else {
             return (error_info(), None);
         };
         let Some((ty, access_path)) = self.lookup_struct_field(structure, name) else {
@@ -2403,7 +2434,7 @@ impl Resolver<'_> {
                 "RES010",
                 format!(
                     "struct `{}` has no data field `{}`",
-                    display_path(&path),
+                    display_path(path),
                     name.display()
                 ),
                 span,
@@ -2537,6 +2568,23 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
     ) -> (ExpressionInfo, Option<ResolvedCall>) {
         match &callee.kind {
+            ExpressionKind::GenericName {
+                path,
+                arguments: type_arguments,
+            } if matches!(path.segments.as_slice(), [name] if name == "make_unique") => {
+                self.resolve_make_unique(type_arguments, arguments, span, context)
+            }
+            ExpressionKind::GenericName { path, .. } => {
+                for argument in arguments {
+                    self.resolve_expression(argument, None, context);
+                }
+                self.push(
+                    "RES104",
+                    format!("unsupported generic call `{}`", path.display()),
+                    span,
+                );
+                (error_info(), None)
+            }
             ExpressionKind::Name(path)
                 if path.segments.len() == 1 && path.segments[0] == "move" =>
             {
@@ -2545,9 +2593,21 @@ impl Resolver<'_> {
             ExpressionKind::Name(path) if matches!(path.segments.as_slice(), [name] if name == "var") => {
                 self.resolve_json_wrap(arguments, span, context)
             }
+            ExpressionKind::Name(path) if matches!(path.segments.as_slice(), [name] if name == "make_unique") =>
+            {
+                for argument in arguments {
+                    self.resolve_expression(argument, None, context);
+                }
+                self.push(
+                    "RES105",
+                    "`make_unique` requires one explicit pointee type argument".to_owned(),
+                    span,
+                );
+                (error_info(), None)
+            }
             ExpressionKind::Field { receiver, name } => {
                 let receiver_info = self.resolve_expression(receiver, None, context);
-                if let TypeRef::Struct { path } = canonical(&receiver_info.ty)
+                if let TypeRef::Struct { path } = automatic_pointee(&receiver_info.ty).clone()
                     && let Some(structure) = self.struct_by_path.get(&path).copied()
                     && let Some((ty @ TypeRef::Function(_), access_path)) =
                         self.lookup_struct_field(structure, name)
@@ -2809,7 +2869,7 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
         receiver_info: &ExpressionInfo,
     ) -> (ExpressionInfo, Option<ResolvedCall>) {
-        match canonical(&receiver_info.ty) {
+        match automatic_pointee(&receiver_info.ty).clone() {
             TypeRef::Struct { path } => {
                 let Some(structure) = self.struct_by_path.get(&path).copied() else {
                     return (error_info(), None);
@@ -3131,6 +3191,66 @@ impl Resolver<'_> {
             target: CallTarget::Intrinsic(Intrinsic::Move),
             return_type: return_type.clone(),
             throws: Vec::new(),
+        };
+        (temporary(return_type), Some(call))
+    }
+
+    fn resolve_make_unique(
+        &mut self,
+        type_arguments: &[ast::Type],
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        if type_arguments.len() != 1 {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES105",
+                format!(
+                    "`make_unique` requires one pointee type argument, found {}",
+                    type_arguments.len()
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+        let target = self.resolve_type(&type_arguments[0], &context.namespace, false);
+        if matches!(target, TypeRef::Void | TypeRef::Reference { .. }) {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES105",
+                format!(
+                    "`make_unique` cannot allocate pointee type `{}`",
+                    display_type(&target)
+                ),
+                type_arguments[0].span,
+            );
+            return (error_info(), None);
+        }
+        if target == TypeRef::Error {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            return (error_info(), None);
+        }
+        let Some(construction) = self.resolve_slot_construction(&target, arguments, span, context)
+        else {
+            return (error_info(), None);
+        };
+        let return_type = TypeRef::unique_ptr(target.clone());
+        let throws = construction.throws.clone();
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::MakeUnique {
+                target,
+                construction: Box::new(construction),
+            }),
+            return_type: return_type.clone(),
+            throws,
         };
         (temporary(return_type), Some(call))
     }
@@ -3888,7 +4008,7 @@ impl Resolver<'_> {
         else {
             return false;
         };
-        let TypeRef::Struct { path: actual_path } = canonical_ref(actual) else {
+        let TypeRef::Struct { path: actual_path } = automatic_pointee(actual) else {
             return false;
         };
         if expected_path == actual_path {
@@ -4187,7 +4307,33 @@ impl Resolver<'_> {
             }
             TypeKind::Named(named) => {
                 let segments = &named.path.segments;
-                if matches!(segments.as_slice(), [name] if name == "var") {
+                if matches!(segments.as_slice(), [name] if name == "unique_ptr") {
+                    let arguments = named
+                        .arguments
+                        .iter()
+                        .map(|argument| self.resolve_type(argument, namespace, false))
+                        .collect::<Vec<_>>();
+                    if arguments.len() != 1 {
+                        self.push(
+                            "RES104",
+                            format!(
+                                "`unique_ptr` expects one type argument, found {}",
+                                arguments.len()
+                            ),
+                            ty.span,
+                        );
+                        TypeRef::Error
+                    } else if matches!(arguments[0], TypeRef::Void | TypeRef::Reference { .. }) {
+                        self.push(
+                            "RES104",
+                            format!("`unique_ptr` cannot own `{}`", display_type(&arguments[0])),
+                            ty.span,
+                        );
+                        TypeRef::Error
+                    } else {
+                        TypeRef::unique_ptr(arguments[0].clone())
+                    }
+                } else if matches!(segments.as_slice(), [name] if name == "var") {
                     if !named.arguments.is_empty() {
                         self.push(
                             "RES033",
@@ -4260,6 +4406,14 @@ impl Resolver<'_> {
                 self.push(
                     "RES035",
                     "`void` cannot be used as a reference target".to_owned(),
+                    ty.span,
+                );
+                TypeRef::Error
+            } else if matches!(value, TypeRef::UniquePtr(_)) {
+                self.push(
+                    "RES106",
+                    "references to `unique_ptr<T>` are not allowed; pass the owner by value or borrow its pointee"
+                        .to_owned(),
                     ty.span,
                 );
                 TypeRef::Error
@@ -4515,6 +4669,7 @@ impl Resolver<'_> {
             | TypeRef::Parameter(_)
             | TypeRef::Callback(_)
             | TypeRef::Function(_)
+            | TypeRef::UniquePtr(_)
             | TypeRef::Struct { .. }
             | TypeRef::Reference { .. }
             | TypeRef::Error => false,
@@ -4598,6 +4753,7 @@ fn substitute(ty: &TypeRef, substitutions: &BTreeMap<String, TypeRef>) -> TypeRe
                 .collect(),
             substitute(&function.return_type, substitutions),
         ),
+        TypeRef::UniquePtr(target) => TypeRef::unique_ptr(substitute(target, substitutions)),
         TypeRef::Struct { .. } => ty.clone(),
         TypeRef::Reference { mutable, target } => TypeRef::Reference {
             mutable: *mutable,
@@ -4635,6 +4791,13 @@ fn canonical_ref(ty: &TypeRef) -> &TypeRef {
     match ty {
         TypeRef::Reference { target, .. } => target,
         _ => ty,
+    }
+}
+
+fn automatic_pointee(ty: &TypeRef) -> &TypeRef {
+    match canonical_ref(ty) {
+        TypeRef::UniquePtr(target) => canonical_ref(target),
+        target => target,
     }
 }
 
@@ -4850,11 +5013,12 @@ fn callable_signature(ty: &TypeRef) -> Option<(&[TypeRef], &TypeRef)> {
     }
 }
 
-fn contains_unique_function_storage(ty: &TypeRef) -> bool {
+fn contains_move_only_storage(ty: &TypeRef) -> bool {
     match ty {
         TypeRef::Function(function) => function.kind == StoredFunctionKind::Mutable,
-        TypeRef::Native { arguments, .. } => arguments.iter().any(contains_unique_function_storage),
-        TypeRef::Reference { target, .. } => contains_unique_function_storage(target),
+        TypeRef::UniquePtr(_) => true,
+        TypeRef::Native { arguments, .. } => arguments.iter().any(contains_move_only_storage),
+        TypeRef::Reference { target, .. } => contains_move_only_storage(target),
         _ => false,
     }
 }
@@ -4959,6 +5123,7 @@ fn display_type(ty: &TypeRef) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        TypeRef::UniquePtr(target) => format!("unique_ptr<{}>", display_type(target)),
         TypeRef::Struct { path } => display_path(path),
         TypeRef::Reference { mutable, target } => {
             if *mutable {
@@ -5096,7 +5261,10 @@ fn source_uses_exceptions(source: &SourceFile) -> bool {
 
     fn expression_uses_exceptions(expression: &Expression) -> bool {
         match &expression.kind {
-            ExpressionKind::Name(_) | ExpressionKind::Literal(_) | ExpressionKind::Error => false,
+            ExpressionKind::Name(_)
+            | ExpressionKind::GenericName { .. }
+            | ExpressionKind::Literal(_)
+            | ExpressionKind::Error => false,
             ExpressionKind::Parenthesized(inner)
             | ExpressionKind::Prefix { operand: inner, .. }
             | ExpressionKind::Postfix { operand: inner, .. } => expression_uses_exceptions(inner),

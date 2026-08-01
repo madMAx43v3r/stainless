@@ -112,6 +112,120 @@ i32 invoke(function<i32(const i32&)> callback, i32 value) {
 }
 
 #[test]
+fn resolves_non_null_unique_owners_allocation_borrowing_and_moves() {
+    let analysis = analyze(
+        r"struct Config {
+    i32 version;
+};
+
+i32 read_version(const Config& config) {
+    return config.version;
+}
+
+void bump(Config& config) {
+    config.version += 1;
+}
+
+unique_ptr<Config> make_config(i32 version) {
+    unique_ptr<Config> owner = make_unique<Config>(Config{version});
+    return move(owner);
+}
+
+i32 consume(unique_ptr<Config> owner) {
+    bump(owner);
+    return read_version(owner);
+}
+
+i32 use_unique() {
+    unique_ptr<Config> owner = make_config(4);
+    i32 before = read_version(owner);
+    return before + consume(move(owner));
+}
+",
+    );
+
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+    assert!(analysis.semantics.bindings.iter().any(|binding| {
+        matches!(
+            &binding.ty,
+            TypeRef::UniquePtr(target)
+                if matches!(target.as_ref(), TypeRef::Struct { path } if path == &["Config"])
+        )
+    }));
+    assert!(analysis.semantics.calls.iter().any(|call| {
+        matches!(
+            call.target,
+            CallTarget::Intrinsic(Intrinsic::MakeUnique { .. })
+        )
+    }));
+}
+
+#[test]
+fn unique_owners_reject_copying_default_construction_references_and_use_after_move() {
+    let analysis = analyze(
+        r"struct Config { i32 version; };
+
+struct InvalidHolder {
+    unique_ptr<Config> owner;
+};
+
+void take(unique_ptr<Config> owner) {}
+void invalid_ref(const unique_ptr<Config>& owner) {}
+
+void invalid_unique() {
+    unique_ptr<Config> missing;
+    unique_ptr<Config> owner = make_unique<Config>(Config{1});
+    unique_ptr<Config> copied = owner;
+    take(owner);
+    unique_ptr<Config> moved = move(owner);
+    i32 stale = owner.version;
+    make_unique(Config{2});
+}
+",
+    );
+    let codes = analysis
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+
+    for expected in ["RES027", "RES092", "RES105", "RES106"] {
+        assert!(
+            codes.contains(&expected),
+            "missing {expected}: {:#?}",
+            analysis.diagnostics
+        );
+    }
+}
+
+#[test]
+fn unique_owner_use_after_move_is_an_ownership_error() {
+    let analysis = analyze(
+        r"struct Config { i32 version; };
+
+i32 invalid_unique_move() {
+    unique_ptr<Config> owner = make_unique<Config>(Config{1});
+    unique_ptr<Config> moved = move(owner);
+    return owner.version + moved.version;
+}
+",
+    );
+
+    assert!(
+        analysis
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "OWN001"),
+        "{:#?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
 fn formatting_macros_require_imports_literal_formats_and_supported_values() {
     let valid = analyze(
         r#"use rust::{eprintln, format, println, write, writeln, String};

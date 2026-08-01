@@ -54,6 +54,8 @@ pub enum TypeRef {
     Callback(Box<CallbackType>),
     /// A non-null, owning Stainless stored callable.
     Function(Box<FunctionType>),
+    /// A non-null, unique Stainless owner lowered to Rust `Box<T>`.
+    UniquePtr(Box<TypeRef>),
     /// A Stainless data-only struct.
     Struct {
         /// Fully qualified Stainless path.
@@ -122,6 +124,12 @@ impl TypeRef {
         }))
     }
 
+    /// Creates a non-null unique owner.
+    #[must_use]
+    pub fn unique_ptr(target: Self) -> Self {
+        Self::UniquePtr(Box::new(target))
+    }
+
     /// Returns whether this type contains a reference at its outermost level.
     #[must_use]
     pub const fn is_reference(&self) -> bool {
@@ -133,6 +141,7 @@ impl TypeRef {
     pub fn contains_reference(&self) -> bool {
         match self {
             Self::Native { arguments, .. } => arguments.iter().any(Self::contains_reference),
+            Self::UniquePtr(target) => target.contains_reference(),
             Self::Reference { .. } => true,
             _ => false,
         }
@@ -545,6 +554,7 @@ fn callback_resolution_type(ty: &TypeRef) -> TypeRef {
                 .collect(),
             callback_resolution_type(&function.return_type),
         ),
+        TypeRef::UniquePtr(target) => TypeRef::unique_ptr(callback_resolution_type(target)),
         TypeRef::Native { path, arguments } => TypeRef::native(
             path,
             arguments.iter().map(callback_resolution_type).collect(),
