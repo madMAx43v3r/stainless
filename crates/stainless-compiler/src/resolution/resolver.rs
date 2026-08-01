@@ -187,6 +187,20 @@ impl Resolver<'_> {
         });
         self.struct_by_path.insert(rust_error_path, rust_error);
 
+        let io_error = StructId(self.model.structs.len());
+        let io_error_path = vec!["stainless".to_owned(), "IoError".to_owned()];
+        self.model.structs.push(StructSymbol {
+            id: io_error,
+            path: io_error_path.clone(),
+            kind: ast::UserTypeKind::Struct,
+            base: Some(root),
+            interfaces: Vec::new(),
+            is_sealed: false,
+            fields: Vec::new(),
+            span: Span::default(),
+        });
+        self.struct_by_path.insert(io_error_path, io_error);
+
         let format_error = StructId(self.model.structs.len());
         let format_error_path = vec!["stainless".to_owned(), "FormatError".to_owned()];
         self.model.structs.push(StructSymbol {
@@ -2079,6 +2093,17 @@ impl Resolver<'_> {
             .expect("installing exception builtins creates FormatError")
     }
 
+    fn io_error_struct(&mut self) -> StructId {
+        if self.exception_root().is_none() {
+            self.install_exception_builtins();
+        }
+        let path = vec!["stainless".to_owned(), "IoError".to_owned()];
+        self.struct_by_path
+            .get(&path)
+            .copied()
+            .expect("installing exception builtins creates IoError")
+    }
+
     fn json_error_struct(&mut self) -> StructId {
         if self.exception_root().is_none() {
             self.install_exception_builtins();
@@ -2105,14 +2130,18 @@ impl Resolver<'_> {
         &mut self,
         error_type: &TypeRef,
     ) -> (StructId, NativeResultException) {
-        if matches!(
-            canonical_ref(error_type),
+        match canonical_ref(error_type) {
             TypeRef::Native { path, arguments }
-                if path == "rust::stainless_runtime::JsonError" && arguments.is_empty()
-        ) {
-            (self.json_error_struct(), NativeResultException::JsonError)
-        } else {
-            (self.rust_error_struct(), NativeResultException::RustError)
+                if path == "rust::stainless_runtime::JsonError" && arguments.is_empty() =>
+            {
+                (self.json_error_struct(), NativeResultException::JsonError)
+            }
+            TypeRef::Native { path, arguments }
+                if path == "rust::std::io::Error" && arguments.is_empty() =>
+            {
+                (self.io_error_struct(), NativeResultException::IoError)
+            }
+            _ => (self.rust_error_struct(), NativeResultException::RustError),
         }
     }
 
@@ -8434,6 +8463,7 @@ fn source_uses_exceptions(source: &SourceFile) -> bool {
                                             name.as_str(),
                                             "Exception"
                                                 | "RustError"
+                                                | "IoError"
                                                 | "FormatError"
                                                 | "JsonError"
                                                 | "ThreadError"

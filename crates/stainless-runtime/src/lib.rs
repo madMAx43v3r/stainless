@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet, LinkedList, VecDeque};
 use std::error::Error;
 use std::fmt;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -19,6 +19,124 @@ use serde_json::{Number, Value};
 /// is no longer present.
 #[doc(hidden)]
 pub const CRATE_SOURCE_DIR: &str = env!("CARGO_MANIFEST_DIR");
+
+/// Exact-signature facade for the Rust standard library's whole-file and
+/// directory operations exposed through Stainless `rust::std::fs` bindings.
+///
+/// Rust's public functions accept generic `AsRef` parameters. Keeping those
+/// generics behind this facade lets Stainless expose deterministic overloads
+/// while preserving the original [`std::io::Error`] values.
+pub struct Fs;
+
+impl Fs {
+    /// Reads an entire UTF-8 file into an owned string.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying filesystem or UTF-8 decoding error.
+    pub fn read_to_string(path: &str) -> std::io::Result<String> {
+        fs::read_to_string(path)
+    }
+
+    /// Reads an entire file as bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying filesystem error.
+    pub fn read(path: &str) -> std::io::Result<Vec<u8>> {
+        fs::read(path)
+    }
+
+    /// Creates or truncates a file and writes UTF-8 text into it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying filesystem or write error.
+    pub fn write_text(path: &str, contents: &str) -> std::io::Result<()> {
+        fs::write(path, contents)
+    }
+
+    /// Creates or truncates a file and writes bytes into it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying filesystem or write error.
+    pub fn write_bytes(path: &str, contents: &[u8]) -> std::io::Result<()> {
+        fs::write(path, contents)
+    }
+
+    /// Returns whether a filesystem entry exists, preserving lookup errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying filesystem lookup error.
+    pub fn exists(path: &str) -> std::io::Result<bool> {
+        fs::exists(path)
+    }
+
+    /// Copies one file and returns the number of bytes copied.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying filesystem, read, or write error.
+    pub fn copy(from: &str, to: &str) -> std::io::Result<u64> {
+        fs::copy(from, to)
+    }
+
+    /// Renames or moves a filesystem entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying filesystem error.
+    pub fn rename(from: &str, to: &str) -> std::io::Result<()> {
+        fs::rename(from, to)
+    }
+
+    /// Removes one file.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying filesystem error.
+    pub fn remove_file(path: &str) -> std::io::Result<()> {
+        fs::remove_file(path)
+    }
+
+    /// Creates one directory whose parent already exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying filesystem error.
+    pub fn create_dir(path: &str) -> std::io::Result<()> {
+        fs::create_dir(path)
+    }
+
+    /// Recursively creates a directory and any missing parents.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying filesystem error.
+    pub fn create_dir_all(path: &str) -> std::io::Result<()> {
+        fs::create_dir_all(path)
+    }
+
+    /// Removes one empty directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying filesystem error.
+    pub fn remove_dir(path: &str) -> std::io::Result<()> {
+        fs::remove_dir(path)
+    }
+
+    /// Recursively removes a directory and its contents.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying filesystem error.
+    pub fn remove_dir_all(path: &str) -> std::io::Result<()> {
+        fs::remove_dir_all(path)
+    }
+}
 
 /// An owned value from the JSON data model.
 ///
@@ -795,8 +913,49 @@ fn signed_integer(value: f64, bits: u32) -> i128 {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet, LinkedList, VecDeque};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::Var;
+    use super::{Fs, Var};
+
+    #[test]
+    fn whole_file_io_preserves_bytes_text_and_errors() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test clock follows the Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "stainless-runtime-fs-{}-{unique}",
+            std::process::id()
+        ));
+        let nested = root.join("nested");
+        let text = nested.join("value.txt");
+        let copy = nested.join("copy.bin");
+        let renamed = nested.join("renamed.bin");
+        let path = |value: &std::path::Path| value.to_string_lossy().into_owned();
+
+        Fs::create_dir_all(&path(&nested)).expect("nested directory is created");
+        Fs::write_text(&path(&text), "Stainless").expect("text is written");
+        assert_eq!(
+            Fs::read_to_string(&path(&text)).expect("text is read"),
+            "Stainless"
+        );
+        assert!(Fs::exists(&path(&text)).expect("existence is checked"));
+        assert_eq!(
+            Fs::copy(&path(&text), &path(&copy)).expect("file is copied"),
+            9
+        );
+        assert_eq!(
+            Fs::read(&path(&copy)).expect("bytes are read"),
+            b"Stainless"
+        );
+        Fs::write_bytes(&path(&copy), &[0, 1, 2]).expect("bytes are replaced");
+        Fs::rename(&path(&copy), &path(&renamed)).expect("file is renamed");
+        Fs::remove_file(&path(&renamed)).expect("renamed file is removed");
+        assert!(Fs::read(&path(&renamed)).is_err());
+        Fs::remove_file(&path(&text)).expect("text file is removed");
+        Fs::remove_dir(&path(&nested)).expect("empty nested directory is removed");
+        Fs::remove_dir_all(&path(&root)).expect("root directory is removed");
+    }
 
     #[test]
     fn missing_access_is_null_and_children_are_owned() {

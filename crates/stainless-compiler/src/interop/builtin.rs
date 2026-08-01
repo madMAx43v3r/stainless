@@ -18,6 +18,8 @@ const V: &str = "V";
 /// invariants. Such an error indicates a compiler implementation defect.
 pub fn standard_bindings() -> Result<NativeBindings, super::BindingError> {
     NativeBindings::new(vec![
+        fs_binding(),
+        io_error_binding(),
         json_error_binding(),
         list_binding(),
         map_binding(),
@@ -31,6 +33,148 @@ pub fn standard_bindings() -> Result<NativeBindings, super::BindingError> {
 
 pub(crate) const VAR_TYPE_PATH: &str = "rust::stainless_runtime::Var";
 const JSON_ERROR_TYPE_PATH: &str = "rust::stainless_runtime::JsonError";
+const IO_ERROR_TYPE_PATH: &str = "rust::std::io::Error";
+
+fn fs_binding() -> NativeTypeBinding {
+    let string = string_type();
+    let string_ref = TypeRef::shared_ref(string.clone());
+    let bytes = vec_of(TypeRef::U8);
+    let bytes_ref = TypeRef::shared_ref(bytes.clone());
+    let io_error = TypeRef::native(IO_ERROR_TYPE_PATH, Vec::new());
+    let mut callables = fs_file_callables(&string, &string_ref, &bytes, &bytes_ref, &io_error);
+    callables.extend(fs_directory_callables(&string_ref, &io_error));
+
+    NativeTypeBinding {
+        stainless_path: "rust::std::fs".to_owned(),
+        rust_path: "::stainless_runtime::Fs".to_owned(),
+        type_parameters: vec![],
+        error_format: None,
+        callables,
+    }
+}
+
+fn fs_file_callables(
+    string: &TypeRef,
+    string_ref: &TypeRef,
+    bytes: &TypeRef,
+    bytes_ref: &TypeRef,
+    io_error: &TypeRef,
+) -> Vec<CallableBinding> {
+    vec![
+        fallible_associated(
+            "read_to_string",
+            vec![fs_path_parameter("path", string_ref)],
+            string.clone(),
+            io_error.clone(),
+            "::stainless_runtime::Fs::read_to_string",
+        ),
+        fallible_associated(
+            "read",
+            vec![fs_path_parameter("path", string_ref)],
+            bytes.clone(),
+            io_error.clone(),
+            "::stainless_runtime::Fs::read",
+        ),
+        fallible_associated(
+            "write",
+            vec![
+                fs_path_parameter("path", string_ref),
+                Parameter::adapted(
+                    "contents",
+                    string_ref.clone(),
+                    ArgumentAdaptation::StringRefToStr,
+                ),
+            ],
+            TypeRef::Void,
+            io_error.clone(),
+            "::stainless_runtime::Fs::write_text",
+        ),
+        fallible_associated(
+            "write",
+            vec![
+                fs_path_parameter("path", string_ref),
+                Parameter::new("contents", bytes_ref.clone()),
+            ],
+            TypeRef::Void,
+            io_error.clone(),
+            "::stainless_runtime::Fs::write_bytes",
+        ),
+        fallible_associated(
+            "exists",
+            vec![fs_path_parameter("path", string_ref)],
+            TypeRef::Bool,
+            io_error.clone(),
+            "::stainless_runtime::Fs::exists",
+        ),
+        fallible_associated(
+            "copy",
+            vec![
+                fs_path_parameter("from", string_ref),
+                fs_path_parameter("to", string_ref),
+            ],
+            TypeRef::U64,
+            io_error.clone(),
+            "::stainless_runtime::Fs::copy",
+        ),
+        fallible_associated(
+            "rename",
+            vec![
+                fs_path_parameter("from", string_ref),
+                fs_path_parameter("to", string_ref),
+            ],
+            TypeRef::Void,
+            io_error.clone(),
+            "::stainless_runtime::Fs::rename",
+        ),
+        fallible_associated(
+            "remove_file",
+            vec![fs_path_parameter("path", string_ref)],
+            TypeRef::Void,
+            io_error.clone(),
+            "::stainless_runtime::Fs::remove_file",
+        ),
+    ]
+}
+
+fn fs_directory_callables(string_ref: &TypeRef, io_error: &TypeRef) -> Vec<CallableBinding> {
+    [
+        "create_dir",
+        "create_dir_all",
+        "remove_dir",
+        "remove_dir_all",
+    ]
+    .into_iter()
+    .map(|name| {
+        fallible_associated(
+            name,
+            vec![fs_path_parameter("path", string_ref)],
+            TypeRef::Void,
+            io_error.clone(),
+            match name {
+                "create_dir" => "::stainless_runtime::Fs::create_dir",
+                "create_dir_all" => "::stainless_runtime::Fs::create_dir_all",
+                "remove_dir" => "::stainless_runtime::Fs::remove_dir",
+                "remove_dir_all" => "::stainless_runtime::Fs::remove_dir_all",
+                _ => unreachable!("filesystem directory binding name is fixed"),
+            },
+        )
+    })
+    .collect()
+}
+
+fn fs_path_parameter(name: &'static str, string_ref: &TypeRef) -> Parameter {
+    Parameter::adapted(name, string_ref.clone(), ArgumentAdaptation::StringRefToStr)
+}
+
+fn io_error_binding() -> NativeTypeBinding {
+    NativeTypeBinding {
+        stainless_path: IO_ERROR_TYPE_PATH.to_owned(),
+        rust_path: "::std::io::Error".to_owned(),
+        type_parameters: vec![],
+        error_format: Some(NativeErrorFormat::Display),
+        callables: vec![],
+    }
+}
 
 #[allow(clippy::too_many_lines)]
 fn var_binding() -> NativeTypeBinding {
@@ -893,6 +1037,28 @@ fn associated(
         parameters,
         return_type,
         rust_result_error: None,
+        return_borrow: None,
+        requirements: vec![],
+        lowering: RustLowering::AssociatedFunction {
+            rust_path: rust_path.to_owned(),
+        },
+    }
+}
+
+fn fallible_associated(
+    source_name: &'static str,
+    parameters: Vec<Parameter>,
+    return_type: TypeRef,
+    error_type: TypeRef,
+    rust_path: &'static str,
+) -> CallableBinding {
+    CallableBinding {
+        source_name: source_name.to_owned(),
+        style: CallStyle::AssociatedFunction,
+        receiver: None,
+        parameters,
+        return_type,
+        rust_result_error: Some(error_type),
         return_borrow: None,
         requirements: vec![],
         lowering: RustLowering::AssociatedFunction {

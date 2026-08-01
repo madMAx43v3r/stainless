@@ -24,6 +24,7 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
         include_str!("../../../docs/ref/23_mutex_and_condition.stl"),
         include_str!("../../../docs/ref/24_threads.stl"),
         include_str!("../../../docs/ref/25_collections.stl"),
+        include_str!("../../../docs/ref/26_file_io.stl"),
     ] {
         let analysis = analyze(source);
 
@@ -33,6 +34,51 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
             analysis.diagnostics
         );
     }
+}
+
+#[test]
+fn filesystem_calls_map_io_errors_to_the_checked_io_exception() {
+    let valid = analyze(include_str!("../../../docs/ref/26_file_io.stl"));
+    assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);
+    let fs_calls = valid
+        .semantics
+        .calls
+        .iter()
+        .filter_map(|call| match &call.target {
+            CallTarget::Native(native) if native.type_path == "rust::std::fs" => {
+                Some((call, native))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!fs_calls.is_empty());
+    for (call, native) in fs_calls {
+        assert_eq!(call.throws.len(), 1);
+        assert_eq!(
+            valid.semantics.structure(call.throws[0]).unwrap().path,
+            ["stainless", "IoError"]
+        );
+        assert!(matches!(
+            native.result_adaptation,
+            Some(stainless_compiler::resolution::NativeCallResultAdaptation {
+                error_message: RustErrorMessage::Display,
+                exception: NativeResultException::IoError,
+            })
+        ));
+    }
+
+    let invalid = analyze(
+        r"use rust::String;
+use rust::std::fs;
+
+String load(const String& path) {
+    return fs::read_to_string(path);
+}
+",
+    );
+    assert!(invalid.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "RES075" && diagnostic.message.contains("stainless::IoError")
+    }));
 }
 
 #[test]

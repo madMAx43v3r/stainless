@@ -25,7 +25,64 @@ fn standard_registry_contains_builtin_types_in_path_order() {
             "rust::Vec",
             "rust::stainless_runtime::JsonError",
             "rust::stainless_runtime::Var",
+            "rust::std::fs",
+            "rust::std::io::Error",
         ]
+    );
+}
+
+#[test]
+fn filesystem_bindings_have_exact_checked_text_and_byte_overloads() {
+    let bindings = standard_bindings().unwrap();
+    let fs = bindings.type_by_path("rust::std::fs").unwrap();
+    let io_error = TypeRef::native("rust::std::io::Error", vec![]);
+    let string_ref = TypeRef::shared_ref(TypeRef::native("rust::String", vec![]));
+    let bytes_ref = TypeRef::shared_ref(TypeRef::native("rust::Vec", vec![TypeRef::U8]));
+
+    assert_eq!(fs.rust_path, "::stainless_runtime::Fs");
+    let write_text = fs
+        .find_callable(
+            CallStyle::AssociatedFunction,
+            "write",
+            &[string_ref.clone(), string_ref.clone()],
+        )
+        .unwrap();
+    let write_bytes = fs
+        .find_callable(
+            CallStyle::AssociatedFunction,
+            "write",
+            &[string_ref.clone(), bytes_ref],
+        )
+        .unwrap();
+    assert_eq!(write_text.rust_result_error, Some(io_error.clone()));
+    assert_eq!(write_bytes.rust_result_error, Some(io_error));
+    assert_eq!(
+        write_text
+            .parameters
+            .iter()
+            .map(|parameter| parameter.adaptation)
+            .collect::<Vec<_>>(),
+        [
+            ArgumentAdaptation::StringRefToStr,
+            ArgumentAdaptation::StringRefToStr,
+        ]
+    );
+    assert!(matches!(
+        write_text.lowering,
+        RustLowering::AssociatedFunction { ref rust_path }
+            if rust_path == "::stainless_runtime::Fs::write_text"
+    ));
+    assert!(matches!(
+        write_bytes.lowering,
+        RustLowering::AssociatedFunction { ref rust_path }
+            if rust_path == "::stainless_runtime::Fs::write_bytes"
+    ));
+    assert_eq!(
+        bindings
+            .type_by_path("rust::std::io::Error")
+            .unwrap()
+            .error_format,
+        Some(NativeErrorFormat::Display)
     );
 }
 

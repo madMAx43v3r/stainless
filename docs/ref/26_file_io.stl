@@ -1,0 +1,66 @@
+// Whole-file and basic directory I/O through Rust's standard library.
+// Every operation that can fail raises the checked stainless::IoError.
+
+use rust::{String, Vec};
+use rust::std::fs;
+
+String load_text(const String& path) throws stainless::IoError {
+    return fs::read_to_string(path);
+}
+
+void save_text(
+    const String& path,
+    const String& contents
+) throws stainless::IoError {
+    fs::write(path, contents);
+}
+
+bool missing_file_is_checked(const String& path) {
+    try {
+        fs::read_to_string(path);
+    } catch (const stainless::IoError& error) {
+        return !error.message.is_empty();
+    }
+    return false;
+}
+
+i32 main() throws stainless::IoError {
+    String text_path = "stainless-file-io-test.txt";
+    String copy_path = "stainless-file-io-copy.bin";
+    String renamed_path = "stainless-file-io-renamed.bin";
+    String directory = "stainless-file-io-directory";
+    String nested_directory = "stainless-file-io-directory/nested/leaf";
+
+    save_text(text_path, "Stainless");
+    String text = load_text(text_path);
+    Vec<u8> original = fs::read(text_path);
+    u64 copied = fs::copy(text_path, copy_path);
+
+    Vec<u8> replacement;
+    replacement.push(7u8);
+    replacement.push(8u8);
+    fs::write(copy_path, replacement);
+    fs::rename(copy_path, renamed_path);
+
+    bool text_exists = fs::exists(text_path);
+    bool renamed_exists = fs::exists(renamed_path);
+    fs::remove_file(text_path);
+    fs::remove_file(renamed_path);
+
+    fs::create_dir(directory);
+    fs::create_dir_all(nested_directory);
+    fs::remove_dir_all(directory);
+
+    if (text.len() != 9usize ||
+        original.len() != 9usize ||
+        !original.contains(83u8) ||
+        copied != 9u64 ||
+        !text_exists ||
+        !renamed_exists ||
+        fs::exists(text_path) ||
+        fs::exists(directory) ||
+        !missing_file_is_checked("stainless-file-io-missing.txt")) {
+        return 1;
+    }
+    return 0;
+}

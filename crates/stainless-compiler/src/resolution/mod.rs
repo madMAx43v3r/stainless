@@ -429,6 +429,8 @@ pub enum RustErrorMessage {
 pub enum NativeResultException {
     /// Generic failure from Rust interop.
     RustError,
+    /// Failure from Rust filesystem or stream I/O.
+    IoError,
     /// JSON read, parse, or mutation failure.
     JsonError,
 }

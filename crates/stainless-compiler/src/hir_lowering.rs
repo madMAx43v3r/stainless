@@ -39,7 +39,12 @@ pub(crate) fn lower(
                 if namespace == "stainless"
                     && matches!(
                         name.as_str(),
-                        "Exception" | "RustError" | "FormatError" | "JsonError" | "ThreadError"
+                        "Exception"
+                            | "RustError"
+                            | "IoError"
+                            | "FormatError"
+                            | "JsonError"
+                            | "ThreadError"
                     )
         )
     }) {
@@ -2742,6 +2747,7 @@ fn lower_native_result_exception(
 ) -> hir::NativeExceptionKind {
     match exception {
         crate::resolution::NativeResultException::RustError => hir::NativeExceptionKind::RustError,
+        crate::resolution::NativeResultException::IoError => hir::NativeExceptionKind::IoError,
         crate::resolution::NativeResultException::JsonError => hir::NativeExceptionKind::JsonError,
     }
 }

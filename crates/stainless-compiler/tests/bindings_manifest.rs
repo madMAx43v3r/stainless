@@ -94,6 +94,8 @@ fn package_loader_merges_optional_manifest_with_compiler_builtins() {
             "rust::regex::Regex",
             "rust::stainless_runtime::JsonError",
             "rust::stainless_runtime::Var",
+            "rust::std::fs",
+            "rust::std::io::Error",
         ]
     );
 }

@@ -1623,6 +1623,47 @@ fn cargo_executes_native_json_support_and_json_error_conversion() {
 }
 
 #[test]
+fn cargo_executes_checked_standard_file_io() {
+    let source = include_str!("../../../docs/ref/26_file_io.stl");
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:?}",
+        result.analysis.diagnostics
+    );
+    let entry = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["main"])
+        .expect("file I/O sample main symbol")
+        .mangled_name
+        .clone();
+    let mut rust = result.rust.expect("file I/O sample should emit Rust");
+    assert!(rust.contains("::stainless_runtime::Fs::read_to_string"));
+    assert!(rust.contains("::stainless_runtime::Fs::write_text"));
+    assert!(rust.contains("::stainless_runtime::Fs::write_bytes"));
+    assert!(rust.contains("__stainless_namespace_stainless::IoError"));
+    write!(
+        rust,
+        "\nfn main() {{ assert_eq!({entry}().expect(\"valid file I/O\"), 0); }}\n"
+    )
+    .expect("writing to a String cannot fail");
+
+    let directory = write_runtime_cargo_fixture("file-io-runtime", &rust);
+    let output = run_fixture_cargo(&directory, "run");
+    assert!(
+        output.status.success(),
+        "Cargo rejected generated file I/O support:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(&directory)
+        .unwrap_or_else(|error| panic!("failed to remove {}: {error}", directory.display()));
+}
+
+#[test]
 fn struct_json_conversion_uses_the_qualified_stainless_type_name() {
     let source = r"namespace web {
 namespace model {
@@ -1970,6 +2011,7 @@ fn run_fixture_cargo(directory: &Path, command: &str) -> std::process::Output {
         .arg("--offline")
         .arg("--manifest-path")
         .arg(directory.join("Cargo.toml"))
+        .current_dir(directory)
         .env("CARGO_TARGET_DIR", directory.join("target"))
         .output()
         .unwrap_or_else(|error| panic!("failed to invoke Cargo: {error}"))

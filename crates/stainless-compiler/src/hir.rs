@@ -404,6 +404,8 @@ pub enum RustErrorMessage {
 pub enum NativeExceptionKind {
     /// Generic failure from a native Rust `Result`.
     RustError,
+    /// Failure from Rust filesystem or stream I/O.
+    IoError,
     /// Failure while appending formatted text.
     FormatError,
     /// Failure while reading, parsing, or serializing JSON.

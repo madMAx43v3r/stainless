@@ -1384,6 +1384,7 @@ impl Emitter {
         };
         let exception = match exception {
             hir::NativeExceptionKind::RustError => quote!(RustError),
+            hir::NativeExceptionKind::IoError => quote!(IoError),
             hir::NativeExceptionKind::FormatError => quote!(FormatError),
             hir::NativeExceptionKind::JsonError => quote!(JsonError),
         };

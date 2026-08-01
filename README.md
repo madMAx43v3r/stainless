@@ -171,6 +171,9 @@ implemented:
   thread-panic conversion.
 - [`25_collections.stl`](docs/ref/25_collections.stl) — doubly linked lists,
   double-ended queues, and ordered maps and sets.
+- [`26_file_io.stl`](docs/ref/26_file_io.stl) — whole-file text/byte I/O,
+  filesystem copying, renaming and existence checks, directory operations, and
+  checked `stainless::IoError` failures.
 
 `01_basics.stl`, `02_structs_and_data_inheritance.stl`,
 `11_vec_and_string.stl`, `13_range_for.stl`, and `14_constructors.stl` are
@@ -1333,6 +1336,9 @@ namespace stainless {
     struct RustError : Exception {
     };
 
+    struct IoError : Exception {
+    };
+
     struct FormatError : Exception {
     };
 
@@ -1346,6 +1352,11 @@ namespace stainless {
 human-readable message but not the native Rust error's concrete type or fields.
 Consequently project code catches `stainless::RustError`; it cannot catch or
 downcast to the Rust `E` type.
+
+`stainless::IoError` is the narrower exception produced by standard filesystem
+operations. Its inherited `message` contains Rust's human-readable
+`std::io::Error` display text. Platform-specific error codes and Rust
+`ErrorKind` values are not exposed in the initial API.
 
 `stainless::FormatError` is the narrower checked failure produced by
 `write!` and `writeln!`. Its message is obtained from Rust's
@@ -2260,6 +2271,48 @@ a buffered reader. The runtime uses `serde_json` only at the parse/serialize
 boundary; its own `Var` shape supplies Stainless's shared, synchronized
 aggregate semantics.
 
+### File I/O
+
+The initial filesystem API follows Rust's `std::fs` names through the reserved
+Rust namespace:
+
+```cpp
+use rust::{String, Vec};
+use rust::std::fs;
+
+String load(const String& path) throws stainless::IoError {
+    return fs::read_to_string(path);
+}
+
+void save_text(
+    const String& path,
+    const String& contents
+) throws stainless::IoError {
+    fs::write(path, contents);
+}
+
+void save_bytes(
+    const String& path,
+    const Vec<u8>& contents
+) throws stainless::IoError {
+    fs::write(path, contents);
+}
+```
+
+`read_to_string(path)` returns `String`, rejecting invalid UTF-8 through
+`stainless::IoError`; `read(path)` returns `Vec<u8>`. The two exact `write`
+overloads accept `const String&` and `const Vec<u8>&`. Like Rust's
+`std::fs::write`, both create a missing file or truncate an existing file.
+
+The same checked API exposes `exists(path) -> bool`, `copy(from, to) -> u64`,
+`rename(from, to)`, `remove_file(path)`, `create_dir(path)`,
+`create_dir_all(path)`, `remove_dir(path)`, and `remove_dir_all(path)`. Every
+operation maps `std::io::Error` to `stainless::IoError`, retaining its display
+message, and therefore must be caught or declared in `throws`. Paths are UTF-8
+`String` values in this first surface. Open file handles, seeking, buffered or
+incremental streams, metadata, permissions, and symlink operations remain for
+the next file-I/O layer.
+
 Each Stainless compiler release supports one stable Rust minor release. The
 build helper compares `rustc -Vv` with the metadata version and rejects a
 different minor version with an actionable diagnostic; patch releases are
@@ -2789,8 +2842,8 @@ the accepted subset it now:
   projection without `unsafe`;
 - lowers native `Result` conversion and fallible `var` mutation to inline
   non-panicking `match` expressions that construct and propagate a checked
-  `stainless::RustError`, or the more specific `stainless::JsonError` for
-  native JSON operations;
+  `stainless::RustError`, or the more specific `stainless::IoError` and
+  `stainless::JsonError` for filesystem and native JSON operations;
 - emits deterministic private wrappers for manifest-selected external
   associated functions and methods, with argument adaptations and generic
   callback trait bounds inside the Cargo-checked boundary;
