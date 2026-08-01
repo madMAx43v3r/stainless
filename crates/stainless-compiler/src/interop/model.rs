@@ -67,6 +67,12 @@ pub enum TypeRef {
     MutexGuard(Box<TypeRef>),
     /// A condition signal (`std::sync::Condvar`).
     Condition,
+    /// A move-only unscoped Rust thread handle.
+    ThreadHandle(Box<TypeRef>),
+    /// A compiler-confined Rust scoped-thread context.
+    ThreadScope,
+    /// A move-only thread handle borrowing a surrounding thread scope.
+    ScopedThreadHandle(Box<TypeRef>),
     /// A Stainless data-only struct.
     Struct {
         /// Fully qualified Stainless path.
@@ -161,8 +167,13 @@ impl TypeRef {
     pub fn contains_reference(&self) -> bool {
         match self {
             Self::Native { arguments, .. } => arguments.iter().any(Self::contains_reference),
-            Self::Pointer { target, .. } | Self::Mutex(target) => target.contains_reference(),
-            Self::MutexGuard(_) | Self::Reference { .. } => true,
+            Self::Pointer { target, .. } | Self::Mutex(target) | Self::ThreadHandle(target) => {
+                target.contains_reference()
+            }
+            Self::MutexGuard(_)
+            | Self::ThreadScope
+            | Self::ScopedThreadHandle(_)
+            | Self::Reference { .. } => true,
             _ => false,
         }
     }
@@ -235,6 +246,8 @@ pub enum CallbackEscape {
     Static,
     /// The callback may be retained and sent to another thread.
     Thread,
+    /// The callback may run on another thread but cannot outlive a lexical scope.
+    Scoped,
 }
 
 /// Exact signature and ownership contract for one contextual callback.
@@ -601,6 +614,13 @@ fn callback_resolution_type(ty: &TypeRef) -> TypeRef {
             TypeRef::MutexGuard(Box::new(callback_resolution_type(target)))
         }
         TypeRef::Condition => TypeRef::Condition,
+        TypeRef::ThreadHandle(target) => {
+            TypeRef::ThreadHandle(Box::new(callback_resolution_type(target)))
+        }
+        TypeRef::ThreadScope => TypeRef::ThreadScope,
+        TypeRef::ScopedThreadHandle(target) => {
+            TypeRef::ScopedThreadHandle(Box::new(callback_resolution_type(target)))
+        }
         TypeRef::Native { path, arguments } => TypeRef::native(
             path,
             arguments.iter().map(callback_resolution_type).collect(),

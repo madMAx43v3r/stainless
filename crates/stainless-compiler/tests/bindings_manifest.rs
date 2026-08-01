@@ -203,7 +203,7 @@ return = "i32"
 }
 
 #[test]
-fn rejects_escaping_and_reference_returning_callbacks() {
+fn accepts_thread_callbacks_but_rejects_general_static_and_reference_returns() {
     let manifest = |escape: &str, return_type: &str| {
         format!(
             r#"schema = 1
@@ -232,8 +232,21 @@ return = "void"
         )
     };
 
+    let threaded = parse_bindings_manifest(&manifest("thread", "void"))
+        .expect("thread callbacks should be supported");
+    let callback = &threaded
+        .type_by_path("rust::example::Processor")
+        .expect("processor binding")
+        .callables[0]
+        .parameters[0]
+        .ty;
+    assert!(matches!(
+        callback,
+        TypeRef::Callback(callback) if callback.escape == CallbackEscape::Thread
+    ));
+
     let escaping = parse_bindings_manifest(&manifest("static", "void")).unwrap_err();
-    assert!(escaping.message_text().contains("escape = \"call\""));
+    assert!(escaping.message_text().contains("escape = \"static\""));
 
     let borrowed = parse_bindings_manifest(&manifest("call", "const rust::String&")).unwrap_err();
     assert!(

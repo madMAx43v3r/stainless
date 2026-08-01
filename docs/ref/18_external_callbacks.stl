@@ -1,6 +1,6 @@
 // Explicit-capture callbacks passed through compiler-generated Rust wrappers.
 // The companion .bindings.toml file supplies each callback's exact signature,
-// invocation capability, and non-escaping lifetime contract.
+// invocation capability, and call/thread escape contract.
 
 use rust::callback_fixture::Processor;
 
@@ -42,9 +42,14 @@ i32 external_callbacks() {
         return value + offset;
     });
 
+    Processor threaded = Processor::new(6);
+    i32 sixth = move(threaded).spawn([](i32 value) {
+        return value + 1;
+    });
+
     // `initial` remains valid because `[count = initial]` copied it.
-    return first * 100000 + second * 10000 + third * 1000
-        + stateful * 100 + fourth * 10 + fifth + initial;
+    return (first * 100000 + second * 10000 + third * 1000
+        + stateful * 100 + fourth * 10 + fifth + initial) * 10 + sixth;
 }
 
 } // namespace samples

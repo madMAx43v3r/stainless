@@ -9,7 +9,7 @@ Stainless is a new C++-like language that transpiles to Rust.
 > structured Rust emission for the supported function/control-flow,
 > data-only-struct, constructor, checked-exception, `Vec`/`String`, native
 > JSON, the local/function ownership-pointer family, mutex/condition
-> synchronization, and first external-wrapper subset. The
+> synchronization, owned/scoped threads, and first external-wrapper subset. The
 > workspace now includes the compact
 > `stainless-runtime` used by generated JSON code. An initial move/borrow
 > dataflow pass validates that subset; classes and interfaces have not started
@@ -163,6 +163,9 @@ implemented:
 - [`23_mutex_and_condition.stl`](docs/ref/23_mutex_and_condition.stl) —
   mutex-protected mutable state, scoped inferred guards, condition waits, and
   one/all waiter notification.
+- [`24_threads.stl`](docs/ref/24_threads.stl) — owned and scoped Rust threads,
+  `Send` capture validation, move-only join handles, typed results, and checked
+  thread-panic conversion.
 
 `01_basics.stl`, `02_structs_and_data_inheritance.stl`,
 `11_vec_and_string.stl`, `13_range_for.stl`, and `14_constructors.stl` are
@@ -172,7 +175,8 @@ currently parsed, resolved, lowered to HIR, emitted as Rust, and compiled by
 `16_native_result_unwrap.stl` sample, and the formatting-macro
 `20_formatting_macros.stl` sample, and the ownership-pointer
 `22_pointer_family.stl` sample and the mutex/condition
-`23_mutex_and_condition.stl` sample. The JSON
+`23_mutex_and_condition.stl` sample, plus the owned/scoped thread
+`24_threads.stl` sample. The JSON
 `21_json_support.stl` sample is compiled and executed through Cargo against
 the real `stainless-runtime` and `serde_json`. The external
 `17_external_regex_wrapper.stl` sample is compiled and executed through Cargo
@@ -259,10 +263,11 @@ The first compiler uses the following conservative grammar policy:
   permits the body to modify by-value captures. Default captures are rejected.
   A lambda may be stored only in an exact `function<R(A...)>` or
   `function_mut<R(A...)>` context; every stored capture must be owned. The
-  native-callback slice accepts only an imported
-  `escape = "call"` contract, so every callback finishes before its native call
-  returns. Thread callbacks need a later ownership model; a borrowed capture
-  cannot satisfy stored callable storage's `'static` requirement.
+  native-callback slice accepts imported `escape = "call"` and
+  `escape = "thread"` contracts. A call callback finishes before its native
+  call returns. A thread callback must be `FnOnce`, `Send`, and `'static`, so
+  borrowed captures are rejected and every owned capture is checked for
+  thread transfer.
 - User-defined destructors and `Drop` implementations are not accepted.
   Generated Rust automatically drops locals and fields using Rust scope and
   field-declaration order. Resource-owning native Rust fields retain their
@@ -1303,6 +1308,9 @@ namespace stainless {
 
     struct FormatError : Exception {
     };
+
+    struct ThreadError : Exception {
+    };
 }
 ```
 
@@ -1316,6 +1324,11 @@ downcast to the Rust `E` type.
 `write!` and `writeln!`. Its message is obtained from Rust's
 `std::fmt::Error`. Like every checked exception, it must be caught or listed in
 the enclosing function's `throws` clause.
+
+`stainless::ThreadError` is produced when an owned thread fails during
+`join()`, or when a panic escapes a lexical `thread::scope`. String and
+`String` panic payloads become its message; other Rust panic payloads use a
+stable fallback message.
 
 The `throws` clause is an unordered set of canonical exception-struct types.
 Duplicate entries and entries made redundant by another listed data base are
@@ -1460,8 +1473,10 @@ block rather than accidentally targeting a generated Rust closure.
 Rust drops already-initialized locals when `Result` propagation returns early.
 This supplies the cleanup behavior expected while unwinding an exception,
 without using Rust panic unwinding. Stainless `catch` handles only declared
-Stainless exceptions; Rust panics, bounds-check panics, allocation failure, and
-foreign exceptions are outside this model and cannot be caught.
+Stainless exceptions. Rust panics, bounds-check panics, allocation failure, and
+foreign exceptions are outside this model and cannot normally be caught. The
+one compiler-defined boundary is thread joining: a worker panic becomes a
+checked `stainless::ThreadError`, as described below.
 
 The `throws` set is part of Stainless type checking and interface compatibility
 but not of overload identity or deterministic overload mangling. Two
@@ -1847,13 +1862,60 @@ rather than adding an undeclared Stainless checked exception.
 Thread entry uses Rust's `std::thread::spawn`, reached in Stainless through
 `rust::std::thread::spawn` or an import such as
 `use rust::std::thread;`. The explicit C++ lambda syntax shown in the reference
-examples lowers to a Rust closure with explicit capture initialization. The
-currently implemented external-callback contract is non-escaping and does not
-yet expose `thread::spawn`. When `escape = "thread"` is added, the Stainless
-checker must enforce the closure's `Send`, return-value `Send`, and `'static`
-capture requirements before generation, and `rustc` must check the same bounds
-again. A borrowed `T&` therefore cannot be captured by a spawned thread; an
-owned value must be moved or a `shared_ptr` copied into the closure.
+examples lowers to a Rust closure with explicit capture initialization.
+
+An unscoped spawn requires an owned `FnOnce` callback. Every capture and return
+value must be `Send`, and all captures must be `'static`: a borrowed capture is
+rejected, a unique value uses an initializer capture with `move`, and a
+`shared_ptr<T>` copy capture clones its `Arc` handle. Dropping an unjoined
+handle detaches the Rust thread. `join()` consumes the move-only handle and
+throws checked `stainless::ThreadError` if the worker panicked:
+
+```cpp
+auto worker = thread::spawn([state]() {
+    run_worker(state);
+});
+worker.join(); // must be caught or declared in throws
+```
+
+With `auto`, the initial `spawn` form contextualizes the callback as
+`void()`. A result-producing callback uses an explicit handle target so its
+return type remains deterministic:
+
+```cpp
+thread::JoinHandle<i32> worker = thread::spawn([]() {
+    return 42;
+});
+i32 result = worker.join();
+```
+
+Rust's lexical `thread::scope` permits ordinary borrowed values, including
+plain `mutex<T>` and `condition`, without `shared_ptr`. The outer scope callback
+borrows them normally. Its `Scope.spawn` callbacks may copy-capture those
+shared references because their lifetimes cannot escape the scope:
+
+```cpp
+const mutex<State> state = mutex<State>(State{false, 0});
+const condition changed;
+
+thread::scope([&state, &changed](const thread::Scope& scope) {
+    scope.spawn([state, changed]() {
+        auto guard = state.lock();
+        guard.ready = true;
+        changed.notify_one();
+    });
+});
+```
+
+All scoped workers are joined before `thread::scope` returns. A scoped handle
+may be joined explicitly, but it cannot be returned, stored in a struct, or
+otherwise escape its lexical callback. Any worker panic not already joined is
+caught at the scope boundary and converted to `stainless::ThreadError`.
+Thread and scoped-thread bodies are currently non-throwing Stainless callbacks;
+they may catch checked exceptions internally. Generated Rust retains the
+corresponding `Send`, `'static`, and lifetime constraints so `rustc` checks the
+compiler's decision again. External binding manifests may likewise use
+`escape = "thread"`; their generated callback bounds include `Send + 'static`.
 
 #### Namespace-scope variables
 
@@ -2232,10 +2294,11 @@ return = "i32"
 ```
 
 `kind` is `fn`, `fn_mut`, `fn_once`, or `fn_ptr`, corresponding to Rust
-`Fn`, `FnMut`, `FnOnce`, or `fn(...) -> ...`. The implemented
-`escape = "call"` contract guarantees that the Rust target does not retain the
-callback after returning. `static` and `thread` are reserved manifest values
-but rejected until escaping native-callback wrapper interop is implemented.
+`Fn`, `FnMut`, `FnOnce`, or `fn(...) -> ...`. The `escape = "call"` contract
+guarantees that the Rust target does not retain the callback after returning.
+The `escape = "thread"` contract requires `fn_once` and generates
+`Send + 'static` Rust bounds after Stainless verifies the owned captures.
+General `escape = "static"` storage remains reserved and rejected.
 
 The callback expression is contextually typed by that exact manifest
 signature. It may be a uniquely resolved exact, non-throwing Stainless
@@ -2305,8 +2368,8 @@ verifies that Cargo rejects the stale binding.
 The implemented version-1 loader is deliberately smaller than the eventual
 schema. It accepts non-generic opaque external types, associated functions, and
 inherent methods with concrete signatures composed of primitives, compiler
-supported containers, declared opaque types, values, input borrows, and
-non-escaping callback parameters.
+supported containers, declared opaque types, values, input borrows, and call-
+or thread-scoped callback parameters.
 `[[function]]` introduces a Stainless associated function on its declared
 owner; its Rust target may be either a safe free function or a safe associated
 function inside the named dependency.
@@ -2533,6 +2596,9 @@ The initial `stainless_compiler::resolution` pass now provides:
   immutable shared pointee access; `downgrade`/`lock`; synchronized atomic
   `__load`/`__store`/`__swap`; and diagnostics for invalid copying, default
   construction, pointer-reference declarations, and move-only struct storage;
+- compiler-known `mutex<T>`/`condition` synchronization, inferred scoped lock
+  guards, owned and lexical Rust thread spawning, move-only join handles,
+  structural `Send`/`Sync` capture checks, and checked `ThreadError` joins;
 - exception-struct hierarchy validation, normalized checked `throws` sets,
   mandatory catch-or-declare checking, ordered base/derived handlers, and
   propagation through calls and constructor initialization;
@@ -2548,7 +2614,8 @@ The initial `stainless_compiler::resolution` pass now provides:
   `rust::regex::Regex` and `rust::regex::Error`;
 - contextual native callbacks with exact signatures, non-throwing named
   function targets, inferred initializer-capture types, mutable by-value
-  captures, and `Fn`/`FnMut`/`FnOnce`/`fn` invocation contracts;
+  captures, `Fn`/`FnMut`/`FnOnce`/`fn` invocation contracts, and
+  `escape = "thread"` ownership bounds;
 - owning stored callables with exact signature checking, shared `function`
   copies, move-only `function_mut`, owned captures, mutable invocation, and
   non-throwing named-function conversion;
@@ -2805,10 +2872,11 @@ recorded inline so implemented syntax is not confused with planned work:
 5. **In progress:** the initial `Vec`, `String`, and JSON metadata is connected through
    resolution and code generation. The versioned package binding manifest is
    parsed and merged with compiler built-ins; deterministic wrappers for its
-   `regex::Regex::new` and `Regex::is_match` entries and non-escaping callback
+   `regex::Regex::new` and `Regex::is_match` entries and call/thread callback
    entries are generated. Cargo rejects a deliberately stale target and checks
-   the emitted `Fn`, `FnMut`, `FnOnce`, and function-pointer signatures. Next,
-   validate the selected dependency and feature set through Cargo metadata.
+   the emitted `Fn`, `FnMut`, `FnOnce`, function-pointer, and
+   `Send + 'static` signatures. Next, validate the selected dependency and
+   feature set through Cargo metadata.
 6. **In progress:** structured Rust emission, formatting, and representative
    generated-file compile/behavior tests are implemented, including a Cargo
    execution test against the real JSON runtime. Source-mapping Rust/Cargo

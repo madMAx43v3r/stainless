@@ -73,6 +73,7 @@ impl Emitter {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn native_wrapper(wrapper: &hir::NativeWrapper) -> Result<TokenStream, String> {
         let name = identifier(&wrapper.rust_name)?;
         let mut parameter_declarations = Vec::new();
@@ -94,6 +95,7 @@ impl Emitter {
             let parameter_type = match &parameter.ty {
                 hir::Type::Callback {
                     kind,
+                    escape,
                     parameters,
                     return_type,
                 } => {
@@ -124,9 +126,11 @@ impl Emitter {
                             }
                         };
                         generic_parameters.push(quote!(#generic));
+                        let thread_bounds = (*escape == crate::interop::CallbackEscape::Thread)
+                            .then(|| quote!(+ ::core::marker::Send + 'static));
                         callback_bounds.push(quote!(
                             #generic: #trait_path(#(#callback_parameters),*)
-                                -> #callback_return
+                                -> #callback_return #thread_bounds
                         ));
                         quote!(#generic)
                     }
@@ -919,6 +923,87 @@ impl Emitter {
                     Ok(quote!((#condition).notify_one()))
                 }
             }
+            hir::Expression::ThreadSpawn(callback) => {
+                let callback = self.expression(callback)?;
+                Ok(quote!(::std::thread::spawn(#callback)))
+            }
+            hir::Expression::ThreadJoin(handle) => {
+                let handle = self.expression(handle)?;
+                let panic = self.temporary("thread_panic")?;
+                let message = self.temporary("thread_panic_message")?;
+                Ok(quote!(match (#handle).join() {
+                    Ok(value) => Ok(value),
+                    Err(#panic) => {
+                        let #message = if let Some(text) =
+                            (#panic).downcast_ref::<::std::string::String>()
+                        {
+                            ::core::clone::Clone::clone(text)
+                        } else if let Some(text) =
+                            (#panic).downcast_ref::<&'static str>()
+                        {
+                            ::std::string::String::from(*text)
+                        } else {
+                            ::std::string::String::from(
+                                "spawned Rust thread panicked with a non-string payload"
+                            )
+                        };
+                        Err(Box::new(
+                            crate::__stainless_namespace_stainless::ThreadError {
+                                __stainless_base_Exception:
+                                    crate::__stainless_namespace_stainless::Exception {
+                                        message: #message,
+                                    },
+                            },
+                        ) as crate::__StainlessExceptionBox)
+                    }
+                }))
+            }
+            hir::Expression::ThreadScope(callback) => {
+                let callback = self.expression(callback)?;
+                let panic = self.temporary("scoped_thread_panic")?;
+                let message = self.temporary("scoped_thread_panic_message")?;
+                Ok(quote!(match ::std::panic::catch_unwind(
+                    ::std::panic::AssertUnwindSafe(|| ::std::thread::scope(#callback))
+                ) {
+                    Ok(value) => Ok(value),
+                    Err(#panic) => {
+                        let #message = if let Some(text) =
+                            (#panic).downcast_ref::<::std::string::String>()
+                        {
+                            ::core::clone::Clone::clone(text)
+                        } else if let Some(text) =
+                            (#panic).downcast_ref::<&'static str>()
+                        {
+                            ::std::string::String::from(*text)
+                        } else {
+                            ::std::string::String::from(
+                                "scoped Rust thread panicked with a non-string payload"
+                            )
+                        };
+                        Err(Box::new(
+                            crate::__stainless_namespace_stainless::ThreadError {
+                                __stainless_base_Exception:
+                                    crate::__stainless_namespace_stainless::Exception {
+                                        message: #message,
+                                    },
+                            },
+                        ) as crate::__StainlessExceptionBox)
+                    }
+                }))
+            }
+            hir::Expression::ScopedThreadSpawn { scope, callback } => {
+                let scope = self.expression(scope)?;
+                let callback = self.expression(callback)?;
+                Ok(quote!((#scope).spawn(#callback)))
+            }
+            hir::Expression::ScopedThreadJoin(handle) => {
+                let handle = self.expression(handle)?;
+                let panic = self.temporary("joined_scoped_thread_panic")?;
+                Ok(quote!(match (#handle).join() {
+                    Ok(value) => value,
+                    Err(#panic) => ::std::panic::resume_unwind(#panic),
+                }))
+            }
             hir::Expression::UnwrapRustResult {
                 expression,
                 exception,
@@ -1291,6 +1376,15 @@ fn type_tokens(ty: &hir::Type, lifetime: Option<&syn::Lifetime>) -> Result<Token
             Ok(quote!(::std::sync::MutexGuard<'_, #target>))
         }
         hir::Type::Condition => Ok(quote!(::std::sync::Condvar)),
+        hir::Type::ThreadHandle(target) => {
+            let target = type_tokens(target, None)?;
+            Ok(quote!(::std::thread::JoinHandle<#target>))
+        }
+        hir::Type::ThreadScope => Ok(quote!(::std::thread::Scope<'_, '_>)),
+        hir::Type::ScopedThreadHandle(target) => {
+            let target = type_tokens(target, None)?;
+            Ok(quote!(::std::thread::ScopedJoinHandle<'_, #target>))
+        }
         hir::Type::User { rust_path } => {
             let path = path(rust_path)?;
             Ok(quote!(#path))

@@ -38,7 +38,7 @@ pub(crate) fn lower(
                 if namespace == "stainless"
                     && matches!(
                         name.as_str(),
-                        "Exception" | "RustError" | "FormatError" | "JsonError"
+                        "Exception" | "RustError" | "FormatError" | "JsonError" | "ThreadError"
                     )
         )
     }) {
@@ -1795,6 +1795,66 @@ impl Lowerer<'_> {
                     all: *all,
                 })
             }
+            CallTarget::Intrinsic(Intrinsic::ThreadSpawn) => Some(hir::Expression::ThreadSpawn(
+                Box::new(self.lower_expression(arguments.first()?, ExpressionMode::Value)?),
+            )),
+            CallTarget::Intrinsic(Intrinsic::ThreadJoin) => {
+                let Some(ast::Expression {
+                    kind: ExpressionKind::Field { receiver, .. },
+                    ..
+                }) = callee
+                else {
+                    self.push(
+                        "HIR011",
+                        "thread join has no receiver".to_owned(),
+                        call.span,
+                    );
+                    return None;
+                };
+                Some(hir::Expression::ThreadJoin(Box::new(
+                    self.lower_expression(receiver, ExpressionMode::Value)?,
+                )))
+            }
+            CallTarget::Intrinsic(Intrinsic::ThreadScope) => Some(hir::Expression::ThreadScope(
+                Box::new(self.lower_expression(arguments.first()?, ExpressionMode::Value)?),
+            )),
+            CallTarget::Intrinsic(Intrinsic::ScopedThreadSpawn) => {
+                let Some(ast::Expression {
+                    kind: ExpressionKind::Field { receiver, .. },
+                    ..
+                }) = callee
+                else {
+                    self.push(
+                        "HIR011",
+                        "scoped thread spawn has no scope receiver".to_owned(),
+                        call.span,
+                    );
+                    return None;
+                };
+                Some(hir::Expression::ScopedThreadSpawn {
+                    scope: Box::new(self.lower_expression(receiver, ExpressionMode::Reference)?),
+                    callback: Box::new(
+                        self.lower_expression(arguments.first()?, ExpressionMode::Value)?,
+                    ),
+                })
+            }
+            CallTarget::Intrinsic(Intrinsic::ScopedThreadJoin) => {
+                let Some(ast::Expression {
+                    kind: ExpressionKind::Field { receiver, .. },
+                    ..
+                }) = callee
+                else {
+                    self.push(
+                        "HIR011",
+                        "scoped thread join has no receiver".to_owned(),
+                        call.span,
+                    );
+                    return None;
+                };
+                Some(hir::Expression::ScopedThreadJoin(Box::new(
+                    self.lower_expression(receiver, ExpressionMode::Value)?,
+                )))
+            }
             CallTarget::Intrinsic(Intrinsic::StoredFunctionCall { .. }) => {
                 let callee = callee?;
                 let TypeRef::Function(function) = self
@@ -2181,6 +2241,7 @@ impl Lowerer<'_> {
             }
             TypeRef::Callback(callback) => hir::Type::Callback {
                 kind: callback.kind,
+                escape: callback.escape,
                 parameters: callback
                     .parameters
                     .iter()
@@ -2206,6 +2267,13 @@ impl Lowerer<'_> {
                 hir::Type::MutexGuard(Box::new(self.lower_type(target, span)?))
             }
             TypeRef::Condition => hir::Type::Condition,
+            TypeRef::ThreadHandle(target) => {
+                hir::Type::ThreadHandle(Box::new(self.lower_type(target, span)?))
+            }
+            TypeRef::ThreadScope => hir::Type::ThreadScope,
+            TypeRef::ScopedThreadHandle(target) => {
+                hir::Type::ScopedThreadHandle(Box::new(self.lower_type(target, span)?))
+            }
             TypeRef::Struct { path } => hir::Type::User {
                 rust_path: user_type_path(path),
             },

@@ -75,3 +75,18 @@ parameters = [
     } },
 ]
 return = "i32"
+
+[[method]]
+receiver_type = "rust::callback_fixture::Processor"
+rust_name = "spawn"
+stainless_name = "spawn"
+receiver = "value"
+parameters = [
+    { callback = {
+        kind = "fn_once",
+        parameters = ["i32"],
+        return = "i32",
+        escape = "thread",
+    } },
+]
+return = "i32"

@@ -56,15 +56,15 @@ void worker(shared_ptr<Config> local) {
     i32 version = local.version;
 }
 
-bool start_worker() {
+bool start_worker() throws stainless::ThreadError {
     // Copying a shared_ptr creates the separate Arc handle captured by the
-    // thread. The thread handle itself uses Rust's join/Result API.
+    // thread. join() maps a Rust panic to checked ThreadError.
     shared_ptr<Config> local = make_shared<Config>(startup_config);
     auto background = thread::spawn([local = move(local)]() {
         worker(move(local));
     });
-    auto joined = move(background).join();
-    return joined.is_ok();
+    background.join();
+    return true;
 }
 
 } // namespace samples

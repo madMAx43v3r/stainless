@@ -337,6 +337,16 @@ pub enum Intrinsic {
         /// Whether every waiter is notified.
         all: bool,
     },
+    /// Launch one owned `FnOnce() -> void` callback on a Rust thread.
+    ThreadSpawn,
+    /// Consume a thread handle and map a Rust panic to checked `ThreadError`.
+    ThreadJoin,
+    /// Run one lexical Rust thread scope and convert escaping panics to `ThreadError`.
+    ThreadScope,
+    /// Spawn a callback that may borrow from its enclosing thread scope.
+    ScopedThreadSpawn,
+    /// Join a scoped handle, resuming a panic for the outer scope to convert.
+    ScopedThreadJoin,
     /// Invoke a non-null stored `function` or `function_mut` value.
     StoredFunctionCall {
         /// Whether invocation requires mutable access to the callable.

@@ -75,6 +75,15 @@ fn encode_type(ty: &TypeRef, output: &mut String) {
             encode_type(target, output);
         }
         TypeRef::Condition => output.push_str("condition"),
+        TypeRef::ThreadHandle(target) => {
+            output.push_str("thread_handle_");
+            encode_type(target, output);
+        }
+        TypeRef::ThreadScope => output.push_str("thread_scope"),
+        TypeRef::ScopedThreadHandle(target) => {
+            output.push_str("scoped_thread_handle_");
+            encode_type(target, output);
+        }
         TypeRef::Reference { target, .. } => encode_type(target, output),
         TypeRef::Parameter(name) => {
             output.push_str("t_");

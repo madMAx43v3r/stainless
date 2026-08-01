@@ -909,6 +909,42 @@ impl Analyzer<'_> {
                 }
                 None
             }
+            CallTarget::Intrinsic(Intrinsic::ThreadSpawn | Intrinsic::ThreadScope) => {
+                if let Some(callback) = arguments.first() {
+                    let mut loans = Vec::new();
+                    self.callback_argument(callback, &mut loans);
+                    for loan in loans.into_iter().rev() {
+                        self.state.release(loan);
+                    }
+                }
+                None
+            }
+            CallTarget::Intrinsic(
+                Intrinsic::ThreadJoin
+                | Intrinsic::ScopedThreadJoin
+                | Intrinsic::UnwrapRustResult { .. },
+            ) => {
+                let receiver = call_receiver(expression)?;
+                if let Some(id) = named_binding(receiver, &self.state) {
+                    self.mark_moved(id, expression.span);
+                } else {
+                    self.expression(receiver, Usage::Read);
+                }
+                None
+            }
+            CallTarget::Intrinsic(Intrinsic::ScopedThreadSpawn) => {
+                if let Some(receiver) = call_receiver(expression) {
+                    self.expression(receiver, Usage::BorrowShared);
+                }
+                if let Some(callback) = arguments.first() {
+                    let mut loans = Vec::new();
+                    self.callback_argument(callback, &mut loans);
+                    for loan in loans.into_iter().rev() {
+                        self.state.release(loan);
+                    }
+                }
+                None
+            }
             CallTarget::Intrinsic(
                 Intrinsic::DowngradeShared { .. } | Intrinsic::LockWeak { .. },
             ) => {
@@ -947,15 +983,6 @@ impl Analyzer<'_> {
                     return None;
                 };
                 self.call_arguments(arguments, function.parameters.iter());
-                None
-            }
-            CallTarget::Intrinsic(Intrinsic::UnwrapRustResult { .. }) => {
-                let receiver = call_receiver(expression)?;
-                if let Some(id) = named_binding(receiver, &self.state) {
-                    self.mark_moved(id, expression.span);
-                } else {
-                    self.expression(receiver, Usage::Read);
-                }
                 None
             }
             CallTarget::Intrinsic(

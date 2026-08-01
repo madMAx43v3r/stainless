@@ -293,9 +293,10 @@ fn parse_callback_type(
 ) -> Result<TypeRef, ManifestError> {
     let escape = match callback.escape {
         ManifestCallbackEscape::Call => CallbackEscape::Call,
-        ManifestCallbackEscape::Static | ManifestCallbackEscape::Thread => {
+        ManifestCallbackEscape::Thread => CallbackEscape::Thread,
+        ManifestCallbackEscape::Static => {
             return Err(ManifestError::message(
-                "only non-escaping callbacks with `escape = \"call\"` are implemented",
+                "general callbacks with `escape = \"static\"` are not implemented",
             ));
         }
     };

@@ -153,6 +153,8 @@ pub enum Type {
     Callback {
         /// Required Rust closure trait or function-pointer representation.
         kind: CallbackKind,
+        /// Callback lifetime/thread retention contract.
+        escape: crate::interop::CallbackEscape,
         /// Exact callback parameter types.
         parameters: Vec<Type>,
         /// Exact value-semantic callback return type.
@@ -180,6 +182,12 @@ pub enum Type {
     MutexGuard(Box<Type>),
     /// A Rust condition variable.
     Condition,
+    /// A move-only Rust thread handle.
+    ThreadHandle(Box<Type>),
+    /// A Rust lexical thread scope.
+    ThreadScope,
+    /// A move-only handle tied to a Rust lexical thread scope.
+    ScopedThreadHandle(Box<Type>),
     /// A user-defined Stainless struct.
     User {
         /// Fully qualified generated Rust path.
@@ -537,6 +545,21 @@ pub enum Expression {
         /// Whether every waiter is notified.
         all: bool,
     },
+    /// Spawn one owned callback on an operating-system thread.
+    ThreadSpawn(Box<Expression>),
+    /// Consume and join a thread, returning a checked-exception-shaped Result.
+    ThreadJoin(Box<Expression>),
+    /// Execute a Rust lexical thread scope with checked panic conversion.
+    ThreadScope(Box<Expression>),
+    /// Spawn one lifetime-confined callback through a scope.
+    ScopedThreadSpawn {
+        /// Borrowed scope receiver.
+        scope: Box<Expression>,
+        /// Callback that may borrow from the scope environment.
+        callback: Box<Expression>,
+    },
+    /// Join a scoped worker, forwarding its panic to the outer scope converter.
+    ScopedThreadJoin(Box<Expression>),
     /// Consume a native Rust Result, converting `Err` to checked `RustError`.
     UnwrapRustResult {
         /// Native `Result<T, E>` expression.

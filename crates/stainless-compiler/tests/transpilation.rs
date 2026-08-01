@@ -638,6 +638,59 @@ fn main() {{
 }
 
 #[test]
+fn stainless_threads_spawn_join_borrow_scoped_state_and_convert_panics() {
+    let result = transpile(include_str!("../../../docs/ref/24_threads.stl"));
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let mut rust = result.rust.expect("thread sample should emit Rust");
+    assert!(rust.contains("::std::thread::spawn"), "{rust}");
+    assert!(rust.contains("::std::thread::scope"), "{rust}");
+    assert!(rust.contains("ThreadError"), "{rust}");
+
+    let function = |name: &str| {
+        result
+            .analysis
+            .semantics
+            .functions
+            .iter()
+            .find(|function| function.path == [name])
+            .unwrap_or_else(|| panic!("missing function {name}"))
+            .mangled_name
+            .clone()
+    };
+    let owned = function("owned_thread");
+    let typed = function("typed_thread_result");
+    let scoped = function("scoped_thread");
+    let catches = function("catches_thread_panic");
+    write!(
+        rust,
+        r#"
+fn main() {{
+    assert_eq!({owned}().expect("owned thread failed"), 42);
+    assert_eq!({typed}().expect("typed thread failed"), 7);
+    assert_eq!({scoped}().expect("scoped thread failed"), 99);
+    assert!({catches}());
+}}
+"#
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("stainless-threads", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run {}: {error}", binary.display()));
+    assert!(
+        output.status.success(),
+        "generated thread binary failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    remove_temporary_parent(&binary);
+}
+
+#[test]
 fn constructors_initialize_bases_fields_and_synthesized_defaults() {
     let source = r#"use rust::{String, Vec};
 
@@ -1198,7 +1251,7 @@ fn main() {{
 }
 
 #[test]
-fn cargo_validates_generated_non_escaping_callback_wrappers() {
+fn cargo_validates_generated_callback_wrappers_including_thread_escape() {
     let source = include_str!("../../../docs/ref/18_external_callbacks.stl");
     let external = load_bindings_manifest(
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1222,7 +1275,7 @@ fn cargo_validates_generated_non_escaping_callback_wrappers() {
         .mangled_name
         .clone();
     let hir = result.hir.as_ref().expect("callback wrapper HIR");
-    assert_eq!(hir.native_wrappers.len(), 5);
+    assert_eq!(hir.native_wrappers.len(), 6);
     let mut rust = result.rust.expect("callback wrappers should emit Rust");
     write!(
         rust,
@@ -1230,7 +1283,7 @@ fn cargo_validates_generated_non_escaping_callback_wrappers() {
 fn main() {{
     assert_eq!(
         __stainless_namespace_samples::{external_callbacks}(),
-        846526,
+        8465267,
     );
 }}
 "
@@ -1585,6 +1638,15 @@ impl Processor {
 
     pub fn apply_fn_ptr(&self, input: i32, callback: fn(i32) -> i32) -> i32 {
         self.value + callback(input)
+    }
+
+    pub fn spawn<F>(self, callback: F) -> i32
+    where
+        F: FnOnce(i32) -> i32 + Send + 'static,
+    {
+        std::thread::spawn(move || callback(self.value))
+            .join()
+            .unwrap()
     }
 }
 ",

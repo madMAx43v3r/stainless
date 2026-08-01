@@ -1,0 +1,92 @@
+// Owned operating-system threads using Rust's standard thread API.
+
+use rust::std::thread;
+
+struct ThreadState {
+    bool ready;
+    i32 value;
+};
+
+void publish_from_thread(
+    shared_ptr<mutex<ThreadState>> state,
+    shared_ptr<condition> changed,
+    i32 value) {
+    auto guard = state.lock();
+    guard.value = value;
+    guard.ready = true;
+    changed.notify_all();
+}
+
+i32 owned_thread() throws stainless::ThreadError {
+    shared_ptr<mutex<ThreadState>> state =
+        make_shared<mutex<ThreadState>>(ThreadState{false, 0});
+    shared_ptr<condition> changed = make_shared<condition>();
+
+    // Copy captures clone these shared handles into the owned, 'static
+    // FnOnce callback required by Rust's thread::spawn.
+    auto background = thread::spawn([state, changed]() {
+        publish_from_thread(state, changed, 42);
+    });
+
+    auto guard = state.lock();
+    for (; !guard.ready;) {
+        changed.wait(guard);
+    }
+    i32 result = guard.value;
+
+    // join() consumes the handle. A Rust panic becomes the checked
+    // stainless::ThreadError declared above.
+    background.join();
+    return result;
+}
+
+i32 typed_thread_result() throws stainless::ThreadError {
+    // An explicit handle result type provides the contextual lambda return
+    // type. With `auto`, the initial spawn overload returns void.
+    thread::JoinHandle<i32> worker = thread::spawn([]() {
+        return 7;
+    });
+    return worker.join();
+}
+
+i32 scoped_thread() throws stainless::ThreadError {
+    // Scoped workers may borrow plain synchronization values. Const applies
+    // to the mutex/condition handles, not to data protected by the mutex.
+    const mutex<ThreadState> state =
+        mutex<ThreadState>(ThreadState{false, 0});
+    const condition changed;
+
+    thread::scope([&state, &changed](const thread::Scope& scope) {
+        // `state` and `changed` are shared references in this callback. The
+        // scoped worker copy-captures those references; they cannot escape the
+        // enclosing scope.
+        scope.spawn([state, changed]() {
+            auto guard = state.lock();
+            guard.value = 99;
+            guard.ready = true;
+            changed.notify_one();
+        });
+
+        auto guard = state.lock();
+        for (; !guard.ready;) {
+            changed.wait(guard);
+        }
+    });
+
+    auto guard = state.lock();
+    return guard.value;
+}
+
+bool catches_thread_panic() {
+    try {
+        i32 maximum = 2147483647;
+        auto worker = thread::spawn([maximum]() mutable {
+            // Generated debug Rust panics on this overflow.
+            maximum += 1;
+        });
+        worker.join();
+        return false;
+    } catch (const stainless::ThreadError& error) {
+        return !error.message.is_empty();
+    }
+}

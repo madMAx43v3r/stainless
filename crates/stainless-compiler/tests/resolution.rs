@@ -19,12 +19,73 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
         include_str!("../../../docs/ref/20_formatting_macros.stl"),
         include_str!("../../../docs/ref/22_pointer_family.stl"),
         include_str!("../../../docs/ref/23_mutex_and_condition.stl"),
+        include_str!("../../../docs/ref/24_threads.stl"),
     ] {
         let analysis = analyze(source);
 
         assert!(
             analysis.diagnostics.is_empty(),
             "{:?}",
+            analysis.diagnostics
+        );
+    }
+}
+
+#[test]
+fn resolves_owned_and_scoped_threads_with_checked_join_errors() {
+    let analysis = analyze(include_str!("../../../docs/ref/24_threads.stl"));
+
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+    for expected in ["spawn", "join", "scope", "scoped_spawn"] {
+        assert!(analysis.semantics.calls.iter().any(|call| matches!(
+            (&call.target, expected),
+            (CallTarget::Intrinsic(Intrinsic::ThreadSpawn), "spawn")
+                | (CallTarget::Intrinsic(Intrinsic::ThreadJoin), "join")
+                | (CallTarget::Intrinsic(Intrinsic::ThreadScope), "scope")
+                | (
+                    CallTarget::Intrinsic(Intrinsic::ScopedThreadSpawn),
+                    "scoped_spawn"
+                )
+        )));
+    }
+}
+
+#[test]
+fn threads_reject_borrowed_unscoped_and_non_send_captures() {
+    let analysis = analyze(
+        r"use rust::std::thread;
+
+void invalid_threads() {
+    mutex<i32> state = mutex<i32>(0);
+    auto borrowed = thread::spawn([&state]() {
+    });
+
+    function<void()> callback = []() {
+    };
+    auto non_send = thread::spawn([callback]() {
+        callback();
+    });
+
+    auto unhandled = thread::spawn([]() {
+    });
+    unhandled.join();
+}
+",
+    );
+    let codes = analysis
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+
+    for expected in ["RES075", "RES115"] {
+        assert!(
+            codes.contains(&expected),
+            "missing {expected}: {:#?}",
             analysis.diagnostics
         );
     }
@@ -503,7 +564,7 @@ fn resolves_external_callback_fixture_with_its_manifest() {
         "{:?}",
         analysis.diagnostics
     );
-    assert_eq!(analysis.semantics.callbacks.len(), 6);
+    assert_eq!(analysis.semantics.callbacks.len(), 7);
 }
 
 #[test]

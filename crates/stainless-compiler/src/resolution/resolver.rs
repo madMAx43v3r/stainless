@@ -185,6 +185,17 @@ impl Resolver<'_> {
             span: Span::default(),
         });
         self.struct_by_path.insert(json_error_path, json_error);
+
+        let thread_error = StructId(self.model.structs.len());
+        let thread_error_path = vec!["stainless".to_owned(), "ThreadError".to_owned()];
+        self.model.structs.push(StructSymbol {
+            id: thread_error,
+            path: thread_error_path.clone(),
+            base: Some(root),
+            fields: Vec::new(),
+            span: Span::default(),
+        });
+        self.struct_by_path.insert(thread_error_path, thread_error);
     }
 
     fn collect_struct_names(&mut self, items: &[Item], namespace: &mut Vec<String>) {
@@ -1693,6 +1704,17 @@ impl Resolver<'_> {
             .expect("installing exception builtins creates JsonError")
     }
 
+    fn thread_error_struct(&mut self) -> StructId {
+        if self.exception_root().is_none() {
+            self.install_exception_builtins();
+        }
+        let path = vec!["stainless".to_owned(), "ThreadError".to_owned()];
+        self.struct_by_path
+            .get(&path)
+            .copied()
+            .expect("installing exception builtins creates ThreadError")
+    }
+
     fn native_result_exception(
         &mut self,
         error_type: &TypeRef,
@@ -2383,15 +2405,24 @@ impl Resolver<'_> {
             );
             return error_info();
         };
-        let (callback_parameters, callback_return, stored_kind) = match expected {
+        let (callback_parameters, callback_return, stored_kind, callback_escape) = match expected {
             TypeRef::Callback(callback) => {
-                if callback.escape != crate::interop::CallbackEscape::Call {
+                if callback.escape == crate::interop::CallbackEscape::Static {
                     self.push(
                         "RES082",
-                        "only non-escaping callback lambdas are implemented".to_owned(),
+                        "general `'static` callback retention is not implemented".to_owned(),
                         span,
                     );
                     return error_info();
+                }
+                if callback.escape == crate::interop::CallbackEscape::Thread
+                    && callback.kind != CallbackKind::FnOnce
+                {
+                    self.push(
+                        "RES115",
+                        "a spawned thread requires an owned `FnOnce` callback".to_owned(),
+                        span,
+                    );
                 }
                 if callback.kind == CallbackKind::FunctionPointer && !captures.is_empty() {
                     self.push(
@@ -2401,7 +2432,12 @@ impl Resolver<'_> {
                         span,
                     );
                 }
-                (&callback.parameters, callback.return_type.as_ref(), None)
+                (
+                    &callback.parameters,
+                    callback.return_type.as_ref(),
+                    None,
+                    Some(callback.escape),
+                )
             }
             TypeRef::Function(function) => {
                 if function.kind == StoredFunctionKind::Shared && is_mutable {
@@ -2416,6 +2452,7 @@ impl Resolver<'_> {
                     &function.parameters,
                     function.return_type.as_ref(),
                     Some(function.kind),
+                    None,
                 )
             }
             _ => {
@@ -2456,16 +2493,22 @@ impl Resolver<'_> {
                         );
                         continue;
                     };
-                    if outer_variable.ty.is_reference() {
+                    let scoped_shared_reference = callback_escape
+                        == Some(crate::interop::CallbackEscape::Scoped)
+                        && matches!(
+                            &outer_variable.ty,
+                            TypeRef::Reference { mutable: false, .. }
+                        );
+                    if outer_variable.ty.is_reference() && !scoped_shared_reference {
                         self.push(
                             "RES088",
-                            "capturing a reference binding is deferred; capture its owner instead"
+                            "only a scoped thread may copy-capture a shared reference binding"
                                 .to_owned(),
                             capture.span,
                         );
                         continue;
                     }
-                    if !is_copyable(&canonical(&outer_variable.ty)) {
+                    if !scoped_shared_reference && !is_copyable(&canonical(&outer_variable.ty)) {
                         self.push(
                             "RES089",
                             format!(
@@ -2486,7 +2529,14 @@ impl Resolver<'_> {
                     ))
                 }
                 LambdaCaptureKind::Borrow => {
-                    if stored_kind.is_some() {
+                    if callback_escape == Some(crate::interop::CallbackEscape::Thread) {
+                        self.push(
+                            "RES115",
+                            "an unscoped thread cannot borrow a capture; copy it or transfer ownership with an initializer capture"
+                                .to_owned(),
+                            capture.span,
+                        );
+                    } else if stored_kind.is_some() {
                         self.push(
                             "RES094",
                             "a stored function must own every capture; reference captures are not allowed"
@@ -2570,6 +2620,42 @@ impl Resolver<'_> {
             let Some((captured_ty, mode, inner_variable)) = resolved else {
                 continue;
             };
+            if callback_escape == Some(crate::interop::CallbackEscape::Thread)
+                && !matches!(mode, LambdaCaptureMode::Borrow { .. })
+                && !self.thread_sendable(&captured_ty)
+            {
+                self.push(
+                    "RES115",
+                    format!(
+                        "thread capture `{}` has non-`Send` type `{}`",
+                        capture.name,
+                        display_type(&captured_ty)
+                    ),
+                    capture.span,
+                );
+            }
+            if callback_escape == Some(crate::interop::CallbackEscape::Scoped) {
+                let sendable = match mode {
+                    LambdaCaptureMode::Borrow { mutable: false } => self.thread_sync(&captured_ty),
+                    LambdaCaptureMode::Copy if captured_ty.is_reference() => {
+                        self.thread_sync(canonical_ref(&captured_ty))
+                    }
+                    LambdaCaptureMode::Borrow { mutable: true }
+                    | LambdaCaptureMode::Copy
+                    | LambdaCaptureMode::Initialize => self.thread_sendable(&captured_ty),
+                };
+                if !sendable {
+                    self.push(
+                        "RES116",
+                        format!(
+                            "scoped thread capture `{}` has a non-`Send` representation `{}`",
+                            capture.name,
+                            display_type(&captured_ty)
+                        ),
+                        capture.span,
+                    );
+                }
+            }
             lambda_scope.insert(capture.name.clone(), inner_variable);
             resolved_captures.push(ResolvedLambdaCapture {
                 name: capture.name.clone(),
@@ -2962,6 +3048,24 @@ impl Resolver<'_> {
                 (error_info(), None)
             }
             ExpressionKind::Name(path)
+                if self.is_reserved_rust_path(
+                    &path.segments,
+                    &context.namespace,
+                    &["rust", "std", "thread", "spawn"],
+                ) =>
+            {
+                self.resolve_thread_spawn(arguments, expected, span, context)
+            }
+            ExpressionKind::Name(path)
+                if self.is_reserved_rust_path(
+                    &path.segments,
+                    &context.namespace,
+                    &["rust", "std", "thread", "scope"],
+                ) =>
+            {
+                self.resolve_thread_scope(arguments, span, context)
+            }
+            ExpressionKind::Name(path)
                 if path.segments.len() == 1 && path.segments[0] == "move" =>
             {
                 self.resolve_move(arguments, span, context)
@@ -3259,6 +3363,7 @@ impl Resolver<'_> {
         temporary(ty)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn resolve_method_call(
         &mut self,
         receiver: &Expression,
@@ -3302,6 +3407,27 @@ impl Resolver<'_> {
                 self.resolve_mutex_method(target.as_ref(), name, arguments, span, context)
             }
             TypeRef::Condition => self.resolve_condition_method(name, arguments, span, context),
+            TypeRef::ThreadHandle(target) => self.resolve_thread_handle_method(
+                target.as_ref(),
+                receiver,
+                receiver_info,
+                name,
+                arguments,
+                span,
+                context,
+            ),
+            TypeRef::ThreadScope => {
+                self.resolve_thread_scope_method(name, arguments, span, context)
+            }
+            TypeRef::ScopedThreadHandle(target) => self.resolve_scoped_thread_handle_method(
+                target.as_ref(),
+                receiver,
+                receiver_info,
+                name,
+                arguments,
+                span,
+                context,
+            ),
             TypeRef::Native {
                 path,
                 arguments: type_arguments,
@@ -3512,6 +3638,252 @@ impl Resolver<'_> {
             throws: Vec::new(),
         };
         (temporary(TypeRef::Void), Some(call))
+    }
+
+    fn resolve_thread_spawn(
+        &mut self,
+        arguments: &[Expression],
+        expected: Option<&TypeRef>,
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        let result_type = match expected.map(canonical) {
+            Some(TypeRef::ThreadHandle(target)) => target.as_ref().clone(),
+            _ => TypeRef::Void,
+        };
+        if !self.thread_sendable(&result_type) {
+            self.push(
+                "RES115",
+                format!(
+                    "thread result type `{}` is not `Send`",
+                    display_type(&result_type)
+                ),
+                span,
+            );
+        }
+        let callback_type = TypeRef::callback(
+            CallbackKind::FnOnce,
+            crate::interop::CallbackEscape::Thread,
+            Vec::new(),
+            result_type.clone(),
+        );
+        if arguments.len() != 1 {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES115",
+                format!(
+                    "`thread::spawn` requires one `void()` callback, found {} arguments",
+                    arguments.len()
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+        let actual = self.resolve_expression(&arguments[0], Some(&callback_type), context);
+        self.require_exact(
+            &callback_type,
+            &actual.ty,
+            arguments[0].span,
+            "thread callback",
+        );
+        let return_type = TypeRef::ThreadHandle(Box::new(result_type));
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::ThreadSpawn),
+            return_type: return_type.clone(),
+            throws: Vec::new(),
+        };
+        (temporary(return_type), Some(call))
+    }
+
+    fn resolve_thread_scope(
+        &mut self,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        let callback_type = TypeRef::callback(
+            CallbackKind::FnOnce,
+            crate::interop::CallbackEscape::Call,
+            vec![TypeRef::shared_ref(TypeRef::ThreadScope)],
+            TypeRef::Void,
+        );
+        if arguments.len() != 1 {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES116",
+                format!(
+                    "`thread::scope` requires one scope callback, found {} arguments",
+                    arguments.len()
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+        let actual = self.resolve_expression(&arguments[0], Some(&callback_type), context);
+        self.require_exact(
+            &callback_type,
+            &actual.ty,
+            arguments[0].span,
+            "thread scope callback",
+        );
+        let thread_error = self.thread_error_struct();
+        self.validate_checked_effect(thread_error, span, context);
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::ThreadScope),
+            return_type: TypeRef::Void,
+            throws: vec![thread_error],
+        };
+        (temporary(TypeRef::Void), Some(call))
+    }
+
+    fn resolve_thread_scope_method(
+        &mut self,
+        name: &ast::Path,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        let callback_type = TypeRef::callback(
+            CallbackKind::FnOnce,
+            crate::interop::CallbackEscape::Scoped,
+            Vec::new(),
+            TypeRef::Void,
+        );
+        if name.segments.as_slice() != ["spawn"] || arguments.len() != 1 {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES116",
+                if name.segments.as_slice() == ["spawn"] {
+                    format!(
+                        "`Scope.spawn()` requires one `void()` callback, found {} arguments",
+                        arguments.len()
+                    )
+                } else {
+                    format!("`thread::Scope` has no method `{}`", name.display())
+                },
+                span,
+            );
+            return (error_info(), None);
+        }
+        let actual = self.resolve_expression(&arguments[0], Some(&callback_type), context);
+        self.require_exact(
+            &callback_type,
+            &actual.ty,
+            arguments[0].span,
+            "scoped thread callback",
+        );
+        let return_type = TypeRef::ScopedThreadHandle(Box::new(TypeRef::Void));
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::ScopedThreadSpawn),
+            return_type: return_type.clone(),
+            throws: Vec::new(),
+        };
+        (temporary(return_type), Some(call))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_scoped_thread_handle_method(
+        &mut self,
+        target: &TypeRef,
+        receiver: &Expression,
+        receiver_info: &ExpressionInfo,
+        name: &ast::Path,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        for argument in arguments {
+            self.resolve_expression(argument, None, context);
+        }
+        if name.segments.as_slice() != ["join"] || !arguments.is_empty() {
+            self.push(
+                "RES116",
+                format!(
+                    "scoped thread handle has no matching `{}` method",
+                    name.display()
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+        let owned_name = receiver_info.category == ValueCategory::MutablePlace
+            && !receiver_info.ty.is_reference()
+            && is_named_value_expression(receiver);
+        if receiver_info.category != ValueCategory::Temporary && !owned_name {
+            self.push(
+                "RES116",
+                "scoped `join()` consumes a mutable owned handle".to_owned(),
+                receiver.span,
+            );
+            return (error_info(), None);
+        }
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::ScopedThreadJoin),
+            return_type: target.clone(),
+            throws: Vec::new(),
+        };
+        (info_for_return_type(target.clone()), Some(call))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_thread_handle_method(
+        &mut self,
+        target: &TypeRef,
+        receiver: &Expression,
+        receiver_info: &ExpressionInfo,
+        name: &ast::Path,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        for argument in arguments {
+            self.resolve_expression(argument, None, context);
+        }
+        if name.segments.as_slice() != ["join"] || !arguments.is_empty() {
+            self.push(
+                "RES115",
+                if name.segments.as_slice() == ["join"] {
+                    format!(
+                        "`JoinHandle<T>.join()` requires no arguments, found {}",
+                        arguments.len()
+                    )
+                } else {
+                    format!("`JoinHandle<T>` has no method `{}`", name.display())
+                },
+                span,
+            );
+            return (error_info(), None);
+        }
+        let owned_name = receiver_info.category == ValueCategory::MutablePlace
+            && !receiver_info.ty.is_reference()
+            && is_named_value_expression(receiver);
+        if receiver_info.category != ValueCategory::Temporary && !owned_name {
+            self.push(
+                "RES115",
+                "`JoinHandle<T>.join()` consumes a mutable owned handle".to_owned(),
+                receiver.span,
+            );
+            return (error_info(), None);
+        }
+        let thread_error = self.thread_error_struct();
+        self.validate_checked_effect(thread_error, span, context);
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::ThreadJoin),
+            return_type: target.clone(),
+            throws: vec![thread_error],
+        };
+        (info_for_return_type(target.clone()), Some(call))
     }
 
     fn resolve_atomic_pointer_method(
@@ -5376,7 +5748,81 @@ impl Resolver<'_> {
             }
             TypeKind::Named(named) => {
                 let segments = &named.path.segments;
-                if let Some(kind) = pointer_kind(segments) {
+                if self.is_reserved_rust_path(
+                    segments,
+                    namespace,
+                    &["rust", "std", "thread", "JoinHandle"],
+                ) {
+                    let arguments = named
+                        .arguments
+                        .iter()
+                        .map(|argument| self.resolve_type(argument, namespace, false))
+                        .collect::<Vec<_>>();
+                    if arguments.len() != 1 {
+                        self.push(
+                            "RES115",
+                            format!(
+                                "`JoinHandle` expects one result type argument, found {}",
+                                arguments.len()
+                            ),
+                            ty.span,
+                        );
+                        TypeRef::Error
+                    } else if arguments[0].is_reference() || arguments[0].contains_reference() {
+                        self.push(
+                            "RES115",
+                            "a thread result cannot contain a reference".to_owned(),
+                            ty.span,
+                        );
+                        TypeRef::Error
+                    } else {
+                        TypeRef::ThreadHandle(Box::new(arguments[0].clone()))
+                    }
+                } else if self.is_reserved_rust_path(
+                    segments,
+                    namespace,
+                    &["rust", "std", "thread", "Scope"],
+                ) {
+                    if !named.arguments.is_empty() {
+                        self.push(
+                            "RES116",
+                            "`thread::Scope` does not accept source-level type arguments"
+                                .to_owned(),
+                            ty.span,
+                        );
+                    }
+                    TypeRef::ThreadScope
+                } else if self.is_reserved_rust_path(
+                    segments,
+                    namespace,
+                    &["rust", "std", "thread", "ScopedJoinHandle"],
+                ) {
+                    let arguments = named
+                        .arguments
+                        .iter()
+                        .map(|argument| self.resolve_type(argument, namespace, false))
+                        .collect::<Vec<_>>();
+                    if arguments.len() != 1 {
+                        self.push(
+                            "RES116",
+                            format!(
+                                "`ScopedJoinHandle` expects one result type argument, found {}",
+                                arguments.len()
+                            ),
+                            ty.span,
+                        );
+                        TypeRef::Error
+                    } else if arguments[0].is_reference() || arguments[0].contains_reference() {
+                        self.push(
+                            "RES116",
+                            "a scoped thread result cannot contain a reference".to_owned(),
+                            ty.span,
+                        );
+                        TypeRef::Error
+                    } else {
+                        TypeRef::ScopedThreadHandle(Box::new(arguments[0].clone()))
+                    }
+                } else if let Some(kind) = pointer_kind(segments) {
                     let arguments = named
                         .arguments
                         .iter()
@@ -5607,6 +6053,162 @@ impl Resolver<'_> {
         None
     }
 
+    fn is_reserved_rust_path(
+        &self,
+        segments: &[String],
+        namespace: &[String],
+        expected: &[&str],
+    ) -> bool {
+        if segments
+            .iter()
+            .map(String::as_str)
+            .eq(expected.iter().copied())
+        {
+            return true;
+        }
+        let Some((first, remaining)) = segments.split_first() else {
+            return false;
+        };
+        self.imports
+            .candidates(namespace, first)
+            .iter()
+            .any(|base| {
+                base.iter()
+                    .map(String::as_str)
+                    .chain(remaining.iter().map(String::as_str))
+                    .eq(expected.iter().copied())
+            })
+    }
+
+    fn thread_sendable(&self, ty: &TypeRef) -> bool {
+        match canonical_ref(ty) {
+            TypeRef::Void
+            | TypeRef::Bool
+            | TypeRef::Char
+            | TypeRef::I8
+            | TypeRef::I16
+            | TypeRef::I32
+            | TypeRef::I64
+            | TypeRef::I128
+            | TypeRef::Isize
+            | TypeRef::U8
+            | TypeRef::U16
+            | TypeRef::U32
+            | TypeRef::U64
+            | TypeRef::U128
+            | TypeRef::Usize
+            | TypeRef::F32
+            | TypeRef::F64
+            | TypeRef::Condition => true,
+            TypeRef::Struct { path } => self.struct_by_path.get(path).is_some_and(|id| {
+                let structure = &self.model.structs[id.0];
+                structure.base.is_none_or(|base| {
+                    self.thread_sendable(&TypeRef::Struct {
+                        path: self.model.structs[base.0].path.clone(),
+                    })
+                }) && structure
+                    .fields
+                    .iter()
+                    .all(|field| self.thread_sendable(&field.ty))
+            }),
+            TypeRef::Native { path, arguments } => {
+                matches!(
+                    path.as_str(),
+                    "rust::String"
+                        | "rust::Vec"
+                        | "rust::Option"
+                        | "rust::Result"
+                        | "rust::stainless_runtime::Var"
+                ) && arguments
+                    .iter()
+                    .all(|argument| self.thread_sendable(argument))
+            }
+            TypeRef::Pointer { kind, target } => match kind {
+                PointerKind::Unique | PointerKind::UniqueNullable => self.thread_sendable(target),
+                PointerKind::Shared
+                | PointerKind::SharedNullable
+                | PointerKind::Weak
+                | PointerKind::Atomic
+                | PointerKind::AtomicNullable => {
+                    self.thread_sendable(target) && self.thread_sync(target)
+                }
+            },
+            TypeRef::Mutex(target) | TypeRef::ThreadHandle(target) => self.thread_sendable(target),
+            TypeRef::Reference { .. }
+            | TypeRef::MutexGuard(_)
+            | TypeRef::ThreadScope
+            | TypeRef::ScopedThreadHandle(_)
+            | TypeRef::Callback(_)
+            | TypeRef::Function(_)
+            | TypeRef::Parameter(_)
+            | TypeRef::Error => false,
+        }
+    }
+
+    fn thread_sync(&self, ty: &TypeRef) -> bool {
+        match canonical_ref(ty) {
+            TypeRef::Void
+            | TypeRef::Bool
+            | TypeRef::Char
+            | TypeRef::I8
+            | TypeRef::I16
+            | TypeRef::I32
+            | TypeRef::I64
+            | TypeRef::I128
+            | TypeRef::Isize
+            | TypeRef::U8
+            | TypeRef::U16
+            | TypeRef::U32
+            | TypeRef::U64
+            | TypeRef::U128
+            | TypeRef::Usize
+            | TypeRef::F32
+            | TypeRef::F64
+            | TypeRef::Condition => true,
+            TypeRef::Struct { path } => self.struct_by_path.get(path).is_some_and(|id| {
+                let structure = &self.model.structs[id.0];
+                structure.base.is_none_or(|base| {
+                    self.thread_sync(&TypeRef::Struct {
+                        path: self.model.structs[base.0].path.clone(),
+                    })
+                }) && structure
+                    .fields
+                    .iter()
+                    .all(|field| self.thread_sync(&field.ty))
+            }),
+            TypeRef::Native { path, arguments } => {
+                matches!(
+                    path.as_str(),
+                    "rust::String"
+                        | "rust::Vec"
+                        | "rust::Option"
+                        | "rust::Result"
+                        | "rust::stainless_runtime::Var"
+                ) && arguments.iter().all(|argument| self.thread_sync(argument))
+            }
+            TypeRef::Pointer { kind, target } => match kind {
+                PointerKind::Unique | PointerKind::UniqueNullable => self.thread_sync(target),
+                PointerKind::Shared
+                | PointerKind::SharedNullable
+                | PointerKind::Weak
+                | PointerKind::Atomic
+                | PointerKind::AtomicNullable => {
+                    self.thread_sendable(target) && self.thread_sync(target)
+                }
+            },
+            TypeRef::Mutex(target) => self.thread_sendable(target),
+            TypeRef::ThreadHandle(target) => self.thread_sync(target),
+            TypeRef::Reference { .. }
+            | TypeRef::MutexGuard(_)
+            | TypeRef::ThreadScope
+            | TypeRef::ScopedThreadHandle(_)
+            | TypeRef::Callback(_)
+            | TypeRef::Function(_)
+            | TypeRef::Parameter(_)
+            | TypeRef::Error => false,
+        }
+    }
+
     fn lookup_struct_path(&self, segments: &[String], namespace: &[String]) -> Option<StructId> {
         let mut candidates = Vec::new();
         if segments.first().is_some_and(|segment| segment == "crate") {
@@ -5810,6 +6412,9 @@ impl Resolver<'_> {
             | TypeRef::Mutex(_)
             | TypeRef::MutexGuard(_)
             | TypeRef::Condition
+            | TypeRef::ThreadHandle(_)
+            | TypeRef::ThreadScope
+            | TypeRef::ScopedThreadHandle(_)
             | TypeRef::Struct { .. }
             | TypeRef::Reference { .. }
             | TypeRef::Error => false,
@@ -5895,6 +6500,16 @@ fn substitute(ty: &TypeRef, substitutions: &BTreeMap<String, TypeRef>) -> TypeRe
         ),
         TypeRef::Pointer { kind, target } => {
             TypeRef::pointer(*kind, substitute(target, substitutions))
+        }
+        TypeRef::Mutex(target) => TypeRef::Mutex(Box::new(substitute(target, substitutions))),
+        TypeRef::MutexGuard(target) => {
+            TypeRef::MutexGuard(Box::new(substitute(target, substitutions)))
+        }
+        TypeRef::ThreadHandle(target) => {
+            TypeRef::ThreadHandle(Box::new(substitute(target, substitutions)))
+        }
+        TypeRef::ScopedThreadHandle(target) => {
+            TypeRef::ScopedThreadHandle(Box::new(substitute(target, substitutions)))
         }
         TypeRef::Struct { .. } => ty.clone(),
         TypeRef::Reference { mutable, target } => TypeRef::Reference {
@@ -6344,7 +6959,12 @@ fn callable_signature(ty: &TypeRef) -> Option<(&[TypeRef], &TypeRef)> {
 
 fn contains_move_only_storage(ty: &TypeRef) -> bool {
     match ty {
-        TypeRef::Mutex(_) | TypeRef::MutexGuard(_) | TypeRef::Condition => true,
+        TypeRef::Mutex(_)
+        | TypeRef::MutexGuard(_)
+        | TypeRef::Condition
+        | TypeRef::ThreadHandle(_)
+        | TypeRef::ThreadScope
+        | TypeRef::ScopedThreadHandle(_) => true,
         TypeRef::Function(function) => function.kind == StoredFunctionKind::Mutable,
         TypeRef::Pointer { kind, .. } => matches!(
             kind,
@@ -6465,6 +7085,14 @@ fn display_type(ty: &TypeRef) -> String {
         TypeRef::Mutex(target) => format!("mutex<{}>", display_type(target)),
         TypeRef::MutexGuard(target) => format!("<mutex_guard<{}>>", display_type(target)),
         TypeRef::Condition => "condition".to_owned(),
+        TypeRef::ThreadHandle(target) => {
+            format!("rust::std::thread::JoinHandle<{}>", display_type(target))
+        }
+        TypeRef::ThreadScope => "rust::std::thread::Scope".to_owned(),
+        TypeRef::ScopedThreadHandle(target) => format!(
+            "rust::std::thread::ScopedJoinHandle<{}>",
+            display_type(target)
+        ),
         TypeRef::Struct { path } => display_path(path),
         TypeRef::Reference { mutable, target } => {
             if *mutable {
@@ -6726,7 +7354,11 @@ fn source_uses_exceptions(source: &SourceFile) -> bool {
                             if namespace == "stainless"
                                 && matches!(
                                     name.as_str(),
-                                    "Exception" | "RustError" | "FormatError" | "JsonError"
+                                    "Exception"
+                                        | "RustError"
+                                        | "FormatError"
+                                        | "JsonError"
+                                        | "ThreadError"
                                 )
                     )
                 }) || structure.constructors.iter().any(|constructor| {
