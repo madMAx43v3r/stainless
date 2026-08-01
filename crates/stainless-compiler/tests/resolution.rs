@@ -256,7 +256,7 @@ void bump(Config& config) {
 }
 
 unique_ptr<Config> make_config(i32 version) {
-    unique_ptr<Config> owner = make_unique<Config>(Config{version});
+    unique_ptr<Config> owner = make_unique<Config>{version};
     return move(owner);
 }
 

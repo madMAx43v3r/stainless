@@ -19,7 +19,7 @@ void publish_from_thread(
 
 i32 owned_thread() throws stainless::ThreadError {
     shared_ptr<mutex<ThreadState>> state =
-        make_shared<mutex<ThreadState>>(ThreadState{false, 0});
+        make_shared<mutex<ThreadState>>{false, 0};
     shared_ptr<condition> changed = make_shared<condition>();
 
     // Copy captures clone these shared handles into the owned, 'static

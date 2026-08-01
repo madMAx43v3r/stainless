@@ -865,9 +865,14 @@ constructor must declare a covering exception type, again following Java's
 checked-initializer rule.
 
 `make_unique<T>(arguments...)` and `make_shared<T>(arguments...)` carry the
-selected `T` constructor's checked effect. Generated Rust constructs `T` first
-and places it in `Box` or `Arc` only after construction succeeds. A failed
-constructor therefore produces no owning pointer.
+selected `T` constructor's checked effect. Their brace forms,
+`make_unique<T>{initializers...}` and `make_shared<T>{initializers...}`, use
+direct-list initialization. For a Stainless data struct this is the same
+field-wise initialization as `T{initializers...}`. For a compiler wrapper such
+as `mutex<U>`, the brace list initializes the wrapped `U` before constructing
+the mutex. Generated Rust constructs the complete `T` first and places it in
+`Box` or `Arc` only after construction succeeds. A failed constructor therefore
+produces no owning pointer.
 
 Structs are value types:
 
@@ -1603,14 +1608,14 @@ not aliases that expose every method of their Rust lowering:
 
 The compiler implements all rows in this table for local, parameter, and return
 values. `make_unique<T>(...)` and `make_shared<T>(...)` run the selected
-Stainless or native constructor before allocating; checked constructor
-exceptions propagate normally. Pointee fields and methods use `.`, shared and
-weak handles copy by cloning their Rust handle, and unique plus atomic values
-participate in the move checker. Nullable facts are tracked for named bindings
-through construction, assignment, guards, `nullptr` comparisons, and
-continuing branch merges. Namespace-scope pointer initialization, thread-spawn
-contracts, interface pointees, and the `require(...)` declaration shorthand
-remain later slices.
+Stainless or native constructor before allocating, while their `{...}` forms
+direct-list initialize the pointee; checked construction exceptions propagate
+normally. Pointee fields and methods use `.`, shared and weak handles copy by
+cloning their Rust handle, and unique plus atomic values participate in the
+move checker. Nullable facts are tracked for named bindings through
+construction, assignment, guards, `nullptr` comparisons, and continuing branch
+merges. Namespace-scope pointer initialization, interface pointees, and the
+`require(...)` declaration shorthand remain later slices.
 
 Native `rust::Option<T>` remains available for ordinary optional values, but
 Stainless rejects a pointer or synchronized pointer-slot type as its direct
@@ -1618,11 +1623,11 @@ Stainless rejects a pointer or synchronized pointer-slot type as its direct
 `shared_nullptr<T>`, preserving the ownership-specific refinement and
 conversion rules instead of allowing both representations.
 
-Allocation uses `make_unique<T>(...)` or `make_shared<T>(...)`. There is no
-owning `new`, `delete`, placement allocation, or dynamically allocated C-style
-array. `drop(move(value))` may consume a named owning handle early; otherwise
-destruction is automatic. Allocation failure follows ordinary Rust allocation
-behavior and aborts rather than throwing a Stainless exception.
+Allocation uses `make_unique<T>(...)`, `make_shared<T>(...)`, or their brace
+forms. There is no owning `new`, `delete`, placement allocation, or dynamically
+allocated C-style array. `drop(move(value))` may consume a named owning handle
+early; otherwise destruction is automatic. Allocation failure follows ordinary
+Rust allocation behavior and aborts rather than throwing a Stainless exception.
 
 `unique_ptr<T>` and `unique_nullptr<T>` provide exclusive ownership:
 
@@ -1847,7 +1852,7 @@ current language subset. Shared synchronized state instead uses
 
 ```cpp
 shared_ptr<mutex<State>> state =
-    make_shared<mutex<State>>(State{false, 0});
+    make_shared<mutex<State>>{false, 0};
 shared_ptr<condition> changed = make_shared<condition>();
 ```
 
@@ -2591,8 +2596,9 @@ The initial `stainless_compiler::resolution` pass now provides:
   derived-struct-to-base-reference projection is the sole struct conversion;
 - classification of Stainless calls, compiler intrinsics such as `move` and
   primitive casts, and registered native Rust calls;
-- all seven compiler-defined ownership pointer types; `make_unique<T>(...)`
-  and `make_shared<T>(...)`; nullable refinement and checked non-null recovery;
+- all seven compiler-defined ownership pointer types; parenthesized and braced
+  `make_unique<T>`/`make_shared<T>` allocation; nullable refinement and checked
+  non-null recovery;
   immutable shared pointee access; `downgrade`/`lock`; synchronized atomic
   `__load`/`__store`/`__swap`; and diagnostics for invalid copying, default
   construction, pointer-reference declarations, and move-only struct storage;

@@ -10,7 +10,11 @@ struct SharedState {
 };
 
 shared_ptr<mutex<SharedState>> new_shared_state() {
-    return make_shared<mutex<SharedState>>(SharedState{false, 0});
+    return make_shared<mutex<SharedState>>{false, 0};
+}
+
+unique_ptr<mutex<SharedState>> new_unique_state() {
+    return make_unique<mutex<SharedState>>{false, 0};
 }
 
 shared_ptr<condition> new_condition() {

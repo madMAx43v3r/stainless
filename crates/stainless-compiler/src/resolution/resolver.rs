@@ -95,6 +95,12 @@ enum NullState {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConstructionSyntax {
+    Parenthesized,
+    Braced,
+}
+
 struct FunctionContext {
     namespace: Vec<String>,
     return_type: TypeRef,
@@ -2159,7 +2165,7 @@ impl Resolver<'_> {
             ),
             ExpressionKind::Aggregate { ty, initializers } => {
                 let (info, call) =
-                    self.resolve_struct_aggregate(ty, initializers, expression.span, context);
+                    self.resolve_braced_expression(ty, initializers, expression.span, context);
                 (info, call, None)
             }
             ExpressionKind::Field { receiver, name } => {
@@ -2782,6 +2788,72 @@ impl Resolver<'_> {
         (temporary(return_type), Some(call))
     }
 
+    fn resolve_braced_expression(
+        &mut self,
+        ty: &ast::Type,
+        initializers: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        let TypeKind::Named(named) = &ty.kind else {
+            for initializer in initializers {
+                self.resolve_expression(initializer, None, context);
+            }
+            self.push(
+                "RES046",
+                "brace construction requires a named target".to_owned(),
+                span,
+            );
+            return (error_info(), None);
+        };
+        if ty.is_const || ty.is_reference {
+            for initializer in initializers {
+                self.resolve_expression(initializer, None, context);
+            }
+            self.push(
+                "RES046",
+                "brace construction target cannot be const or a reference".to_owned(),
+                span,
+            );
+            return (error_info(), None);
+        }
+        if matches!(named.path.segments.as_slice(), [name] if name == "make_unique") {
+            return self.resolve_make_owner(
+                PointerKind::Unique,
+                &named.arguments,
+                initializers,
+                span,
+                ConstructionSyntax::Braced,
+                context,
+            );
+        }
+        if matches!(named.path.segments.as_slice(), [name] if name == "make_shared") {
+            return self.resolve_make_owner(
+                PointerKind::Shared,
+                &named.arguments,
+                initializers,
+                span,
+                ConstructionSyntax::Braced,
+                context,
+            );
+        }
+        if named.arguments.is_empty() {
+            return self.resolve_struct_aggregate(&named.path, initializers, span, context);
+        }
+        for initializer in initializers {
+            self.resolve_expression(initializer, None, context);
+        }
+        self.push(
+            "RES046",
+            format!(
+                "unsupported generic brace-construction target `{}`",
+                named.path.display()
+            ),
+            span,
+        );
+        (error_info(), None)
+    }
+
     fn resolve_struct_field(
         &mut self,
         receiver: &Expression,
@@ -3001,10 +3073,10 @@ impl Resolver<'_> {
             } if matches!(path.segments.as_slice(), [name] if name == "make_unique") => self
                 .resolve_make_owner(
                     PointerKind::Unique,
-                    "make_unique",
                     type_arguments,
                     arguments,
                     span,
+                    ConstructionSyntax::Parenthesized,
                     context,
                 ),
             ExpressionKind::GenericName {
@@ -3013,10 +3085,10 @@ impl Resolver<'_> {
             } if matches!(path.segments.as_slice(), [name] if name == "make_shared") => self
                 .resolve_make_owner(
                     PointerKind::Shared,
-                    "make_shared",
                     type_arguments,
                     arguments,
                     span,
+                    ConstructionSyntax::Parenthesized,
                     context,
                 ),
             ExpressionKind::GenericName {
@@ -4340,12 +4412,17 @@ impl Resolver<'_> {
     fn resolve_make_owner(
         &mut self,
         kind: PointerKind,
-        builtin_name: &str,
         type_arguments: &[ast::Type],
         arguments: &[Expression],
         span: Span,
+        syntax: ConstructionSyntax,
         context: &mut FunctionContext,
     ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        let builtin_name = match kind {
+            PointerKind::Unique => "make_unique",
+            PointerKind::Shared => "make_shared",
+            _ => "owner allocation",
+        };
         if type_arguments.len() != 1 {
             for argument in arguments {
                 self.resolve_expression(argument, None, context);
@@ -4381,8 +4458,15 @@ impl Resolver<'_> {
             }
             return (error_info(), None);
         }
-        let Some(construction) = self.resolve_slot_construction(&target, arguments, span, context)
-        else {
+        let construction = match syntax {
+            ConstructionSyntax::Parenthesized => {
+                self.resolve_slot_construction(&target, arguments, span, context)
+            }
+            ConstructionSyntax::Braced => {
+                self.resolve_braced_slot_construction(&target, arguments, span, context)
+            }
+        };
+        let Some(construction) = construction else {
             return (error_info(), None);
         };
         let return_type = TypeRef::pointer(kind, target.clone());
@@ -4398,6 +4482,43 @@ impl Resolver<'_> {
             throws,
         };
         (temporary(return_type), Some(call))
+    }
+
+    fn resolve_braced_slot_construction(
+        &mut self,
+        target: &TypeRef,
+        initializers: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> Option<ResolvedCall> {
+        match canonical_ref(target) {
+            TypeRef::Mutex(protected) => {
+                let construction =
+                    self.resolve_braced_slot_construction(protected, initializers, span, context)?;
+                let throws = construction.throws.clone();
+                Some(ResolvedCall {
+                    span,
+                    target: CallTarget::Intrinsic(Intrinsic::MutexNew {
+                        target: protected.as_ref().clone(),
+                        construction: Box::new(construction),
+                    }),
+                    return_type: TypeRef::Mutex(protected.clone()),
+                    throws,
+                })
+            }
+            TypeRef::Struct { path } => {
+                self.resolve_struct_aggregate(
+                    &ast::Path {
+                        segments: path.clone(),
+                    },
+                    initializers,
+                    span,
+                    context,
+                )
+                .1
+            }
+            _ => self.resolve_slot_construction(target, initializers, span, context),
+        }
     }
 
     #[allow(clippy::too_many_lines)]

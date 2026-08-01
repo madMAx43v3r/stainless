@@ -476,13 +476,13 @@ void store_slot(const atomic_ptr<Config>& slot, shared_ptr<Config> replacement) 
 i32 pointer_behavior() {
     unique_nullptr<Config> maybe_unique;
     if (!maybe_unique) {
-        maybe_unique = unique_nullptr<Config>(make_unique<Config>(Config{3}));
+        maybe_unique = unique_nullptr<Config>(make_unique<Config>{3});
     }
     maybe_unique.version = 4;
     bump(maybe_unique);
     unique_ptr<Config> unique = unique_ptr<Config>(move(maybe_unique));
 
-    shared_ptr<Config> first = make_shared<Config>(Config{5});
+    shared_ptr<Config> first = make_shared<Config>{5};
     shared_ptr<Config> copied = first;
     weak_ptr<Config> weak = downgrade(copied);
     shared_nullptr<Config> promoted = lock(weak);
@@ -517,7 +517,7 @@ i32 pointer_behavior() {
 
     weak_ptr<Config> expired;
     {
-        shared_ptr<Config> temporary = make_shared<Config>(Config{99});
+        shared_ptr<Config> temporary = make_shared<Config>{99};
         expired = downgrade(temporary);
     }
     shared_nullptr<Config> expired_lock = lock(expired);

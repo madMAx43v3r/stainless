@@ -18,13 +18,13 @@ i32 pointer_family() {
     unique_nullptr<Config> maybe_unique;
     if (maybe_unique == nullptr) {
         maybe_unique = unique_nullptr<Config>(
-            make_unique<Config>(Config{3}));
+            make_unique<Config>{3});
     }
     maybe_unique.version = 4;
     unique_ptr<Config> unique =
         unique_ptr<Config>(move(maybe_unique));
 
-    shared_ptr<Config> first = make_shared<Config>(Config{5});
+    shared_ptr<Config> first = make_shared<Config>{5};
     shared_ptr<Config> copied = first;
     weak_ptr<Config> observer = downgrade(copied);
     shared_nullptr<Config> promoted = lock(observer);

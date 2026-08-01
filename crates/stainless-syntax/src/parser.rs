@@ -681,7 +681,9 @@ impl Parser<'_> {
                 while self.eat(SyntaxKind::ColonColon) {
                     self.expect(SyntaxKind::Identifier, "expected a name after `::`");
                 }
-                if self.at(SyntaxKind::Less) && self.generic_arguments_are_followed_by_call() {
+                if self.at(SyntaxKind::Less)
+                    && self.generic_arguments_are_followed_by_construction()
+                {
                     self.parse_generic_arguments();
                 }
                 self.finish();
@@ -924,9 +926,13 @@ impl Parser<'_> {
         false
     }
 
-    fn generic_arguments_are_followed_by_call(&self) -> bool {
-        self.skip_balanced_angles(0)
-            .is_some_and(|offset| self.nth(offset) == Some(SyntaxKind::LParen))
+    fn generic_arguments_are_followed_by_construction(&self) -> bool {
+        self.skip_balanced_angles(0).is_some_and(|offset| {
+            matches!(
+                self.nth(offset),
+                Some(SyntaxKind::LParen | SyntaxKind::LBrace)
+            )
+        })
     }
 
     fn skip_balanced_angles(&self, mut offset: usize) -> Option<usize> {

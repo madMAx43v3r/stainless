@@ -44,6 +44,19 @@ fn parses_structs_members_inheritance_and_aggregates_losslessly() {
 }
 
 #[test]
+fn parses_braced_owner_allocation_with_nested_generic_targets() {
+    let source = "void allocate() {\n    auto shared = make_shared<mutex<State>>{false, 0};\n    auto unique = make_unique<State>{true, 1};\n}\n";
+    let parsed = parse(source);
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(parsed.syntax().to_string(), source);
+    assert_eq!(
+        count_kind(&parsed.syntax(), SyntaxKind::AggregateExpression),
+        2
+    );
+}
+
+#[test]
 fn parses_constructor_declarations_definitions_deletions_and_initializers() {
     let source = r"struct Base {
     Base(i32 value);

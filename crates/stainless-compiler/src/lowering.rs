@@ -422,7 +422,7 @@ fn lower_expression(expression: cst::Expression) -> Expression {
                 return error_expression(expression_span);
             };
             ExpressionKind::Aggregate {
-                ty: path_from_tokens(name.path_tokens()),
+                ty: Box::new(lower_name_type(&name)),
                 initializers: aggregate
                     .initializer_list()
                     .into_iter()
@@ -642,6 +642,28 @@ fn path_from_tokens(tokens: impl Iterator<Item = stainless_syntax::SyntaxToken>)
             .filter(|token| matches!(token.kind(), SyntaxKind::Identifier | SyntaxKind::MoveKw))
             .map(|token| token.text().to_owned())
             .collect(),
+    }
+}
+
+fn lower_name_type(name: &cst::NameExpression) -> ast::Type {
+    let expression_span = span(name);
+    let path = path_from_tokens(name.path_tokens());
+    let kind = if path.segments.is_empty() {
+        TypeKind::Error
+    } else {
+        TypeKind::Named(ast::NamedType {
+            path,
+            arguments: name
+                .generic_arguments()
+                .map(|argument| lower_type(&argument))
+                .collect(),
+        })
+    };
+    ast::Type {
+        is_const: false,
+        is_reference: false,
+        kind,
+        span: expression_span,
     }
 }
 

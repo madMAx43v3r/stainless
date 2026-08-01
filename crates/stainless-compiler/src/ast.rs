@@ -486,10 +486,11 @@ pub enum ExpressionKind {
         /// Stainless expressions in the macro argument list.
         arguments: Vec<Expression>,
     },
-    /// C++-style aggregate construction, such as `Point{1, 2}`.
+    /// C++-style brace construction, such as `Point{1, 2}` or
+    /// `make_shared<Point>{1, 2}`.
     Aggregate {
-        /// Constructed type path.
-        ty: Path,
+        /// Constructed type or generic allocation target.
+        ty: Box<Type>,
         /// Initializers in direct layout order.
         initializers: Vec<Expression>,
     },
