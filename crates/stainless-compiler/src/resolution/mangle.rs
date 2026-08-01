@@ -66,6 +66,15 @@ fn encode_type(ty: &TypeRef, output: &mut String) {
             });
             encode_type(target, output);
         }
+        TypeRef::Mutex(target) => {
+            output.push_str("mutex_");
+            encode_type(target, output);
+        }
+        TypeRef::MutexGuard(target) => {
+            output.push_str("mutex_guard_");
+            encode_type(target, output);
+        }
+        TypeRef::Condition => output.push_str("condition"),
         TypeRef::Reference { target, .. } => encode_type(target, output),
         TypeRef::Parameter(name) => {
             output.push_str("t_");

@@ -8,8 +8,8 @@ Stainless is a new C++-like language that transpiles to Rust.
 > diagnostics, an initial name/type/call resolver, a typed Rust-shaped HIR, and
 > structured Rust emission for the supported function/control-flow,
 > data-only-struct, constructor, checked-exception, `Vec`/`String`, native
-> JSON, the local/function ownership-pointer family, and first external-wrapper
-> subset. The
+> JSON, the local/function ownership-pointer family, mutex/condition
+> synchronization, and first external-wrapper subset. The
 > workspace now includes the compact
 > `stainless-runtime` used by generated JSON code. An initial move/borrow
 > dataflow pass validates that subset; classes and interfaces have not started
@@ -160,6 +160,9 @@ implemented:
 - [`22_pointer_family.stl`](docs/ref/22_pointer_family.stl) — the implemented
   unique/nullable/shared/weak/atomic ownership-pointer subset, including
   nullable guards and synchronized slots.
+- [`23_mutex_and_condition.stl`](docs/ref/23_mutex_and_condition.stl) —
+  mutex-protected mutable state, scoped inferred guards, condition waits, and
+  one/all waiter notification.
 
 `01_basics.stl`, `02_structs_and_data_inheritance.stl`,
 `11_vec_and_string.stl`, `13_range_for.stl`, and `14_constructors.stl` are
@@ -168,7 +171,8 @@ currently parsed, resolved, lowered to HIR, emitted as Rust, and compiled by
 `15_checked_exception_subset.stl` sample, the native-Result
 `16_native_result_unwrap.stl` sample, and the formatting-macro
 `20_formatting_macros.stl` sample, and the ownership-pointer
-`22_pointer_family.stl` sample. The JSON
+`22_pointer_family.stl` sample and the mutex/condition
+`23_mutex_and_condition.stl` sample. The JSON
 `21_json_support.stl` sample is compiled and executed through Cargo against
 the real `stainless-runtime` and `serde_json`. The external
 `17_external_regex_wrapper.stl` sample is compiled and executed through Cargo
@@ -1627,10 +1631,12 @@ data:
   and mutating methods cannot be called through the handle.
 - The source API does not expose `Arc::get_mut`, `Arc::make_mut`, or an
   interior-mutability escape hatch through these pointer types.
-- A shared pointee must be deeply share-immutable. Rust types containing
-  `UnsafeCell`-based interior mutability, including `Mutex`, `RwLock`, and
-  atomic cells, cannot be used directly as `T`; synchronization of the pointer
-  binding itself uses `atomic_ptr` or `atomic_nullptr`. The isolated
+- A shared pointee must normally be deeply share-immutable. The compiler-known
+  `mutex<T>` and `condition` types described below are the explicit
+  synchronization exceptions. Other Rust types containing `UnsafeCell`-based
+  interior mutability, including native `Mutex`, `RwLock`, and atomic cells,
+  cannot be used directly as `T`; synchronization of the pointer binding
+  itself uses `atomic_ptr` or `atomic_nullptr`. The isolated
   `frozen_adapter` foreign-newtype contract described under Rust interop is the
   planned escape hatch for an opaque native representation.
 - Reassigning a mutable handle changes only that handle, not the allocation
@@ -1767,6 +1773,76 @@ independent slot. Existing loaded snapshots continue to refer to the old
 allocation after a store or swap. The `__` operation names are reserved
 compiler API, and a more specialized lowering may replace `RwLock` later
 without changing Stainless semantics.
+
+#### Mutexes and conditions
+
+Stainless calls the C++ `std::condition_variable` concept simply `condition`.
+It is a compiler-known synchronization type, not a native Rust name that must
+be imported. The initial synchronization vocabulary maps directly to safe Rust:
+
+| Stainless | Rust lowering | Semantics |
+| --- | --- | --- |
+| `mutex<T>` | `std::sync::Mutex<T>` | Exclusive mutable access to one `T` |
+| inferred lock guard | `std::sync::MutexGuard<'_, T>` | Scoped, move-only lock ownership |
+| `condition` | `std::sync::Condvar` | Wait and one/all waiter notification |
+
+Construction and the core API use C++-like syntax with Rust-like method names:
+
+```cpp
+mutex<State> local = mutex<State>(State{false, 0});
+condition changed;
+
+auto guard = local.lock();
+guard.value().ready = true;
+changed.notify_one();
+```
+
+`lock()` produces an internal guard type that source code cannot spell. The
+guard must be held in mutable `auto`, cannot be copied, explicitly moved,
+returned, used as a field, or passed as an ordinary function argument, and
+releases the mutex when its scope ends. `guard.value()` returns a reference to
+the protected `T`; a mutable guard binding yields `T&`, while a const guard
+binding yields `const T&`. Ordinary field and method access then follows the
+normal Stainless reference rules.
+
+`condition.wait(guard)` is the sole special guard transfer. It atomically
+releases the mutex while waiting, reacquires it before returning, and
+transparently rebinds the same named guard. The argument must therefore be a
+mutable named guard. Conditions may wake spuriously, so the state test must be
+in a loop:
+
+```cpp
+for (; !guard.value().ready;) {
+    changed.wait(guard);
+}
+```
+
+`notify_one()` wakes one waiter and `notify_all()` wakes every waiter. Every
+wait performed on a particular `condition` instance must use a guard from the
+same mutex instance; this is also an invariant of the Rust `Condvar` being
+lowered to. The current compiler verifies the guard type and lifetime but does
+not yet prove that instance identity, so violating this rule can produce the
+underlying Rust panic.
+
+`mutex<T>` and `condition` are non-copyable. Because Stainless structs are
+implicitly copyable data, neither may be stored directly in a struct in the
+current language subset. Shared synchronized state instead uses
+`shared_ptr<mutex<T>>` and a condition can likewise use
+`shared_ptr<condition>`:
+
+```cpp
+shared_ptr<mutex<State>> state =
+    make_shared<mutex<State>>(State{false, 0});
+shared_ptr<condition> changed = make_shared<condition>();
+```
+
+These two pointee types are deliberate exceptions to the otherwise immutable
+`shared_ptr<T>` rule. A shared handle still cannot mutate the protected `T`
+directly; mutation is possible only through a live lock guard. Rust's type
+system remains the final thread-boundary check: `Arc<Mutex<T>>` is shareable
+when `T: Send`, and `Arc<Condvar>` is shareable. Mutex poisoning caused by a
+Rust panic is recovered with `PoisonError::into_inner()` by generated code,
+rather than adding an undeclared Stainless checked exception.
 
 Thread entry uses Rust's `std::thread::spawn`, reached in Stainless through
 `rust::std::thread::spawn` or an import such as

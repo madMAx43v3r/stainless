@@ -174,6 +174,12 @@ pub enum Type {
         /// Pointee type.
         target: Box<Type>,
     },
+    /// A Rust synchronization mutex owning one value.
+    Mutex(Box<Type>),
+    /// A scoped Rust mutex guard with an inferred borrow lifetime.
+    MutexGuard(Box<Type>),
+    /// A Rust condition variable.
+    Condition,
     /// A user-defined Stainless struct.
     User {
         /// Fully qualified generated Rust path.
@@ -510,6 +516,33 @@ pub enum Expression {
         slot: Box<Expression>,
         /// New stored handle.
         value: Box<Expression>,
+    },
+    /// Construct a mutex around an initialized value.
+    MutexNew(Box<Expression>),
+    /// Construct a condition signal.
+    ConditionNew,
+    /// Acquire a mutex, recovering its value if another thread panicked.
+    MutexLock(Box<Expression>),
+    /// Borrow the protected value through a live guard.
+    MutexGuardValue {
+        /// Whether the resulting reference permits mutation.
+        mutable: bool,
+        /// Guard expression.
+        guard: Box<Expression>,
+    },
+    /// Release a guard while waiting and transparently reacquire it.
+    ConditionWait {
+        /// Condition variable expression.
+        condition: Box<Expression>,
+        /// Mutable named guard that is consumed and rebound.
+        guard: Box<Expression>,
+    },
+    /// Notify one or all condition waiters.
+    ConditionNotify {
+        /// Condition variable expression.
+        condition: Box<Expression>,
+        /// Whether every waiter is notified.
+        all: bool,
     },
     /// Consume a native Rust Result, converting `Err` to checked `RustError`.
     UnwrapRustResult {

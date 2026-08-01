@@ -61,6 +61,12 @@ pub enum TypeRef {
         /// Owned or observed pointee type.
         target: Box<TypeRef>,
     },
+    /// A synchronized mutable value (`std::sync::Mutex<T>`).
+    Mutex(Box<TypeRef>),
+    /// A scoped, move-only lock guard borrowing one `mutex<T>`.
+    MutexGuard(Box<TypeRef>),
+    /// A condition signal (`std::sync::Condvar`).
+    Condition,
     /// A Stainless data-only struct.
     Struct {
         /// Fully qualified Stainless path.
@@ -155,8 +161,8 @@ impl TypeRef {
     pub fn contains_reference(&self) -> bool {
         match self {
             Self::Native { arguments, .. } => arguments.iter().any(Self::contains_reference),
-            Self::Pointer { target, .. } => target.contains_reference(),
-            Self::Reference { .. } => true,
+            Self::Pointer { target, .. } | Self::Mutex(target) => target.contains_reference(),
+            Self::MutexGuard(_) | Self::Reference { .. } => true,
             _ => false,
         }
     }
@@ -590,6 +596,11 @@ fn callback_resolution_type(ty: &TypeRef) -> TypeRef {
         TypeRef::Pointer { kind, target } => {
             TypeRef::pointer(*kind, callback_resolution_type(target))
         }
+        TypeRef::Mutex(target) => TypeRef::Mutex(Box::new(callback_resolution_type(target))),
+        TypeRef::MutexGuard(target) => {
+            TypeRef::MutexGuard(Box::new(callback_resolution_type(target)))
+        }
+        TypeRef::Condition => TypeRef::Condition,
         TypeRef::Native { path, arguments } => TypeRef::native(
             path,
             arguments.iter().map(callback_resolution_type).collect(),

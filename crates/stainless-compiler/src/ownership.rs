@@ -371,7 +371,9 @@ impl Analyzer<'_> {
         let Some(binding) = self.semantics.binding(local.span) else {
             return;
         };
-        let reference_loan = if binding.ty.is_reference() {
+        let reference_loan = if binding.ty.is_reference()
+            || matches!(canonical_ref(&binding.ty), TypeRef::MutexGuard(_))
+        {
             local.initializer.as_ref().and_then(|initializer| {
                 let mutable = matches!(binding.ty, TypeRef::Reference { mutable: true, .. });
                 let origin = self.expression(
@@ -870,26 +872,61 @@ impl Analyzer<'_> {
                 }
                 None
             }
-            CallTarget::Intrinsic(Intrinsic::MakeOwner { construction, .. }) => {
+            CallTarget::Intrinsic(
+                Intrinsic::MakeOwner { construction, .. }
+                | Intrinsic::MutexNew { construction, .. },
+            ) => {
                 self.construction_arguments(construction, arguments);
                 None
             }
-            CallTarget::Intrinsic(Intrinsic::PointerDefault { .. }) => None,
+            CallTarget::Intrinsic(Intrinsic::ConditionNew | Intrinsic::PointerDefault { .. }) => {
+                None
+            }
+            CallTarget::Intrinsic(Intrinsic::MutexLock { .. }) => call_receiver(expression)
+                .and_then(|receiver| self.expression(receiver, Usage::BorrowShared)),
+            CallTarget::Intrinsic(Intrinsic::MutexGuardValue { mutable, .. }) => {
+                call_receiver(expression).and_then(|receiver| {
+                    self.expression(
+                        receiver,
+                        if *mutable {
+                            Usage::BorrowMutable
+                        } else {
+                            Usage::BorrowShared
+                        },
+                    )
+                })
+            }
+            CallTarget::Intrinsic(Intrinsic::ConditionWait { .. }) => {
+                let mut condition_loan = None;
+                if let Some(receiver) = call_receiver(expression) {
+                    let origin = self.expression(receiver, Usage::BorrowShared);
+                    condition_loan = self.acquire_temporary_loan(origin, false, receiver.span);
+                }
+                if let Some(guard) = arguments.first() {
+                    self.expression(guard, Usage::Mutate);
+                }
+                if let Some(loan) = condition_loan {
+                    self.state.release(loan);
+                }
+                None
+            }
+            CallTarget::Intrinsic(
+                Intrinsic::ConditionNotify { .. } | Intrinsic::AtomicLoad { .. },
+            ) => {
+                if let Some(receiver) = call_receiver(expression) {
+                    let origin = self.expression(receiver, Usage::BorrowShared);
+                    if let Some(loan) = self.acquire_temporary_loan(origin, false, receiver.span) {
+                        self.state.release(loan);
+                    }
+                }
+                None
+            }
             CallTarget::Intrinsic(
                 Intrinsic::DowngradeShared { .. } | Intrinsic::LockWeak { .. },
             ) => {
                 if let Some(argument) = arguments.first() {
                     let origin = self.expression(argument, Usage::BorrowShared);
                     if let Some(loan) = self.acquire_temporary_loan(origin, false, argument.span) {
-                        self.state.release(loan);
-                    }
-                }
-                None
-            }
-            CallTarget::Intrinsic(Intrinsic::AtomicLoad { .. }) => {
-                if let Some(receiver) = call_receiver(expression) {
-                    let origin = self.expression(receiver, Usage::BorrowShared);
-                    if let Some(loan) = self.acquire_temporary_loan(origin, false, receiver.span) {
                         self.state.release(loan);
                     }
                 }
@@ -1060,6 +1097,9 @@ impl Analyzer<'_> {
             }
             CallTarget::Intrinsic(Intrinsic::ValueInitialization { target }) => {
                 self.call_arguments(arguments, std::iter::once(target));
+            }
+            CallTarget::Intrinsic(Intrinsic::MutexNew { construction, .. }) => {
+                self.construction_arguments(construction, arguments);
             }
             _ => {
                 for argument in arguments {
@@ -1393,6 +1433,12 @@ fn merge_availability(left: Availability, right: Availability) -> Availability {
 
 fn root_origin(state: &FlowState, mut id: BindingId) -> BindingId {
     while let Some(loan) = state.bindings[id].reference_loan {
+        if matches!(
+            canonical_ref(&state.bindings[id].ty),
+            TypeRef::MutexGuard(_)
+        ) {
+            break;
+        }
         id = loan.owner;
     }
     id

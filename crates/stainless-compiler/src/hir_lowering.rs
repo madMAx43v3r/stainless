@@ -1511,7 +1511,11 @@ impl Lowerer<'_> {
     ) -> Option<hir::Expression> {
         let handles_checked_effect = matches!(
             call.target,
-            CallTarget::Intrinsic(Intrinsic::UnwrapRustResult { .. } | Intrinsic::MakeOwner { .. })
+            CallTarget::Intrinsic(
+                Intrinsic::UnwrapRustResult { .. }
+                    | Intrinsic::MakeOwner { .. }
+                    | Intrinsic::MutexNew { .. }
+            )
         ) || matches!(
             &call.target,
             CallTarget::Native(native) if native.result_adaptation.is_some()
@@ -1729,6 +1733,84 @@ impl Lowerer<'_> {
                             &TypeRef::pointer(kind, target.clone()),
                         )?,
                     ),
+                })
+            }
+            CallTarget::Intrinsic(Intrinsic::MutexNew { construction, .. }) => {
+                let value = self.lower_resolved_call(construction, None, arguments)?;
+                Some(hir::Expression::MutexNew(Box::new(value)))
+            }
+            CallTarget::Intrinsic(Intrinsic::ConditionNew) => Some(hir::Expression::ConditionNew),
+            CallTarget::Intrinsic(Intrinsic::MutexLock { .. }) => {
+                let Some(ast::Expression {
+                    kind: ExpressionKind::Field { receiver, .. },
+                    ..
+                }) = callee
+                else {
+                    self.push("HIR011", "mutex lock has no receiver".to_owned(), call.span);
+                    return None;
+                };
+                Some(hir::Expression::MutexLock(Box::new(
+                    self.lower_expression(receiver, ExpressionMode::Reference)?,
+                )))
+            }
+            CallTarget::Intrinsic(Intrinsic::MutexGuardValue { mutable, .. }) => {
+                let Some(ast::Expression {
+                    kind: ExpressionKind::Field { receiver, .. },
+                    ..
+                }) = callee
+                else {
+                    self.push(
+                        "HIR011",
+                        "mutex guard value access has no receiver".to_owned(),
+                        call.span,
+                    );
+                    return None;
+                };
+                Some(hir::Expression::MutexGuardValue {
+                    mutable: *mutable,
+                    guard: Box::new(self.lower_expression(receiver, ExpressionMode::Value)?),
+                })
+            }
+            CallTarget::Intrinsic(Intrinsic::ConditionWait { .. }) => {
+                let Some(ast::Expression {
+                    kind: ExpressionKind::Field { receiver, .. },
+                    ..
+                }) = callee
+                else {
+                    self.push(
+                        "HIR011",
+                        "condition wait has no receiver".to_owned(),
+                        call.span,
+                    );
+                    return None;
+                };
+                Some(hir::Expression::ConditionWait {
+                    condition: Box::new(
+                        self.lower_expression(receiver, ExpressionMode::Reference)?,
+                    ),
+                    guard: Box::new(
+                        self.lower_expression(arguments.first()?, ExpressionMode::Value)?,
+                    ),
+                })
+            }
+            CallTarget::Intrinsic(Intrinsic::ConditionNotify { all }) => {
+                let Some(ast::Expression {
+                    kind: ExpressionKind::Field { receiver, .. },
+                    ..
+                }) = callee
+                else {
+                    self.push(
+                        "HIR011",
+                        "condition notification has no receiver".to_owned(),
+                        call.span,
+                    );
+                    return None;
+                };
+                Some(hir::Expression::ConditionNotify {
+                    condition: Box::new(
+                        self.lower_expression(receiver, ExpressionMode::Reference)?,
+                    ),
+                    all: *all,
                 })
             }
             CallTarget::Intrinsic(Intrinsic::StoredFunctionCall { .. }) => {
@@ -2137,6 +2219,11 @@ impl Lowerer<'_> {
                 kind: *kind,
                 target: Box::new(self.lower_type(target, span)?),
             },
+            TypeRef::Mutex(target) => hir::Type::Mutex(Box::new(self.lower_type(target, span)?)),
+            TypeRef::MutexGuard(target) => {
+                hir::Type::MutexGuard(Box::new(self.lower_type(target, span)?))
+            }
+            TypeRef::Condition => hir::Type::Condition,
             TypeRef::Struct { path } => hir::Type::User {
                 rust_path: user_type_path(path),
             },
@@ -2412,7 +2499,8 @@ fn automatic_pointee_type(ty: &TypeRef) -> &TypeRef {
                 | PointerKind::Shared
                 | PointerKind::SharedNullable,
             target,
-        } => canonical_ref(target),
+        }
+        | TypeRef::MutexGuard(target) => canonical_ref(target),
         ty => ty,
     }
 }

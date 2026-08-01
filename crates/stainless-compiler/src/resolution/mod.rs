@@ -313,6 +313,37 @@ pub enum Intrinsic {
         /// Pointee type.
         target: TypeRef,
     },
+    /// Construct a `mutex<T>` around a selected `T` construction.
+    MutexNew {
+        /// Protected value type.
+        target: TypeRef,
+        /// Construction performed before wrapping the value.
+        construction: Box<ResolvedCall>,
+    },
+    /// Default-construct a condition signal.
+    ConditionNew,
+    /// Acquire a mutex and produce a scoped guard.
+    MutexLock {
+        /// Protected value type.
+        target: TypeRef,
+    },
+    /// Borrow the protected value from a scoped guard.
+    MutexGuardValue {
+        /// Protected value type.
+        target: TypeRef,
+        /// Whether the returned reference is mutable.
+        mutable: bool,
+    },
+    /// Wait on a condition and rebind the same named guard.
+    ConditionWait {
+        /// Protected value type.
+        target: TypeRef,
+    },
+    /// Notify condition waiters.
+    ConditionNotify {
+        /// Whether every waiter is notified.
+        all: bool,
+    },
     /// Invoke a non-null stored `function` or `function_mut` value.
     StoredFunctionCall {
         /// Whether invocation requires mutable access to the callable.

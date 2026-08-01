@@ -1029,6 +1029,21 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
     ) -> Option<ResolvedCall> {
         match canonical_ref(target) {
+            TypeRef::Mutex(protected) => {
+                self.resolve_mutex_slot_construction(protected, arguments, span, context)
+            }
+            TypeRef::Condition => self.resolve_condition_construction(arguments, span, context),
+            TypeRef::MutexGuard(_) => {
+                for argument in arguments {
+                    self.resolve_expression(argument, None, context);
+                }
+                self.push(
+                    "RES113",
+                    "mutex guards can only be produced by `mutex<T>.lock()`".to_owned(),
+                    span,
+                );
+                None
+            }
             TypeRef::Pointer { .. } => {
                 for argument in arguments {
                     self.resolve_expression(argument, None, context);
@@ -1109,6 +1124,54 @@ impl Resolver<'_> {
         }
     }
 
+    fn resolve_mutex_slot_construction(
+        &mut self,
+        protected: &TypeRef,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> Option<ResolvedCall> {
+        let construction = self.resolve_slot_construction(protected, arguments, span, context)?;
+        let throws = construction.throws.clone();
+        Some(ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::MutexNew {
+                target: protected.clone(),
+                construction: Box::new(construction),
+            }),
+            return_type: TypeRef::Mutex(Box::new(protected.clone())),
+            throws,
+        })
+    }
+
+    fn resolve_condition_construction(
+        &mut self,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> Option<ResolvedCall> {
+        for argument in arguments {
+            self.resolve_expression(argument, None, context);
+        }
+        if !arguments.is_empty() {
+            self.push(
+                "RES113",
+                format!(
+                    "`condition` requires no constructor arguments, found {}",
+                    arguments.len()
+                ),
+                span,
+            );
+            return None;
+        }
+        Some(ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::ConditionNew),
+            return_type: TypeRef::Condition,
+            throws: Vec::new(),
+        })
+    }
+
     fn resolve_direct_initialization(
         &mut self,
         target: &TypeRef,
@@ -1141,6 +1204,33 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
     ) -> Option<ResolvedCall> {
         match canonical_ref(target) {
+            TypeRef::Mutex(protected) => {
+                let construction = self.resolve_default_call(protected, span, context)?;
+                let throws = construction.throws.clone();
+                Some(ResolvedCall {
+                    span,
+                    target: CallTarget::Intrinsic(Intrinsic::MutexNew {
+                        target: protected.as_ref().clone(),
+                        construction: Box::new(construction),
+                    }),
+                    return_type: TypeRef::Mutex(protected.clone()),
+                    throws,
+                })
+            }
+            TypeRef::Condition => Some(ResolvedCall {
+                span,
+                target: CallTarget::Intrinsic(Intrinsic::ConditionNew),
+                return_type: TypeRef::Condition,
+                throws: Vec::new(),
+            }),
+            TypeRef::MutexGuard(_) => {
+                self.push(
+                    "RES113",
+                    "mutex guards cannot be default-constructed".to_owned(),
+                    span,
+                );
+                None
+            }
             TypeRef::Pointer { kind, target }
                 if matches!(
                     kind,
@@ -2854,6 +2944,12 @@ impl Resolver<'_> {
                     span,
                     context,
                 ),
+            ExpressionKind::GenericName {
+                path,
+                arguments: type_arguments,
+            } if matches!(path.segments.as_slice(), [name] if name == "mutex") => {
+                self.resolve_mutex_constructor(type_arguments, arguments, span, context)
+            }
             ExpressionKind::GenericName { path, .. } => {
                 for argument in arguments {
                     self.resolve_expression(argument, None, context);
@@ -2872,6 +2968,12 @@ impl Resolver<'_> {
             }
             ExpressionKind::Name(path) if matches!(path.segments.as_slice(), [name] if name == "var") => {
                 self.resolve_json_wrap(arguments, span, context)
+            }
+            ExpressionKind::Name(path) if matches!(path.segments.as_slice(), [name] if name == "condition") =>
+            {
+                let call =
+                    self.resolve_slot_construction(&TypeRef::Condition, arguments, span, context);
+                (temporary(TypeRef::Condition), call)
             }
             ExpressionKind::Name(path) if matches!(path.segments.as_slice(), [name] if name == "make_unique") =>
             {
@@ -3166,7 +3268,11 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
         receiver_info: &ExpressionInfo,
     ) -> (ExpressionInfo, Option<ResolvedCall>) {
-        match self.refined_automatic_pointee(receiver, receiver_info, context, span) {
+        let method_receiver = match canonical_ref(&receiver_info.ty) {
+            TypeRef::MutexGuard(_) => canonical_ref(&receiver_info.ty).clone(),
+            _ => self.refined_automatic_pointee(receiver, receiver_info, context, span),
+        };
+        match method_receiver {
             TypeRef::Struct { path } => {
                 let Some(structure) = self.struct_by_path.get(&path).copied() else {
                     return (error_info(), None);
@@ -3196,6 +3302,18 @@ impl Resolver<'_> {
                     context,
                 )
             }
+            TypeRef::Mutex(target) => {
+                self.resolve_mutex_method(target.as_ref(), name, arguments, span, context)
+            }
+            TypeRef::MutexGuard(target) => self.resolve_mutex_guard_method(
+                target.as_ref(),
+                receiver_info,
+                name,
+                arguments,
+                span,
+                context,
+            ),
+            TypeRef::Condition => self.resolve_condition_method(name, arguments, span, context),
             TypeRef::Native {
                 path,
                 arguments: type_arguments,
@@ -3272,6 +3390,184 @@ impl Resolver<'_> {
             }
             _ => automatic_pointee(&receiver_info.ty).clone(),
         }
+    }
+
+    fn resolve_mutex_method(
+        &mut self,
+        target: &TypeRef,
+        name: &ast::Path,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        if name.segments.as_slice() != ["lock"] || !arguments.is_empty() {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES113",
+                if name.segments.as_slice() == ["lock"] {
+                    format!(
+                        "`mutex<T>.lock()` requires no arguments, found {}",
+                        arguments.len()
+                    )
+                } else {
+                    format!("`mutex<T>` has no method `{}`", name.display())
+                },
+                span,
+            );
+            return (error_info(), None);
+        }
+        let return_type = TypeRef::MutexGuard(Box::new(target.clone()));
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::MutexLock {
+                target: target.clone(),
+            }),
+            return_type: return_type.clone(),
+            throws: Vec::new(),
+        };
+        (temporary(return_type), Some(call))
+    }
+
+    fn resolve_mutex_guard_method(
+        &mut self,
+        target: &TypeRef,
+        receiver: &ExpressionInfo,
+        name: &ast::Path,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        if name.segments.as_slice() != ["value"] || !arguments.is_empty() {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES113",
+                if name.segments.as_slice() == ["value"] {
+                    format!(
+                        "`guard.value()` requires no arguments, found {}",
+                        arguments.len()
+                    )
+                } else {
+                    format!("a mutex guard has no method `{}`", name.display())
+                },
+                span,
+            );
+            return (error_info(), None);
+        }
+        let mutable = receiver.category == ValueCategory::MutablePlace;
+        let return_type = TypeRef::Reference {
+            mutable,
+            target: Box::new(target.clone()),
+        };
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::MutexGuardValue {
+                target: target.clone(),
+                mutable,
+            }),
+            return_type: return_type.clone(),
+            throws: Vec::new(),
+        };
+        (info_for_return_type(return_type), Some(call))
+    }
+
+    fn resolve_condition_method(
+        &mut self,
+        name: &ast::Path,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        let operation = name.segments.as_slice();
+        if operation == ["notify_one"] || operation == ["notify_all"] {
+            if !arguments.is_empty() {
+                for argument in arguments {
+                    self.resolve_expression(argument, None, context);
+                }
+                self.push(
+                    "RES113",
+                    format!(
+                        "`condition.{}` requires no arguments, found {}",
+                        name.display(),
+                        arguments.len()
+                    ),
+                    span,
+                );
+                return (error_info(), None);
+            }
+            let call = ResolvedCall {
+                span,
+                target: CallTarget::Intrinsic(Intrinsic::ConditionNotify {
+                    all: operation == ["notify_all"],
+                }),
+                return_type: TypeRef::Void,
+                throws: Vec::new(),
+            };
+            return (temporary(TypeRef::Void), Some(call));
+        }
+
+        if operation != ["wait"] {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES113",
+                format!("`condition` has no method `{}`", name.display()),
+                span,
+            );
+            return (error_info(), None);
+        }
+        if arguments.len() != 1 {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES113",
+                format!(
+                    "`condition.wait(guard)` requires one argument, found {}",
+                    arguments.len()
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+
+        let argument = &arguments[0];
+        let info = self.resolve_expression(argument, None, context);
+        let TypeRef::MutexGuard(target) = canonical_ref(&info.ty) else {
+            if info.ty != TypeRef::Error {
+                self.push(
+                    "RES113",
+                    format!(
+                        "`condition.wait()` requires a mutex guard, found `{}`",
+                        display_type(&info.ty)
+                    ),
+                    argument.span,
+                );
+            }
+            return (error_info(), None);
+        };
+        if info.category != ValueCategory::MutablePlace || !is_named_value_expression(argument) {
+            self.push(
+                "RES114",
+                "`condition.wait()` requires a mutable named guard so it can rebind it after waking"
+                    .to_owned(),
+                argument.span,
+            );
+            return (error_info(), None);
+        }
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::ConditionWait {
+                target: target.as_ref().clone(),
+            }),
+            return_type: TypeRef::Void,
+            throws: Vec::new(),
+        };
+        (temporary(TypeRef::Void), Some(call))
     }
 
     fn resolve_atomic_pointer_method(
@@ -3634,6 +3930,14 @@ impl Resolver<'_> {
             return (error_info(), None);
         }
         let argument = self.resolve_expression(&arguments[0], None, context);
+        if matches!(canonical_ref(&argument.ty), TypeRef::MutexGuard(_)) {
+            self.push(
+                "RES114",
+                "mutex guards cannot be moved explicitly; `condition.wait(guard)` performs the only permitted guard transfer"
+                    .to_owned(),
+                arguments[0].span,
+            );
+        }
         if !matches!(
             argument.category,
             ValueCategory::MutablePlace | ValueCategory::SharedPlace
@@ -3651,6 +3955,68 @@ impl Resolver<'_> {
             target: CallTarget::Intrinsic(Intrinsic::Move),
             return_type: return_type.clone(),
             throws: Vec::new(),
+        };
+        (temporary(return_type), Some(call))
+    }
+
+    fn resolve_mutex_constructor(
+        &mut self,
+        type_arguments: &[ast::Type],
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        if type_arguments.len() != 1 {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES113",
+                format!(
+                    "`mutex` requires one protected type argument, found {}",
+                    type_arguments.len()
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+        let target = self.resolve_type(&type_arguments[0], &context.namespace, false);
+        if target == TypeRef::Error {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            return (error_info(), None);
+        }
+        if matches!(target, TypeRef::Void | TypeRef::Reference { .. })
+            || target.contains_reference()
+        {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES113",
+                format!(
+                    "`mutex` cannot protect type `{}` because it contains a reference",
+                    display_type(&target)
+                ),
+                type_arguments[0].span,
+            );
+            return (error_info(), None);
+        }
+        let return_type = TypeRef::Mutex(Box::new(target.clone()));
+        let Some(construction) = self.resolve_slot_construction(&target, arguments, span, context)
+        else {
+            return (error_info(), None);
+        };
+        let throws = construction.throws.clone();
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::MutexNew {
+                target,
+                construction: Box::new(construction),
+            }),
+            return_type: return_type.clone(),
+            throws,
         };
         (temporary(return_type), Some(call))
     }
@@ -5097,6 +5463,46 @@ impl Resolver<'_> {
                     } else {
                         TypeRef::pointer(kind, arguments[0].clone())
                     }
+                } else if matches!(segments.as_slice(), [name] if name == "mutex") {
+                    let arguments = named
+                        .arguments
+                        .iter()
+                        .map(|argument| self.resolve_type(argument, namespace, false))
+                        .collect::<Vec<_>>();
+                    if arguments.len() != 1 {
+                        self.push(
+                            "RES113",
+                            format!(
+                                "`mutex` expects one protected type argument, found {}",
+                                arguments.len()
+                            ),
+                            ty.span,
+                        );
+                        TypeRef::Error
+                    } else if matches!(arguments[0], TypeRef::Void | TypeRef::Reference { .. })
+                        || arguments[0].contains_reference()
+                    {
+                        self.push(
+                            "RES113",
+                            format!(
+                                "`mutex` cannot protect type `{}` because it contains a reference",
+                                display_type(&arguments[0])
+                            ),
+                            ty.span,
+                        );
+                        TypeRef::Error
+                    } else {
+                        TypeRef::Mutex(Box::new(arguments[0].clone()))
+                    }
+                } else if matches!(segments.as_slice(), [name] if name == "condition") {
+                    if !named.arguments.is_empty() {
+                        self.push(
+                            "RES113",
+                            "`condition` does not accept type arguments".to_owned(),
+                            ty.span,
+                        );
+                    }
+                    TypeRef::Condition
                 } else if matches!(segments.as_slice(), [name] if name == "var") {
                     if !named.arguments.is_empty() {
                         self.push(
@@ -5457,6 +5863,9 @@ impl Resolver<'_> {
             | TypeRef::Callback(_)
             | TypeRef::Function(_)
             | TypeRef::Pointer { .. }
+            | TypeRef::Mutex(_)
+            | TypeRef::MutexGuard(_)
+            | TypeRef::Condition
             | TypeRef::Struct { .. }
             | TypeRef::Reference { .. }
             | TypeRef::Error => false,
@@ -5588,7 +5997,8 @@ fn automatic_pointee(ty: &TypeRef) -> &TypeRef {
         TypeRef::Pointer {
             kind: PointerKind::Unique | PointerKind::Shared,
             target,
-        } => canonical_ref(target),
+        }
+        | TypeRef::MutexGuard(target) => canonical_ref(target),
         target => target,
     }
 }
@@ -5990,6 +6400,7 @@ fn callable_signature(ty: &TypeRef) -> Option<(&[TypeRef], &TypeRef)> {
 
 fn contains_move_only_storage(ty: &TypeRef) -> bool {
     match ty {
+        TypeRef::Mutex(_) | TypeRef::MutexGuard(_) | TypeRef::Condition => true,
         TypeRef::Function(function) => function.kind == StoredFunctionKind::Mutable,
         TypeRef::Pointer { kind, .. } => matches!(
             kind,
@@ -6107,6 +6518,9 @@ fn display_type(ty: &TypeRef) -> String {
         TypeRef::Pointer { kind, target } => {
             format!("{}<{}>", pointer_name(*kind), display_type(target))
         }
+        TypeRef::Mutex(target) => format!("mutex<{}>", display_type(target)),
+        TypeRef::MutexGuard(target) => format!("<mutex_guard<{}>>", display_type(target)),
+        TypeRef::Condition => "condition".to_owned(),
         TypeRef::Struct { path } => display_path(path),
         TypeRef::Reference { mutable, target } => {
             if *mutable {

@@ -18,12 +18,79 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
         include_str!("../../../docs/ref/19_stored_functions.stl"),
         include_str!("../../../docs/ref/20_formatting_macros.stl"),
         include_str!("../../../docs/ref/22_pointer_family.stl"),
+        include_str!("../../../docs/ref/23_mutex_and_condition.stl"),
     ] {
         let analysis = analyze(source);
 
         assert!(
             analysis.diagnostics.is_empty(),
             "{:?}",
+            analysis.diagnostics
+        );
+    }
+}
+
+#[test]
+fn resolves_mutex_guards_condition_waits_and_notifications() {
+    let analysis = analyze(include_str!("../../../docs/ref/23_mutex_and_condition.stl"));
+
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+    assert!(analysis.semantics.bindings.iter().any(|binding| {
+        matches!(
+            &binding.ty,
+            TypeRef::MutexGuard(target)
+                if matches!(target.as_ref(), TypeRef::Struct { path } if path == &["SharedState"])
+        )
+    }));
+    for expected in ["lock", "wait", "notify"] {
+        assert!(analysis.semantics.calls.iter().any(|call| matches!(
+            (&call.target, expected),
+            (CallTarget::Intrinsic(Intrinsic::MutexLock { .. }), "lock")
+                | (
+                    CallTarget::Intrinsic(Intrinsic::ConditionWait { .. }),
+                    "wait"
+                )
+                | (
+                    CallTarget::Intrinsic(Intrinsic::ConditionNotify { all: true }),
+                    "notify"
+                )
+        )));
+    }
+}
+
+#[test]
+fn mutex_and_condition_reject_copying_invalid_waits_and_guard_moves() {
+    let analysis = analyze(
+        r"struct InvalidStorage {
+    mutex<i32> state;
+    condition changed;
+};
+
+void invalid_sync() {
+    mutex<i32> state = mutex<i32>(0);
+    condition changed;
+    mutex<i32> copied_state = state;
+    condition copied_condition = changed;
+    auto guard = state.lock();
+    changed.wait(1);
+    auto moved_guard = move(guard);
+}
+",
+    );
+    let codes = analysis
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+
+    for expected in ["RES027", "RES092", "RES113", "RES114"] {
+        assert!(
+            codes.contains(&expected),
+            "missing {expected}: {:#?}",
             analysis.diagnostics
         );
     }

@@ -887,6 +887,46 @@ impl Emitter {
                     }
                 }))
             }
+            hir::Expression::MutexNew(value) => {
+                let value = self.expression(value)?;
+                Ok(quote!(::std::sync::Mutex::new(#value)))
+            }
+            hir::Expression::ConditionNew => Ok(quote!(::std::sync::Condvar::new())),
+            hir::Expression::MutexLock(mutex) => {
+                let mutex = self.expression(mutex)?;
+                let poisoned = self.temporary("poisoned_mutex")?;
+                Ok(quote!(match (#mutex).lock() {
+                    Ok(guard) => guard,
+                    Err(#poisoned) => #poisoned.into_inner(),
+                }))
+            }
+            hir::Expression::MutexGuardValue { mutable, guard } => {
+                let guard = self.expression(guard)?;
+                if *mutable {
+                    Ok(quote!(&mut *(#guard)))
+                } else {
+                    Ok(quote!(&*(#guard)))
+                }
+            }
+            hir::Expression::ConditionWait { condition, guard } => {
+                let condition = self.expression(condition)?;
+                let guard = self.expression(guard)?;
+                let poisoned = self.temporary("poisoned_mutex_wait")?;
+                Ok(quote!({
+                    #guard = match (#condition).wait(#guard) {
+                        Ok(next_guard) => next_guard,
+                        Err(#poisoned) => #poisoned.into_inner(),
+                    };
+                }))
+            }
+            hir::Expression::ConditionNotify { condition, all } => {
+                let condition = self.expression(condition)?;
+                if *all {
+                    Ok(quote!((#condition).notify_all()))
+                } else {
+                    Ok(quote!((#condition).notify_one()))
+                }
+            }
             hir::Expression::UnwrapRustResult {
                 expression,
                 exception,
@@ -1250,6 +1290,15 @@ fn type_tokens(ty: &hir::Type, lifetime: Option<&syn::Lifetime>) -> Result<Token
                 ),
             })
         }
+        hir::Type::Mutex(target) => {
+            let target = type_tokens(target, None)?;
+            Ok(quote!(::std::sync::Mutex<#target>))
+        }
+        hir::Type::MutexGuard(target) => {
+            let target = type_tokens(target, None)?;
+            Ok(quote!(::std::sync::MutexGuard<'_, #target>))
+        }
+        hir::Type::Condition => Ok(quote!(::std::sync::Condvar)),
         hir::Type::User { rust_path } => {
             let path = path(rust_path)?;
             Ok(quote!(#path))

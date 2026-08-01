@@ -572,6 +572,72 @@ fn main() {{
 }
 
 #[test]
+fn mutex_and_condition_lower_to_thread_safe_rust_and_wake_waiters() {
+    let result = transpile(include_str!("../../../docs/ref/23_mutex_and_condition.stl"));
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let mut rust = result
+        .rust
+        .expect("mutex reference sample should emit Rust");
+    assert!(rust.contains("::std::sync::Mutex<"), "{rust}");
+    assert!(rust.contains("::std::sync::MutexGuard<'_"), "{rust}");
+    assert!(rust.contains("::std::sync::Condvar"), "{rust}");
+    assert!(rust.contains("into_inner()"), "{rust}");
+
+    let function = |path: &[&str]| {
+        result
+            .analysis
+            .semantics
+            .functions
+            .iter()
+            .find(|function| {
+                function
+                    .path
+                    .iter()
+                    .map(String::as_str)
+                    .eq(path.iter().copied())
+            })
+            .unwrap_or_else(|| panic!("missing function {path:?}"))
+            .mangled_name
+            .clone()
+    };
+    let new_state = function(&["new_shared_state"]);
+    let new_condition = function(&["new_condition"]);
+    let wait = function(&["wait_for_value"]);
+    let publish = function(&["publish_value"]);
+    write!(
+        rust,
+        r#"
+fn main() {{
+    let state = {new_state}();
+    let changed = {new_condition}();
+    let wait_state = ::std::sync::Arc::clone(&state);
+    let wait_changed = ::std::sync::Arc::clone(&changed);
+    let waiter = ::std::thread::spawn(move || {wait}(wait_state, wait_changed));
+    ::std::thread::sleep(::std::time::Duration::from_millis(10));
+    {publish}(state, changed, 42);
+    assert_eq!(waiter.join().expect("waiter panicked"), 42);
+}}
+"#
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("mutex-condition", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run {}: {error}", binary.display()));
+    assert!(
+        output.status.success(),
+        "generated mutex-condition binary failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    remove_temporary_parent(&binary);
+}
+
+#[test]
 fn constructors_initialize_bases_fields_and_synthesized_defaults() {
     let source = r#"use rust::{String, Vec};
 

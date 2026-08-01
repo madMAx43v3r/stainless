@@ -167,6 +167,23 @@ void invalid(Vec<i32> values) {
 }
 
 #[test]
+fn condition_wait_rejects_a_guard_with_a_live_value_borrow() {
+    let analysis = analyze(
+        r"i32 invalid_wait() {
+    mutex<i32> state = mutex<i32>(0);
+    condition changed;
+    auto guard = state.lock();
+    i32& value = guard.value();
+    changed.wait(guard);
+    return value;
+}
+",
+    );
+
+    assert_codes(&analysis, &["OWN003"]);
+}
+
+#[test]
 fn rejects_invalid_reference_sources_and_escapes() {
     let temporary = analyze(
         r#"use rust::String;
