@@ -15,11 +15,12 @@ use super::imports::ImportTable;
 use super::mangle;
 use super::{
     BindingResolution, CallTarget, CallbackTarget, ConstructorFieldInitialization, ConstructorId,
-    ConstructorSymbol, ExpressionResolution, FieldSymbol, FunctionId, FunctionSymbol, Intrinsic,
-    LambdaCaptureMode, NativeCall, NativeCallResultAdaptation, NativeResultException,
-    ParameterSymbol, Resolution, ResolvedCall, ResolvedCallback, ResolvedField,
-    ResolvedLambdaCapture, ResolvedNativeType, ResolvedTraitRequirement, RustErrorMessage,
-    RustResultAdaptation, SemanticModel, StructId, StructReceiver, StructSymbol, ValueCategory,
+    ConstructorSymbol, ExpressionResolution, FieldSymbol, FunctionId, FunctionSymbol,
+    InterfaceImplementation, Intrinsic, LambdaCaptureMode, NativeCall, NativeCallResultAdaptation,
+    NativeResultException, ParameterSymbol, Resolution, ResolvedCall, ResolvedCallback,
+    ResolvedField, ResolvedLambdaCapture, ResolvedNativeType, ResolvedTraitRequirement,
+    RustErrorMessage, RustResultAdaptation, SemanticModel, StructId, StructReceiver, StructSymbol,
+    ValueCategory,
 };
 
 /// Resolves names and types using an explicit native binding registry.
@@ -57,6 +58,7 @@ pub fn resolve(source: &SourceFile, bindings: &NativeBindings) -> Resolution {
     resolver.validate_struct_cycles();
     resolver.collect_signatures(&source.items, &mut Vec::new());
     resolver.synthesize_default_constructors();
+    resolver.validate_interface_contracts();
     resolver.validate_member_declarations();
     resolver.resolve_bodies(&source.items, &mut Vec::new());
     resolver
@@ -119,6 +121,14 @@ struct ExpressionInfo {
 }
 
 #[derive(Clone, Debug)]
+struct StructFieldLookup {
+    ty: TypeRef,
+    access_path: Vec<String>,
+    owner: StructId,
+    is_public: bool,
+}
+
+#[derive(Clone, Debug)]
 struct NativeInstance {
     type_path: String,
     arguments: Vec<TypeRef>,
@@ -146,9 +156,13 @@ impl Resolver<'_> {
         self.model.structs.push(StructSymbol {
             id: root,
             path: root_path.clone(),
+            kind: ast::UserTypeKind::Struct,
             base: None,
+            interfaces: Vec::new(),
+            is_sealed: false,
             fields: vec![FieldSymbol {
                 name: "message".to_owned(),
+                is_public: true,
                 ty: TypeRef::Native {
                     path: "rust::String".to_owned(),
                     arguments: Vec::new(),
@@ -164,7 +178,10 @@ impl Resolver<'_> {
         self.model.structs.push(StructSymbol {
             id: rust_error,
             path: rust_error_path.clone(),
+            kind: ast::UserTypeKind::Struct,
             base: Some(root),
+            interfaces: Vec::new(),
+            is_sealed: false,
             fields: Vec::new(),
             span: Span::default(),
         });
@@ -175,7 +192,10 @@ impl Resolver<'_> {
         self.model.structs.push(StructSymbol {
             id: format_error,
             path: format_error_path.clone(),
+            kind: ast::UserTypeKind::Struct,
             base: Some(root),
+            interfaces: Vec::new(),
+            is_sealed: false,
             fields: Vec::new(),
             span: Span::default(),
         });
@@ -186,7 +206,10 @@ impl Resolver<'_> {
         self.model.structs.push(StructSymbol {
             id: json_error,
             path: json_error_path.clone(),
+            kind: ast::UserTypeKind::Struct,
             base: Some(root),
+            interfaces: Vec::new(),
+            is_sealed: false,
             fields: Vec::new(),
             span: Span::default(),
         });
@@ -197,7 +220,10 @@ impl Resolver<'_> {
         self.model.structs.push(StructSymbol {
             id: thread_error,
             path: thread_error_path.clone(),
+            kind: ast::UserTypeKind::Struct,
             base: Some(root),
+            interfaces: Vec::new(),
+            is_sealed: false,
             fields: Vec::new(),
             span: Span::default(),
         });
@@ -227,7 +253,10 @@ impl Resolver<'_> {
                     self.model.structs.push(StructSymbol {
                         id,
                         path: path.clone(),
+                        kind: structure.kind,
                         base: None,
+                        interfaces: Vec::new(),
+                        is_sealed: structure.is_sealed,
                         fields: Vec::new(),
                         span: structure.span,
                     });
@@ -239,6 +268,7 @@ impl Resolver<'_> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn resolve_struct_definitions(&mut self, items: &[Item], namespace: &mut Vec<String>) {
         for item in items {
             match item {
@@ -251,23 +281,108 @@ impl Resolver<'_> {
                     let Some(id) = self.struct_by_span.get(&structure.span).copied() else {
                         continue;
                     };
-                    let base = structure.base.as_ref().and_then(|base| {
-                        let found = self.lookup_struct_path(&base.segments, namespace);
-                        if found.is_none() {
+                    let mut base = None;
+                    let mut interfaces = Vec::new();
+                    for base_syntax in &structure.bases {
+                        let TypeKind::Named(named) = &base_syntax.kind else {
                             self.push(
                                 "RES040",
-                                format!("unresolved data base struct `{}`", base.display()),
-                                structure.span,
+                                "a base declaration must name a user-defined type".to_owned(),
+                                base_syntax.span,
+                            );
+                            continue;
+                        };
+                        if base_syntax.is_const
+                            || base_syntax.is_reference
+                            || !named.arguments.is_empty()
+                        {
+                            self.push(
+                                "RES040",
+                                "base declarations cannot be const, references, or generic instances"
+                                    .to_owned(),
+                                base_syntax.span,
+                            );
+                            continue;
+                        }
+                        let Some(found) = self.lookup_struct_path(&named.path.segments, namespace)
+                        else {
+                            self.push(
+                                "RES040",
+                                format!("unresolved base type `{}`", named.path.display()),
+                                base_syntax.span,
+                            );
+                            continue;
+                        };
+                        if found == id {
+                            self.push(
+                                "RES041",
+                                "a type cannot inherit from or implement itself".to_owned(),
+                                base_syntax.span,
+                            );
+                            continue;
+                        }
+                        let base_kind = self.model.structs[found.0].kind;
+                        let base_path = self.model.structs[found.0].path.clone();
+                        let base_sealed = self.model.structs[found.0].is_sealed;
+                        if base_sealed
+                            && base_path[..base_path.len().saturating_sub(1)]
+                                != self.model.structs[id.0].path
+                                    [..self.model.structs[id.0].path.len().saturating_sub(1)]
+                        {
+                            self.push(
+                                "RES118",
+                                format!(
+                                    "sealed type `{}` cannot be inherited or implemented outside its module",
+                                    display_path(&base_path)
+                                ),
+                                base_syntax.span,
                             );
                         }
-                        found
-                    });
-                    if base == Some(id) {
-                        self.push(
-                            "RES041",
-                            "a struct cannot inherit from itself".to_owned(),
-                            structure.span,
-                        );
+                        match (structure.kind, base_kind) {
+                            (ast::UserTypeKind::Struct, ast::UserTypeKind::Struct) => {
+                                if base.replace(found).is_some() {
+                                    self.push(
+                                        "RES118",
+                                        "a struct may have only one data base".to_owned(),
+                                        base_syntax.span,
+                                    );
+                                }
+                            }
+                            (
+                                ast::UserTypeKind::Struct
+                                | ast::UserTypeKind::Class
+                                | ast::UserTypeKind::Interface,
+                                ast::UserTypeKind::Interface,
+                            ) => {
+                                if interfaces.contains(&found) {
+                                    self.push(
+                                        "RES118",
+                                        format!(
+                                            "duplicate interface base `{}`",
+                                            display_path(&base_path)
+                                        ),
+                                        base_syntax.span,
+                                    );
+                                } else {
+                                    interfaces.push(found);
+                                }
+                            }
+                            (ast::UserTypeKind::Class, _) => self.push(
+                                "RES118",
+                                "a class may inherit only from interfaces".to_owned(),
+                                base_syntax.span,
+                            ),
+                            (ast::UserTypeKind::Interface, _) => self.push(
+                                "RES118",
+                                "an interface may inherit only from interfaces".to_owned(),
+                                base_syntax.span,
+                            ),
+                            (ast::UserTypeKind::Struct, ast::UserTypeKind::Class) => self.push(
+                                "RES118",
+                                "a struct cannot inherit from a class".to_owned(),
+                                base_syntax.span,
+                            ),
+                        }
                     }
                     let mut names = BTreeSet::new();
                     let fields = structure
@@ -282,6 +397,11 @@ impl Resolver<'_> {
                                 );
                             }
                             let ty = self.resolve_type(&field.ty, namespace, false);
+                            self.reject_bare_interface_type(
+                                &ty,
+                                field.ty.span,
+                                "data field",
+                            );
                             if ty.contains_reference() {
                                 self.push(
                                     "RES043",
@@ -289,7 +409,9 @@ impl Resolver<'_> {
                                     field.ty.span,
                                 );
                             }
-                            if contains_move_only_storage(&ty) {
+                            if structure.kind == ast::UserTypeKind::Struct
+                                && contains_move_only_storage(&ty)
+                            {
                                 self.push(
                                     "RES092",
                                     "move-only ownership cannot be stored in an implicitly copyable struct"
@@ -299,13 +421,15 @@ impl Resolver<'_> {
                             }
                             FieldSymbol {
                                 name: field.name.clone(),
+                                is_public: field.is_public,
                                 ty,
                                 span: field.span,
                             }
                         })
                         .collect();
                     let symbol = &mut self.model.structs[id.0];
-                    symbol.base = base.filter(|base| *base != id);
+                    symbol.base = base;
+                    symbol.interfaces = interfaces;
                     symbol.fields = fields;
                 }
                 Item::Use(_) | Item::Constructor(_) | Item::Function(_) => {}
@@ -331,6 +455,172 @@ impl Resolver<'_> {
                 }
                 current = self.model.structs[id.0].base;
             }
+            if structure.kind == ast::UserTypeKind::Interface {
+                self.validate_interface_cycle(structure.id, structure.id, &mut BTreeSet::new());
+            }
+        }
+    }
+
+    fn validate_interface_cycle(
+        &mut self,
+        root: StructId,
+        current: StructId,
+        visiting: &mut BTreeSet<StructId>,
+    ) {
+        if !visiting.insert(current) {
+            if current == root {
+                self.push(
+                    "RES118",
+                    format!(
+                        "interface inheritance cycle involving `{}`",
+                        display_path(&self.model.structs[root.0].path)
+                    ),
+                    self.model.structs[root.0].span,
+                );
+            }
+            return;
+        }
+        let bases = self.model.structs[current.0].interfaces.clone();
+        for base in bases {
+            self.validate_interface_cycle(root, base, visiting);
+        }
+        visiting.remove(&current);
+    }
+
+    fn validate_interface_contracts(&mut self) {
+        let structures = self.model.structs.clone();
+        for implementer in structures
+            .iter()
+            .filter(|structure| structure.kind != ast::UserTypeKind::Interface)
+        {
+            let mut interfaces = BTreeSet::new();
+            for interface in &implementer.interfaces {
+                self.collect_interface_closure(*interface, &mut interfaces);
+            }
+            for interface in interfaces {
+                let requirements = self
+                    .model
+                    .functions
+                    .iter()
+                    .filter(|function| {
+                        function
+                            .receiver
+                            .as_ref()
+                            .is_some_and(|receiver| receiver.structure == interface)
+                    })
+                    .map(|function| function.id)
+                    .collect::<Vec<_>>();
+                let mut methods = Vec::new();
+                let mut complete = true;
+                for requirement_id in requirements {
+                    let requirement = self.model.functions[requirement_id.0].clone();
+                    let method_name = requirement.path.last().cloned().unwrap_or_default();
+                    let mut implementation_path = implementer.path.clone();
+                    implementation_path.push(method_name.clone());
+                    let matches =
+                        self.function_sets
+                            .get(&implementation_path)
+                            .into_iter()
+                            .flatten()
+                            .copied()
+                            .filter(|candidate| {
+                                let candidate = &self.model.functions[candidate.0];
+                                candidate.has_definition
+                                    && candidate
+                                        .parameters
+                                        .iter()
+                                        .map(|parameter| &parameter.ty)
+                                        .eq(requirement
+                                            .parameters
+                                            .iter()
+                                            .map(|parameter| &parameter.ty))
+                                    && candidate.receiver.as_ref().is_some_and(|receiver| {
+                                        receiver.structure == implementer.id
+                                            && receiver.mutable
+                                                == requirement
+                                                    .receiver
+                                                    .as_ref()
+                                                    .is_some_and(|receiver| receiver.mutable)
+                                    })
+                                    && self.interface_return_matches(
+                                        &requirement.return_type,
+                                        &candidate.return_type,
+                                        interface,
+                                        implementer.id,
+                                    )
+                                    && candidate.throws.iter().all(|thrown| {
+                                        requirement.throws.iter().any(|declared| {
+                                            self.exception_covers(*declared, *thrown)
+                                        })
+                                    })
+                            })
+                            .collect::<Vec<_>>();
+                    if matches.len() == 1 {
+                        methods.push((requirement_id, matches[0]));
+                    } else {
+                        complete = false;
+                        self.push(
+                            "RES120",
+                            format!(
+                                "type `{}` does not provide exactly one implementation of `{}::{}`",
+                                display_path(&implementer.path),
+                                display_path(&self.model.structs[interface.0].path),
+                                method_name
+                            ),
+                            implementer.span,
+                        );
+                    }
+                }
+                if complete {
+                    self.model
+                        .interface_implementations
+                        .push(InterfaceImplementation {
+                            implementer: implementer.id,
+                            interface,
+                            methods,
+                        });
+                }
+            }
+        }
+    }
+
+    fn collect_interface_closure(&self, interface: StructId, collected: &mut BTreeSet<StructId>) {
+        if !collected.insert(interface) {
+            return;
+        }
+        for base in &self.model.structs[interface.0].interfaces {
+            self.collect_interface_closure(*base, collected);
+        }
+    }
+
+    fn interface_return_matches(
+        &self,
+        required: &TypeRef,
+        actual: &TypeRef,
+        interface: StructId,
+        implementer: StructId,
+    ) -> bool {
+        if required == actual {
+            return true;
+        }
+        match (required, actual) {
+            (
+                TypeRef::Reference {
+                    mutable: required_mutable,
+                    target: required_target,
+                },
+                TypeRef::Reference {
+                    mutable: actual_mutable,
+                    target: actual_target,
+                },
+            ) => {
+                required_mutable == actual_mutable
+                    && canonical_ref(required_target)
+                        == &resolved_structure_type(&self.model.structs[interface.0])
+                    && canonical_ref(actual_target)
+                        == &resolved_structure_type(&self.model.structs[implementer.0])
+            }
+            _ => false,
         }
     }
 
@@ -398,6 +688,14 @@ impl Resolver<'_> {
             );
             return;
         };
+        if self.model.structs[owner.0].kind == ast::UserTypeKind::Interface {
+            self.push(
+                "RES118",
+                "interfaces cannot declare constructors".to_owned(),
+                constructor.span,
+            );
+            return;
+        }
         let structure_path = self.model.structs[owner.0].path.clone();
         if path.last() != structure_path.last() {
             self.push(
@@ -415,12 +713,28 @@ impl Resolver<'_> {
         let parameters = constructor
             .parameters
             .iter()
-            .map(|parameter| ParameterSymbol {
-                name: parameter.name.clone(),
-                ty: self.resolve_type(&parameter.ty, type_namespace, false),
-                span: parameter.span,
+            .map(|parameter| {
+                let ty = self.resolve_type(&parameter.ty, type_namespace, false);
+                self.reject_bare_interface_type(&ty, parameter.ty.span, "parameter");
+                ParameterSymbol {
+                    name: parameter.name.clone(),
+                    ty,
+                    span: parameter.span,
+                }
             })
             .collect::<Vec<_>>();
+        if self.model.structs[owner.0].kind == ast::UserTypeKind::Class
+            && matches!(parameters.as_slice(), [parameter]
+                if canonical(&parameter.ty)
+                    == resolved_structure_type(&self.model.structs[owner.0]))
+        {
+            self.push(
+                "RES119",
+                "classes cannot declare copy or move constructors; class relocation is provided only by `move(...)`"
+                    .to_owned(),
+                constructor.span,
+            );
+        }
         let signature = parameters
             .iter()
             .map(|parameter| canonical(&parameter.ty))
@@ -478,6 +792,9 @@ impl Resolver<'_> {
                 );
             }
             let symbol = &mut self.model.constructors[id.0];
+            if declared_owner.is_some() {
+                symbol.is_public = constructor.is_public;
+            }
             symbol.declarations.push(constructor.span);
             symbol.has_definition |= constructor.body.is_some();
             symbol.has_member_declaration |= declared_owner.is_some();
@@ -495,6 +812,7 @@ impl Resolver<'_> {
         );
         self.model.constructors.push(ConstructorSymbol {
             id,
+            is_public: constructor.is_public,
             structure: owner,
             parameters,
             throws,
@@ -512,6 +830,9 @@ impl Resolver<'_> {
 
     fn synthesize_default_constructors(&mut self) {
         for structure in self.model.structs.clone() {
+            if structure.kind == ast::UserTypeKind::Interface {
+                continue;
+            }
             if self
                 .constructor_sets
                 .get(&structure.id)
@@ -530,6 +851,7 @@ impl Resolver<'_> {
             );
             self.model.constructors.push(ConstructorSymbol {
                 id,
+                is_public: true,
                 structure: structure.id,
                 parameters: Vec::new(),
                 throws: Vec::new(),
@@ -611,6 +933,15 @@ impl Resolver<'_> {
         visiting: &mut BTreeSet<StructId>,
     ) -> bool {
         match canonical_ref(ty) {
+            TypeRef::Condition
+            | TypeRef::Pointer {
+                kind:
+                    PointerKind::UniqueNullable
+                    | PointerKind::SharedNullable
+                    | PointerKind::Weak
+                    | PointerKind::AtomicNullable,
+                ..
+            } => true,
             TypeRef::Native { path, .. } => {
                 self.bindings.type_by_path(path).is_some_and(|binding| {
                     binding.callables.iter().any(|callable| {
@@ -618,11 +949,39 @@ impl Resolver<'_> {
                     })
                 })
             }
-            TypeRef::Struct { path } => self
+            TypeRef::Struct { path } | TypeRef::Class { path } => self
                 .struct_by_path
                 .get(path)
                 .is_some_and(|id| self.struct_has_default_constructor(*id, visiting)),
-            _ => false,
+            TypeRef::Error
+            | TypeRef::Void
+            | TypeRef::Bool
+            | TypeRef::Char
+            | TypeRef::I8
+            | TypeRef::I16
+            | TypeRef::I32
+            | TypeRef::I64
+            | TypeRef::I128
+            | TypeRef::Isize
+            | TypeRef::U8
+            | TypeRef::U16
+            | TypeRef::U32
+            | TypeRef::U64
+            | TypeRef::U128
+            | TypeRef::Usize
+            | TypeRef::F32
+            | TypeRef::F64
+            | TypeRef::Parameter(_)
+            | TypeRef::Callback(_)
+            | TypeRef::Function(_)
+            | TypeRef::Pointer { .. }
+            | TypeRef::Mutex(_)
+            | TypeRef::MutexGuard(_)
+            | TypeRef::ThreadHandle(_)
+            | TypeRef::ThreadScope
+            | TypeRef::ScopedThreadHandle(_)
+            | TypeRef::Interface { .. }
+            | TypeRef::Reference { .. } => false,
         }
     }
 
@@ -659,22 +1018,27 @@ impl Resolver<'_> {
         let parameters = function
             .parameters
             .iter()
-            .map(|parameter| ParameterSymbol {
-                name: parameter.name.clone(),
-                ty: self.resolve_type(&parameter.ty, &type_namespace, false),
-                span: parameter.span,
+            .map(|parameter| {
+                let ty = self.resolve_type(&parameter.ty, &type_namespace, false);
+                self.reject_bare_interface_type(&ty, parameter.ty.span, "parameter");
+                ParameterSymbol {
+                    name: parameter.name.clone(),
+                    ty,
+                    span: parameter.span,
+                }
             })
             .collect::<Vec<_>>();
         let mut return_type = self.resolve_type(&function.return_type, &type_namespace, false);
+        self.reject_bare_interface_type(&return_type, function.return_type.span, "return value");
         let throws = self.resolve_exception_set(&function.throws, &type_namespace, function.span);
         if return_type == TypeRef::Void
             && let Some(receiver) = &receiver
         {
             return_type = TypeRef::Reference {
                 mutable: receiver.mutable,
-                target: Box::new(TypeRef::Struct {
-                    path: self.model.structs[receiver.structure.0].path.clone(),
-                }),
+                target: Box::new(resolved_structure_type(
+                    &self.model.structs[receiver.structure.0],
+                )),
             };
         }
         let signature = parameters
@@ -753,6 +1117,9 @@ impl Resolver<'_> {
             }
 
             let symbol = &mut self.model.functions[id.0];
+            if declared_owner.is_some() {
+                symbol.is_public = function.is_public;
+            }
             symbol.declarations.push(function.span);
             symbol.has_definition |= function.body.is_some();
             symbol.has_member_declaration |= declared_owner.is_some();
@@ -770,6 +1137,7 @@ impl Resolver<'_> {
         );
         self.model.functions.push(FunctionSymbol {
             id,
+            is_public: function.is_public,
             path: path.clone(),
             parameters,
             return_type,
@@ -1072,7 +1440,7 @@ impl Resolver<'_> {
                 );
                 None
             }
-            TypeRef::Struct { path } => {
+            TypeRef::Struct { path } | TypeRef::Class { path } => {
                 let structure = self.struct_by_path.get(path).copied()?;
                 let has_arity = self
                     .constructor_sets
@@ -1214,6 +1582,7 @@ impl Resolver<'_> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn resolve_default_call(
         &mut self,
         target: &TypeRef,
@@ -1275,10 +1644,21 @@ impl Resolver<'_> {
                 );
                 None
             }
-            TypeRef::Struct { path } => {
+            TypeRef::Struct { path } | TypeRef::Class { path } => {
                 let structure = self.struct_by_path.get(path).copied()?;
                 self.resolve_user_constructor(structure, &[], span, context)
                     .1
+            }
+            TypeRef::Interface { path } => {
+                self.push(
+                    "RES118",
+                    format!(
+                        "interface `{}` has no value constructor",
+                        display_path(path)
+                    ),
+                    span,
+                );
+                None
             }
             TypeRef::Native {
                 path,
@@ -1740,7 +2120,9 @@ impl Resolver<'_> {
         let declared = if local.ty.is_inferred() {
             None
         } else {
-            Some(self.resolve_type(&local.ty, &context.namespace, false))
+            let ty = self.resolve_type(&local.ty, &context.namespace, false);
+            self.reject_bare_interface_type(&ty, local.ty.span, "local variable");
+            Some(ty)
         };
         let resolved_type = if let Some(initializer) = &local.initializer {
             let expected = declared.as_ref().map(canonical);
@@ -1988,6 +2370,7 @@ impl Resolver<'_> {
         } else {
             self.resolve_type(&range.ty, &context.namespace, false)
         };
+        self.reject_bare_interface_type(&binding_type, range.ty.span, "range binding");
         if canonical(&binding_type) != element {
             self.push(
                 "RES007",
@@ -2284,18 +2667,27 @@ impl Resolver<'_> {
                 }
             }
             if let Some(receiver) = &context.receiver
-                && let Some((ty, access_path)) = self.lookup_struct_field(receiver.structure, path)
+                && let Some(field) = self.lookup_struct_field(receiver.structure, path)
             {
+                if !Self::member_is_accessible(field.owner, field.is_public, context) {
+                    self.push(
+                        "RES121",
+                        format!("field `{}` is private", path.display()),
+                        span,
+                    );
+                }
                 return (
                     ExpressionInfo {
-                        ty,
+                        ty: field.ty,
                         category: if receiver.mutable {
                             ValueCategory::MutablePlace
                         } else {
                             ValueCategory::SharedPlace
                         },
                     },
-                    Some(ResolvedField { access_path }),
+                    Some(ResolvedField {
+                        access_path: field.access_path,
+                    }),
                 );
             }
         }
@@ -2683,6 +3075,7 @@ impl Resolver<'_> {
         }
         for (index, parameter) in parameters.iter().enumerate() {
             let resolved = self.resolve_type(&parameter.ty, &outer.namespace, false);
+            self.reject_bare_interface_type(&resolved, parameter.ty.span, "lambda parameter");
             if let Some(expected) = callback_parameters.get(index)
                 && *expected != resolved
                 && *expected != TypeRef::Error
@@ -2748,6 +3141,20 @@ impl Resolver<'_> {
             return (error_info(), None);
         };
         let structure = self.model.structs[id.0].clone();
+        if structure.kind != ast::UserTypeKind::Struct {
+            for initializer in initializers {
+                self.resolve_expression(initializer, None, context);
+            }
+            self.push(
+                "RES118",
+                format!(
+                    "field-wise aggregate initialization requires a struct, found `{}`",
+                    display_path(&structure.path)
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
         let mut expected = Vec::new();
         if let Some(base) = structure.base {
             expected.push(TypeRef::Struct {
@@ -2838,6 +3245,27 @@ impl Resolver<'_> {
             );
         }
         if named.arguments.is_empty() {
+            if let Some(id) = self.lookup_struct_path(&named.path.segments, &context.namespace) {
+                return match self.model.structs[id.0].kind {
+                    ast::UserTypeKind::Struct => {
+                        self.resolve_struct_aggregate(&named.path, initializers, span, context)
+                    }
+                    ast::UserTypeKind::Class => {
+                        self.resolve_user_constructor(id, initializers, span, context)
+                    }
+                    ast::UserTypeKind::Interface => {
+                        for initializer in initializers {
+                            self.resolve_expression(initializer, None, context);
+                        }
+                        self.push(
+                            "RES118",
+                            format!("interface `{}` cannot be constructed", named.path.display()),
+                            span,
+                        );
+                        (error_info(), None)
+                    }
+                };
+            }
             return self.resolve_struct_aggregate(&named.path, initializers, span, context);
         }
         for initializer in initializers {
@@ -2880,7 +3308,7 @@ impl Resolver<'_> {
             );
         }
         let pointee = self.refined_automatic_pointee(receiver, &receiver_info, context, span);
-        let TypeRef::Struct { path } = &pointee else {
+        let (TypeRef::Struct { path } | TypeRef::Class { path }) = &pointee else {
             if pointee != TypeRef::Error {
                 self.push(
                     "RES010",
@@ -2897,7 +3325,7 @@ impl Resolver<'_> {
         let Some(structure) = self.struct_by_path.get(path).copied() else {
             return (error_info(), None);
         };
-        let Some((ty, access_path)) = self.lookup_struct_field(structure, name) else {
+        let Some(field) = self.lookup_struct_field(structure, name) else {
             self.push(
                 "RES010",
                 format!(
@@ -2909,12 +3337,21 @@ impl Resolver<'_> {
             );
             return (error_info(), None);
         };
+        if !Self::member_is_accessible(field.owner, field.is_public, context) {
+            self.push(
+                "RES121",
+                format!("field `{}` is private", name.display()),
+                span,
+            );
+        }
         (
             ExpressionInfo {
-                ty,
+                ty: field.ty,
                 category: pointee_category(&receiver_info.ty, receiver_info.category),
             },
-            Some(ResolvedField { access_path }),
+            Some(ResolvedField {
+                access_path: field.access_path,
+            }),
         )
     }
 
@@ -2980,6 +3417,14 @@ impl Resolver<'_> {
                 );
             }
             if operator == BinaryOperator::Assign {
+                if matches!(left_type, TypeRef::Class { .. }) {
+                    self.push(
+                        "RES119",
+                        "class values cannot be assigned; replace an ownership pointer instead"
+                            .to_owned(),
+                        left.span,
+                    );
+                }
                 right_info = self.adapt_rust_result(&left_type, right_info, right, context);
                 self.validate_binding(&left_type, &right_info, right.span, "assignment");
                 if is_json_mutation_place(left, &self.model) {
@@ -3182,20 +3627,33 @@ impl Resolver<'_> {
                 let receiver_info = self.resolve_expression(receiver, None, context);
                 let pointee =
                     self.refined_automatic_pointee(receiver, &receiver_info, context, span);
-                if let TypeRef::Struct { path } = pointee
+                if let TypeRef::Struct { path } | TypeRef::Class { path } = pointee
                     && let Some(structure) = self.struct_by_path.get(&path).copied()
-                    && let Some((ty @ TypeRef::Function(_), access_path)) =
-                        self.lookup_struct_field(structure, name)
+                    && let Some(
+                        field @ StructFieldLookup {
+                            ty: TypeRef::Function(_),
+                            ..
+                        },
+                    ) = self.lookup_struct_field(structure, name)
                 {
+                    if !Self::member_is_accessible(field.owner, field.is_public, context) {
+                        self.push(
+                            "RES121",
+                            format!("field `{}` is private", name.display()),
+                            span,
+                        );
+                    }
                     let callee_info = ExpressionInfo {
-                        ty,
+                        ty: field.ty,
                         category: pointee_category(&receiver_info.ty, receiver_info.category),
                     };
                     self.record_expression(
                         callee.span,
                         callee_info.clone(),
                         None,
-                        Some(ResolvedField { access_path }),
+                        Some(ResolvedField {
+                            access_path: field.access_path,
+                        }),
                     );
                     return self.resolve_stored_function_call(
                         &callee_info,
@@ -3446,7 +3904,7 @@ impl Resolver<'_> {
         receiver_info: &ExpressionInfo,
     ) -> (ExpressionInfo, Option<ResolvedCall>) {
         match self.refined_automatic_pointee(receiver, receiver_info, context, span) {
-            TypeRef::Struct { path } => {
+            TypeRef::Struct { path } | TypeRef::Class { path } | TypeRef::Interface { path } => {
                 let Some(structure) = self.struct_by_path.get(&path).copied() else {
                     return (error_info(), None);
                 };
@@ -4183,9 +4641,22 @@ impl Resolver<'_> {
             );
             return (error_info(), None);
         }
+        let owner_is_interface =
+            self.model.structs[structure.0].kind == ast::UserTypeKind::Interface;
         let mut path = self.model.structs[structure.0].path.clone();
         path.push(name.segments[0].clone());
-        let candidates = self.function_sets.get(&path).cloned().unwrap_or_default();
+        let candidates = if owner_is_interface {
+            let mut candidates = Vec::new();
+            self.collect_interface_member_candidates(
+                structure,
+                &name.segments[0],
+                &mut BTreeSet::new(),
+                &mut candidates,
+            );
+            candidates
+        } else {
+            self.function_sets.get(&path).cloned().unwrap_or_default()
+        };
         let candidates = candidates
             .into_iter()
             .filter(|id| self.model.functions[id.0].parameters.len() == arguments.len())
@@ -4243,6 +4714,7 @@ impl Resolver<'_> {
                                 context,
                             );
                             self.is_derived_reference_binding(&parameter.ty, &adjusted.ty)
+                                || self.is_interface_owner_binding(&parameter.ty, &adjusted.ty)
                         })
                 })
                 .collect::<Vec<_>>()
@@ -4263,7 +4735,19 @@ impl Resolver<'_> {
         }
         let id = compatible[0];
         let symbol = self.model.functions[id.0].clone();
-        if !symbol.has_definition {
+        let declaring_type = symbol
+            .receiver
+            .as_ref()
+            .expect("member candidate has a receiver")
+            .structure;
+        if !Self::member_is_accessible(declaring_type, symbol.is_public, context) {
+            self.push(
+                "RES121",
+                format!("member function `{}` is private", name.display()),
+                span,
+            );
+        }
+        if !owner_is_interface && !symbol.has_definition {
             self.push(
                 "RES052",
                 format!(
@@ -4293,11 +4777,35 @@ impl Resolver<'_> {
         let return_type = symbol.return_type;
         let call = ResolvedCall {
             span,
-            target: CallTarget::Stainless(id),
+            target: if owner_is_interface {
+                CallTarget::InterfaceMethod(id)
+            } else {
+                CallTarget::Stainless(id)
+            },
             return_type: return_type.clone(),
             throws: symbol.throws,
         };
         (info_for_return_type(return_type), Some(call))
+    }
+
+    fn collect_interface_member_candidates(
+        &self,
+        interface: StructId,
+        name: &str,
+        visited: &mut BTreeSet<StructId>,
+        candidates: &mut Vec<FunctionId>,
+    ) {
+        if !visited.insert(interface) {
+            return;
+        }
+        let mut path = self.model.structs[interface.0].path.clone();
+        path.push(name.to_owned());
+        if let Some(direct) = self.function_sets.get(&path) {
+            candidates.extend(direct.iter().copied());
+        }
+        for base in &self.model.structs[interface.0].interfaces {
+            self.collect_interface_member_candidates(*base, name, visited, candidates);
+        }
     }
 
     fn resolve_move(
@@ -4516,6 +5024,22 @@ impl Resolver<'_> {
                     context,
                 )
                 .1
+            }
+            TypeRef::Class { path } => {
+                let structure = self.struct_by_path.get(path).copied()?;
+                self.resolve_user_constructor(structure, initializers, span, context)
+                    .1
+            }
+            TypeRef::Interface { path } => {
+                for initializer in initializers {
+                    self.resolve_expression(initializer, None, context);
+                }
+                self.push(
+                    "RES118",
+                    format!("interface `{}` cannot be allocated", display_path(path)),
+                    span,
+                );
+                None
             }
             _ => self.resolve_slot_construction(target, initializers, span, context),
         }
@@ -4920,6 +5444,21 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
     ) -> (ExpressionInfo, Option<ResolvedCall>) {
         let structure_symbol = self.model.structs[structure.0].clone();
+        if structure_symbol.kind == ast::UserTypeKind::Interface {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES118",
+                format!(
+                    "interface `{}` cannot be constructed",
+                    display_path(&structure_symbol.path)
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+        let structure_type = resolved_structure_type(&structure_symbol);
         let candidates = self
             .constructor_sets
             .get(&structure)
@@ -4931,9 +5470,7 @@ impl Resolver<'_> {
             .collect::<Vec<_>>();
         if arity_candidates.is_empty() {
             if arguments.len() == 1 {
-                let target = TypeRef::Struct {
-                    path: structure_symbol.path,
-                };
+                let target = structure_type.clone();
                 let call =
                     self.resolve_direct_initialization(&target, &arguments[0], span, context);
                 return match call {
@@ -4993,6 +5530,7 @@ impl Resolver<'_> {
                                 context,
                             );
                             self.is_derived_reference_binding(&parameter.ty, &adjusted.ty)
+                                || self.is_interface_owner_binding(&parameter.ty, &adjusted.ty)
                         })
                 })
                 .collect::<Vec<_>>()
@@ -5001,16 +5539,22 @@ impl Resolver<'_> {
         };
         if compatible.is_empty()
             && arguments.len() == 1
-            && actual.first().is_some_and(|argument| {
-                canonical(&argument.ty)
-                    == TypeRef::Struct {
-                        path: structure_symbol.path.clone(),
-                    }
-            })
+            && actual
+                .first()
+                .is_some_and(|argument| canonical(&argument.ty) == structure_type)
         {
-            let target = TypeRef::Struct {
-                path: structure_symbol.path,
-            };
+            if structure_symbol.kind == ast::UserTypeKind::Class {
+                self.push(
+                    "RES119",
+                    format!(
+                        "class `{}` cannot be copied; use `move(...)` or an explicit `clone()` API",
+                        display_path(&structure_symbol.path)
+                    ),
+                    span,
+                );
+                return (error_info(), None);
+            }
+            let target = structure_type.clone();
             self.validate_binding(
                 &target,
                 &actual[0],
@@ -5058,6 +5602,16 @@ impl Resolver<'_> {
 
         let id = compatible[0];
         let symbol = self.model.constructors[id.0].clone();
+        if !Self::member_is_accessible(structure, symbol.is_public, context) {
+            self.push(
+                "RES121",
+                format!(
+                    "constructor of `{}` is private",
+                    display_path(&structure_symbol.path)
+                ),
+                span,
+            );
+        }
         for ((parameter, argument), expression) in
             symbol.parameters.iter().zip(&actual).zip(arguments)
         {
@@ -5092,9 +5646,7 @@ impl Resolver<'_> {
             );
             return (error_info(), None);
         }
-        let return_type = TypeRef::Struct {
-            path: structure_symbol.path,
-        };
+        let return_type = structure_type;
         let call = ResolvedCall {
             span,
             target: CallTarget::Constructor(id),
@@ -5182,6 +5734,7 @@ impl Resolver<'_> {
                             );
                             canonical(&parameter.ty) == canonical(&argument.ty)
                                 || self.is_derived_reference_binding(&parameter.ty, &adjusted.ty)
+                                || self.is_interface_owner_binding(&parameter.ty, &adjusted.ty)
                         })
                 })
                 .collect::<Vec<_>>()
@@ -5537,7 +6090,9 @@ impl Resolver<'_> {
             self.validate_value_use(&actual_type, actual, span, description);
             return;
         }
-        if !self.is_derived_reference_binding(expected, &actual.ty) {
+        if !self.is_derived_reference_binding(expected, &actual.ty)
+            && !self.is_interface_owner_binding(expected, &actual.ty)
+        {
             self.require_exact(expected, &actual.ty, span, description);
         }
         match expected {
@@ -5564,6 +6119,28 @@ impl Resolver<'_> {
         else {
             return false;
         };
+        if let TypeRef::Interface {
+            path: expected_path,
+        } = canonical_ref(expected_target)
+        {
+            return match automatic_pointee(actual) {
+                TypeRef::Class { path: actual_path } => self
+                    .struct_by_path
+                    .get(actual_path)
+                    .zip(self.struct_by_path.get(expected_path))
+                    .is_some_and(|(class, interface)| {
+                        self.class_implements_interface(*class, *interface)
+                            && self.class_supports_interface_object(*class)
+                    }),
+                TypeRef::Interface { path: actual_path } => {
+                    actual_path == expected_path
+                        || self.struct_by_path.get(actual_path).is_some_and(|actual| {
+                            self.interface_inherits_path(*actual, expected_path)
+                        })
+                }
+                _ => false,
+            };
+        }
         let TypeRef::Struct {
             path: expected_path,
         } = canonical_ref(expected_target)
@@ -5586,6 +6163,82 @@ impl Resolver<'_> {
             current = base;
         }
         false
+    }
+
+    fn is_interface_owner_binding(&self, expected: &TypeRef, actual: &TypeRef) -> bool {
+        let (
+            TypeRef::Pointer {
+                kind: expected_kind,
+                target: expected_target,
+            },
+            TypeRef::Pointer {
+                kind: actual_kind,
+                target: actual_target,
+            },
+        ) = (canonical_ref(expected), canonical_ref(actual))
+        else {
+            return false;
+        };
+        if expected_kind != actual_kind
+            || !matches!(
+                expected_kind,
+                PointerKind::Unique
+                    | PointerKind::UniqueNullable
+                    | PointerKind::Shared
+                    | PointerKind::SharedNullable
+            )
+        {
+            return false;
+        }
+        let TypeRef::Interface { path: interface } = canonical_ref(expected_target) else {
+            return false;
+        };
+        let TypeRef::Class { path: class } = canonical_ref(actual_target) else {
+            return false;
+        };
+        self.struct_by_path
+            .get(class)
+            .zip(self.struct_by_path.get(interface))
+            .is_some_and(|(class, interface)| {
+                self.class_implements_interface(*class, *interface)
+                    && self.class_supports_interface_object(*class)
+            })
+    }
+
+    fn class_supports_interface_object(&self, class: StructId) -> bool {
+        let ty = resolved_structure_type(&self.model.structs[class.0]);
+        self.thread_sendable(&ty) && self.thread_sync(&ty)
+    }
+
+    fn class_implements_interface(&self, class: StructId, interface: StructId) -> bool {
+        self.model
+            .interface_implementations
+            .iter()
+            .any(|implementation| {
+                implementation.implementer == class && implementation.interface == interface
+            })
+    }
+
+    fn interface_inherits_path(&self, interface: StructId, expected: &[String]) -> bool {
+        self.interface_inherits_path_inner(interface, expected, &mut BTreeSet::new())
+    }
+
+    fn interface_inherits_path_inner(
+        &self,
+        interface: StructId,
+        expected: &[String],
+        visited: &mut BTreeSet<StructId>,
+    ) -> bool {
+        if !visited.insert(interface) {
+            return false;
+        }
+        self.model.structs[interface.0]
+            .interfaces
+            .iter()
+            .any(|base| {
+                self.model.structs[base.0].path == expected
+                    || self.interface_inherits_path_inner(*base, expected, visited)
+            })
     }
 
     fn validate_value_use(
@@ -6052,8 +6705,17 @@ impl Resolver<'_> {
                                 ty.span,
                             );
                         }
-                        TypeRef::Struct {
-                            path: self.model.structs[id.0].path.clone(),
+                        let symbol = &self.model.structs[id.0];
+                        match symbol.kind {
+                            ast::UserTypeKind::Struct => TypeRef::Struct {
+                                path: symbol.path.clone(),
+                            },
+                            ast::UserTypeKind::Class => TypeRef::Class {
+                                path: symbol.path.clone(),
+                            },
+                            ast::UserTypeKind::Interface => TypeRef::Interface {
+                                path: symbol.path.clone(),
+                            },
                         }
                     } else {
                         let Some(path) = self.native_path(segments, namespace, true, ty.span)
@@ -6174,6 +6836,19 @@ impl Resolver<'_> {
         None
     }
 
+    fn reject_bare_interface_type(&mut self, ty: &TypeRef, span: Span, role: &str) {
+        if let TypeRef::Interface { path } = ty {
+            self.push(
+                "RES122",
+                format!(
+                    "{role} cannot have bare interface type `{}`; use a reference or owning pointer",
+                    display_path(path)
+                ),
+                span,
+            );
+        }
+    }
+
     fn is_reserved_rust_path(
         &self,
         segments: &[String],
@@ -6202,7 +6877,25 @@ impl Resolver<'_> {
     }
 
     fn thread_sendable(&self, ty: &TypeRef) -> bool {
-        match canonical_ref(ty) {
+        self.thread_auto_trait(ty, false, &mut BTreeSet::new())
+    }
+
+    fn thread_sync(&self, ty: &TypeRef) -> bool {
+        self.thread_auto_trait(ty, true, &mut BTreeSet::new())
+    }
+
+    fn thread_auto_trait(
+        &self,
+        ty: &TypeRef,
+        sync: bool,
+        visiting: &mut BTreeSet<(bool, TypeRef)>,
+    ) -> bool {
+        let ty = canonical_ref(ty);
+        let key = (sync, ty.clone());
+        if !visiting.insert(key.clone()) {
+            return true;
+        }
+        let result = match ty {
             TypeRef::Void
             | TypeRef::Bool
             | TypeRef::Char
@@ -6220,18 +6913,23 @@ impl Resolver<'_> {
             | TypeRef::Usize
             | TypeRef::F32
             | TypeRef::F64
-            | TypeRef::Condition => true,
-            TypeRef::Struct { path } => self.struct_by_path.get(path).is_some_and(|id| {
-                let structure = &self.model.structs[id.0];
-                structure.base.is_none_or(|base| {
-                    self.thread_sendable(&TypeRef::Struct {
-                        path: self.model.structs[base.0].path.clone(),
-                    })
-                }) && structure
-                    .fields
-                    .iter()
-                    .all(|field| self.thread_sendable(&field.ty))
-            }),
+            | TypeRef::Condition
+            | TypeRef::Interface { .. } => true,
+            TypeRef::Struct { path } | TypeRef::Class { path } => {
+                self.struct_by_path.get(path).is_some_and(|id| {
+                    let structure = &self.model.structs[id.0];
+                    structure.base.is_none_or(|base| {
+                        self.thread_auto_trait(
+                            &resolved_structure_type(&self.model.structs[base.0]),
+                            sync,
+                            visiting,
+                        )
+                    }) && structure
+                        .fields
+                        .iter()
+                        .all(|field| self.thread_auto_trait(&field.ty, sync, visiting))
+                })
+            }
             TypeRef::Native { path, arguments } => {
                 matches!(
                     path.as_str(),
@@ -6242,19 +6940,23 @@ impl Resolver<'_> {
                         | "rust::stainless_runtime::Var"
                 ) && arguments
                     .iter()
-                    .all(|argument| self.thread_sendable(argument))
+                    .all(|argument| self.thread_auto_trait(argument, sync, visiting))
             }
             TypeRef::Pointer { kind, target } => match kind {
-                PointerKind::Unique | PointerKind::UniqueNullable => self.thread_sendable(target),
+                PointerKind::Unique | PointerKind::UniqueNullable => {
+                    self.thread_auto_trait(target, sync, visiting)
+                }
                 PointerKind::Shared
                 | PointerKind::SharedNullable
                 | PointerKind::Weak
                 | PointerKind::Atomic
                 | PointerKind::AtomicNullable => {
-                    self.thread_sendable(target) && self.thread_sync(target)
+                    self.thread_auto_trait(target, false, visiting)
+                        && self.thread_auto_trait(target, true, visiting)
                 }
             },
-            TypeRef::Mutex(target) | TypeRef::ThreadHandle(target) => self.thread_sendable(target),
+            TypeRef::Mutex(target) => self.thread_auto_trait(target, false, visiting),
+            TypeRef::ThreadHandle(target) => self.thread_auto_trait(target, sync, visiting),
             TypeRef::Reference { .. }
             | TypeRef::MutexGuard(_)
             | TypeRef::ThreadScope
@@ -6263,71 +6965,9 @@ impl Resolver<'_> {
             | TypeRef::Function(_)
             | TypeRef::Parameter(_)
             | TypeRef::Error => false,
-        }
-    }
-
-    fn thread_sync(&self, ty: &TypeRef) -> bool {
-        match canonical_ref(ty) {
-            TypeRef::Void
-            | TypeRef::Bool
-            | TypeRef::Char
-            | TypeRef::I8
-            | TypeRef::I16
-            | TypeRef::I32
-            | TypeRef::I64
-            | TypeRef::I128
-            | TypeRef::Isize
-            | TypeRef::U8
-            | TypeRef::U16
-            | TypeRef::U32
-            | TypeRef::U64
-            | TypeRef::U128
-            | TypeRef::Usize
-            | TypeRef::F32
-            | TypeRef::F64
-            | TypeRef::Condition => true,
-            TypeRef::Struct { path } => self.struct_by_path.get(path).is_some_and(|id| {
-                let structure = &self.model.structs[id.0];
-                structure.base.is_none_or(|base| {
-                    self.thread_sync(&TypeRef::Struct {
-                        path: self.model.structs[base.0].path.clone(),
-                    })
-                }) && structure
-                    .fields
-                    .iter()
-                    .all(|field| self.thread_sync(&field.ty))
-            }),
-            TypeRef::Native { path, arguments } => {
-                matches!(
-                    path.as_str(),
-                    "rust::String"
-                        | "rust::Vec"
-                        | "rust::Option"
-                        | "rust::Result"
-                        | "rust::stainless_runtime::Var"
-                ) && arguments.iter().all(|argument| self.thread_sync(argument))
-            }
-            TypeRef::Pointer { kind, target } => match kind {
-                PointerKind::Unique | PointerKind::UniqueNullable => self.thread_sync(target),
-                PointerKind::Shared
-                | PointerKind::SharedNullable
-                | PointerKind::Weak
-                | PointerKind::Atomic
-                | PointerKind::AtomicNullable => {
-                    self.thread_sendable(target) && self.thread_sync(target)
-                }
-            },
-            TypeRef::Mutex(target) => self.thread_sendable(target),
-            TypeRef::ThreadHandle(target) => self.thread_sync(target),
-            TypeRef::Reference { .. }
-            | TypeRef::MutexGuard(_)
-            | TypeRef::ThreadScope
-            | TypeRef::ScopedThreadHandle(_)
-            | TypeRef::Callback(_)
-            | TypeRef::Function(_)
-            | TypeRef::Parameter(_)
-            | TypeRef::Error => false,
-        }
+        };
+        visiting.remove(&key);
+        result
     }
 
     fn lookup_struct_path(&self, segments: &[String], namespace: &[String]) -> Option<StructId> {
@@ -6364,7 +7004,7 @@ impl Resolver<'_> {
         &self,
         structure: StructId,
         requested: &ast::Path,
-    ) -> Option<(TypeRef, Vec<String>)> {
+    ) -> Option<StructFieldLookup> {
         let (field_name, qualification) = requested.segments.split_last()?;
         if qualification.is_empty() {
             let mut matches = Vec::new();
@@ -6375,7 +7015,12 @@ impl Resolver<'_> {
                 if let Some(field) = symbol.fields.iter().find(|field| field.name == *field_name) {
                     let mut field_path = access_path.clone();
                     field_path.push(field.name.clone());
-                    matches.push((field.ty.clone(), field_path));
+                    matches.push(StructFieldLookup {
+                        ty: field.ty.clone(),
+                        access_path: field_path,
+                        owner: id,
+                        is_public: field.is_public,
+                    });
                 }
                 let Some(base) = symbol.base else {
                     break;
@@ -6392,13 +7037,26 @@ impl Resolver<'_> {
             let symbol = &self.model.structs[id.0];
             if let Some(field) = symbol.fields.iter().find(|field| field.name == *field_name) {
                 access_path.push(field.name.clone());
-                return Some((field.ty.clone(), access_path));
+                return Some(StructFieldLookup {
+                    ty: field.ty.clone(),
+                    access_path,
+                    owner: id,
+                    is_public: field.is_public,
+                });
             }
             let base = symbol.base?;
             access_path.push(base_field_name(&self.model.structs[base.0]));
             current = Some(base);
         }
         None
+    }
+
+    fn member_is_accessible(owner: StructId, is_public: bool, context: &FunctionContext) -> bool {
+        is_public
+            || context
+                .receiver
+                .as_ref()
+                .is_some_and(|receiver| receiver.structure == owner)
     }
 
     fn find_base_by_suffix(&self, structure: StructId, suffix: &[String]) -> Option<StructId> {
@@ -6537,6 +7195,8 @@ impl Resolver<'_> {
             | TypeRef::ThreadScope
             | TypeRef::ScopedThreadHandle(_)
             | TypeRef::Struct { .. }
+            | TypeRef::Class { .. }
+            | TypeRef::Interface { .. }
             | TypeRef::Reference { .. }
             | TypeRef::Error => false,
         };
@@ -6632,7 +7292,7 @@ fn substitute(ty: &TypeRef, substitutions: &BTreeMap<String, TypeRef>) -> TypeRe
         TypeRef::ScopedThreadHandle(target) => {
             TypeRef::ScopedThreadHandle(Box::new(substitute(target, substitutions)))
         }
-        TypeRef::Struct { .. } => ty.clone(),
+        TypeRef::Struct { .. } | TypeRef::Class { .. } | TypeRef::Interface { .. } => ty.clone(),
         TypeRef::Reference { mutable, target } => TypeRef::Reference {
             mutable: *mutable,
             target: Box::new(substitute(target, substitutions)),
@@ -7085,7 +7745,9 @@ fn contains_move_only_storage(ty: &TypeRef) -> bool {
         | TypeRef::Condition
         | TypeRef::ThreadHandle(_)
         | TypeRef::ThreadScope
-        | TypeRef::ScopedThreadHandle(_) => true,
+        | TypeRef::ScopedThreadHandle(_)
+        | TypeRef::Class { .. }
+        | TypeRef::Interface { .. } => true,
         TypeRef::Function(function) => function.kind == StoredFunctionKind::Mutable,
         TypeRef::Pointer { kind, .. } => matches!(
             kind,
@@ -7214,7 +7876,9 @@ fn display_type(ty: &TypeRef) -> String {
             "rust::std::thread::ScopedJoinHandle<{}>",
             display_type(target)
         ),
-        TypeRef::Struct { path } => display_path(path),
+        TypeRef::Struct { path } | TypeRef::Class { path } | TypeRef::Interface { path } => {
+            display_path(path)
+        }
         TypeRef::Reference { mutable, target } => {
             if *mutable {
                 format!("{}&", display_type(target))
@@ -7222,6 +7886,20 @@ fn display_type(ty: &TypeRef) -> String {
                 format!("const {}&", display_type(target))
             }
         }
+    }
+}
+
+fn resolved_structure_type(structure: &StructSymbol) -> TypeRef {
+    match structure.kind {
+        ast::UserTypeKind::Struct => TypeRef::Struct {
+            path: structure.path.clone(),
+        },
+        ast::UserTypeKind::Class => TypeRef::Class {
+            path: structure.path.clone(),
+        },
+        ast::UserTypeKind::Interface => TypeRef::Interface {
+            path: structure.path.clone(),
+        },
     }
 }
 
@@ -7468,19 +8146,23 @@ fn source_uses_exceptions(source: &SourceFile) -> bool {
         items.iter().any(|item| match item {
             Item::Namespace(namespace) => items_use_exceptions(&namespace.items),
             Item::Struct(structure) => {
-                structure.base.as_ref().is_some_and(|base| {
+                structure.bases.iter().any(|base| {
                     matches!(
-                        base.segments.as_slice(),
-                        [namespace, name]
-                            if namespace == "stainless"
-                                && matches!(
-                                    name.as_str(),
-                                    "Exception"
-                                        | "RustError"
-                                        | "FormatError"
-                                        | "JsonError"
-                                        | "ThreadError"
-                                )
+                        &base.kind,
+                        TypeKind::Named(base)
+                            if matches!(
+                                base.path.segments.as_slice(),
+                                [namespace, name]
+                                    if namespace == "stainless"
+                                        && matches!(
+                                            name.as_str(),
+                                            "Exception"
+                                                | "RustError"
+                                                | "FormatError"
+                                                | "JsonError"
+                                                | "ThreadError"
+                                        )
+                            )
                     )
                 }) || structure.constructors.iter().any(|constructor| {
                     !constructor.throws.is_empty()

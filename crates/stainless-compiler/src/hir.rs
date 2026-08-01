@@ -10,6 +10,8 @@ use crate::interop::{
 pub struct Program {
     /// Compile-checked adapters for selected external Rust APIs.
     pub native_wrappers: Vec<NativeWrapper>,
+    /// Behavior-only interfaces declared directly at crate scope.
+    pub interfaces: Vec<Interface>,
     /// Data-only structs declared directly at crate scope.
     pub structs: Vec<Struct>,
     /// Functions declared directly at crate scope.
@@ -69,6 +71,8 @@ pub struct Module {
     pub source_name: String,
     /// Collision-resistant Rust identifier.
     pub rust_name: String,
+    /// Interfaces declared directly in this namespace.
+    pub interfaces: Vec<Interface>,
     /// Data-only structs declared directly in this namespace.
     pub structs: Vec<Struct>,
     /// Functions declared directly in this namespace.
@@ -84,12 +88,66 @@ pub struct Struct {
     pub source_path: Vec<String>,
     /// Rust type identifier.
     pub rust_name: String,
+    /// Whether generated Rust may derive `Clone` for Stainless copy semantics.
+    pub copyable: bool,
     /// Direct representation fields, including an optional base subobject.
     pub fields: Vec<Field>,
     /// Whether this struct participates in the checked-exception hierarchy.
     pub is_exception: bool,
     /// Embedded exception-base field, absent on the compiler-provided root.
     pub exception_base_field: Option<String>,
+    /// Static Rust trait implementations proven by interface conformance.
+    pub interface_implementations: Vec<InterfaceImplementation>,
+}
+
+/// A Stainless interface lowered to a Rust trait.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Interface {
+    /// Fully qualified Stainless path.
+    pub source_path: Vec<String>,
+    /// Rust trait identifier.
+    pub rust_name: String,
+    /// Fully qualified Rust supertrait paths.
+    pub bases: Vec<String>,
+    /// Directly declared interface methods.
+    pub methods: Vec<InterfaceMethod>,
+}
+
+/// One object-safe method in a generated interface trait.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InterfaceMethod {
+    /// Deterministically mangled Rust method name.
+    pub rust_name: String,
+    /// Whether the receiver is `&mut self` rather than `&self`.
+    pub mutable: bool,
+    /// Explicit method parameters.
+    pub parameters: Vec<Parameter>,
+    /// Value or reference return type.
+    pub return_type: Type,
+    /// Whether the return is wrapped in the checked exception carrier.
+    pub throws: bool,
+}
+
+/// One generated Rust trait implementation on a concrete struct or class.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InterfaceImplementation {
+    /// Fully qualified generated Rust trait path.
+    pub interface_path: String,
+    /// Required methods and their concrete free-function delegates.
+    pub methods: Vec<InterfaceImplementationMethod>,
+}
+
+/// Concrete delegate for one generated trait method.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InterfaceImplementationMethod {
+    /// Trait method signature.
+    pub method: InterfaceMethod,
+    /// Namespace modules containing the concrete free function.
+    pub function_modules: Vec<String>,
+    /// Concrete generated free-function name.
+    pub function: String,
+    /// Whether a concrete self reference must be erased inside `Result`.
+    pub adapt_self_reference: bool,
 }
 
 /// One generated Rust struct field.
@@ -191,6 +249,11 @@ pub enum Type {
     /// A user-defined Stainless struct.
     User {
         /// Fully qualified generated Rust path.
+        rust_path: String,
+    },
+    /// A dynamically dispatched Stainless interface trait object.
+    Interface {
+        /// Fully qualified generated Rust trait path.
         rust_path: String,
     },
     /// A borrowed value.
@@ -484,6 +547,15 @@ pub enum Expression {
         /// Adapted source value.
         value: Box<Expression>,
     },
+    /// Erase a concrete class owner to an implemented interface trait object.
+    InterfaceOwnerCoercion {
+        /// Unique/shared and nullable/non-null owner representation.
+        kind: PointerKind,
+        /// Dynamic interface pointee type.
+        target: Type,
+        /// Concrete class owner being erased.
+        value: Box<Expression>,
+    },
     /// Demote an `Arc<T>` to `Weak<T>`.
     DowngradeShared(Box<Expression>),
     /// Promote `Weak<T>` to `Option<Arc<T>>`.
@@ -658,6 +730,15 @@ pub enum Expression {
         /// Deterministically mangled target.
         function: String,
         /// Lowered arguments.
+        arguments: Vec<Expression>,
+    },
+    /// Dynamically dispatch a Stainless interface method.
+    InterfaceCall {
+        /// Interface receiver expression.
+        receiver: Box<Expression>,
+        /// Deterministically mangled Rust trait method name.
+        method: String,
+        /// Explicit call arguments.
         arguments: Vec<Expression>,
     },
     /// A native associated function or constructor.

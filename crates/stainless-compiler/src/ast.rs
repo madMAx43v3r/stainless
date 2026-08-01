@@ -46,6 +46,17 @@ pub enum Item {
     Function(Function),
 }
 
+/// Source-level role of a user-defined type declaration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UserTypeKind {
+    /// Copy-oriented data type with optional single data inheritance.
+    Struct,
+    /// Move-only identity type that may implement interfaces.
+    Class,
+    /// Behavior-only contract lowered to a Rust trait.
+    Interface,
+}
+
 impl Item {
     /// Returns the declaration's source span.
     #[must_use]
@@ -86,10 +97,16 @@ pub struct UseDeclaration {
 /// A data-only struct with optional single data inheritance.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Struct {
+    /// Struct, class, or interface semantics.
+    pub kind: UserTypeKind,
     /// Unqualified source name.
     pub name: String,
-    /// Optional single data base.
-    pub base: Option<Path>,
+    /// Direct data-base or interface declarations in source order.
+    pub bases: Vec<Type>,
+    /// Whether inheritance/implementation is restricted to this module.
+    pub is_sealed: bool,
+    /// Whether an explicit access label appeared in the declaration.
+    pub has_access_specifier: bool,
     /// Direct data fields in declaration order.
     pub fields: Vec<Field>,
     /// Member function declarations written inside the body.
@@ -103,6 +120,8 @@ pub struct Struct {
 /// A struct constructor declaration, definition, or deletion.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Constructor {
+    /// Whether this constructor is publicly callable.
+    pub is_public: bool,
     /// Unqualified declaration name or qualified definition path.
     pub name: Path,
     /// Parameters in declaration order.
@@ -133,6 +152,8 @@ pub struct ConstructorInitializer {
 /// One direct struct data field.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Field {
+    /// Whether this field is publicly accessible.
+    pub is_public: bool,
     /// Declared field type.
     pub ty: Type,
     /// Source field name.
@@ -144,6 +165,8 @@ pub struct Field {
 /// A function definition or declaration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Function {
+    /// Whether this member is publicly callable.
+    pub is_public: bool,
     /// Possibly qualified source name.
     pub name: Path,
     /// Declared return type.

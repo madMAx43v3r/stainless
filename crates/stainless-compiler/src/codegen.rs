@@ -41,6 +41,11 @@ impl Emitter {
             .iter()
             .map(Self::structure)
             .collect::<Result<Vec<_>, _>>()?;
+        let interfaces = program
+            .interfaces
+            .iter()
+            .map(Self::interface)
+            .collect::<Result<Vec<_>, _>>()?;
         let native_wrappers = program
             .native_wrappers
             .iter()
@@ -67,6 +72,7 @@ impl Emitter {
         Ok(quote! {
             #exception_runtime
             #native_wrapper_module
+            #(#interfaces)*
             #(#structs)*
             #(#functions)*
             #(#modules)*
@@ -180,6 +186,11 @@ impl Emitter {
 
     fn module(&mut self, module: &hir::Module) -> Result<TokenStream, String> {
         let name = identifier(&module.rust_name)?;
+        let interfaces = module
+            .interfaces
+            .iter()
+            .map(Self::interface)
+            .collect::<Result<Vec<_>, _>>()?;
         let structs = module
             .structs
             .iter()
@@ -198,6 +209,7 @@ impl Emitter {
         Ok(quote! {
             #[allow(non_snake_case)]
             pub mod #name {
+                #(#interfaces)*
                 #(#structs)*
                 #(#functions)*
                 #(#modules)*
@@ -280,14 +292,124 @@ impl Emitter {
         } else {
             TokenStream::new()
         };
+        let derive = structure.copyable.then(|| quote!(#[derive(Clone)]));
+        let interface_implementations = structure
+            .interface_implementations
+            .iter()
+            .map(|implementation| Self::interface_implementation(&name, implementation))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(quote! {
-            #[derive(Clone)]
+            #derive
             #[allow(non_snake_case)]
             pub struct #name {
                 #(#fields),*
             }
             #exception_impl
+            #(#interface_implementations)*
         })
+    }
+
+    fn interface(interface: &hir::Interface) -> Result<TokenStream, String> {
+        let name = identifier(&interface.rust_name)?;
+        let bases = interface
+            .bases
+            .iter()
+            .map(|base| path(base))
+            .collect::<Result<Vec<_>, _>>()?;
+        let supertraits = if bases.is_empty() {
+            TokenStream::new()
+        } else {
+            quote!(: #(#bases)+*)
+        };
+        let methods = interface
+            .methods
+            .iter()
+            .map(|method| Self::interface_method_signature(method, true))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(quote! {
+            #[allow(non_snake_case)]
+            pub trait #name #supertraits {
+                #(#methods)*
+            }
+        })
+    }
+
+    fn interface_implementation(
+        concrete: &syn::Ident,
+        implementation: &hir::InterfaceImplementation,
+    ) -> Result<TokenStream, String> {
+        let interface = path(&implementation.interface_path)?;
+        let methods = implementation
+            .methods
+            .iter()
+            .map(|implementation| {
+                let signature = Self::interface_method_signature(&implementation.method, false)?;
+                let target = if implementation.function_modules.is_empty() {
+                    format!("crate::{}", implementation.function)
+                } else {
+                    format!(
+                        "crate::{}::{}",
+                        implementation.function_modules.join("::"),
+                        implementation.function
+                    )
+                };
+                let target = path(&target)?;
+                let arguments = implementation
+                    .method
+                    .parameters
+                    .iter()
+                    .map(|parameter| identifier(&parameter.rust_name))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let invocation = quote!(#target(self, #(#arguments),*));
+                let invocation = if implementation.adapt_self_reference {
+                    let return_type = type_tokens(&implementation.method.return_type, None)?;
+                    if implementation.method.throws {
+                        quote!((#invocation).map(|value| value as #return_type))
+                    } else {
+                        quote!((#invocation) as #return_type)
+                    }
+                } else {
+                    invocation
+                };
+                Ok(quote! {
+                    #signature {
+                        #invocation
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(quote! {
+            impl #interface for #concrete {
+                #(#methods)*
+            }
+        })
+    }
+
+    fn interface_method_signature(
+        method: &hir::InterfaceMethod,
+        declaration: bool,
+    ) -> Result<TokenStream, String> {
+        let name = identifier(&method.rust_name)?;
+        let receiver = if method.mutable {
+            quote!(&mut self)
+        } else {
+            quote!(&self)
+        };
+        let parameters = method
+            .parameters
+            .iter()
+            .map(|parameter| parameter_tokens(parameter, None))
+            .collect::<Result<Vec<_>, _>>()?;
+        let return_type = type_tokens(&method.return_type, None)?;
+        let return_signature = if method.throws {
+            quote!(-> ::std::result::Result<#return_type, crate::__StainlessExceptionBox>)
+        } else if matches!(method.return_type, hir::Type::Unit) {
+            TokenStream::new()
+        } else {
+            quote!(-> #return_type)
+        };
+        let semicolon = declaration.then(|| quote!(;));
+        Ok(quote!(fn #name(#receiver, #(#parameters),*) #return_signature #semicolon))
     }
 
     fn function(&mut self, function: &hir::Function) -> Result<TokenStream, String> {
@@ -811,6 +933,25 @@ impl Emitter {
                     _ => Err("unsupported pointer conversion reached code generation".to_owned()),
                 }
             }
+            hir::Expression::InterfaceOwnerCoercion {
+                kind,
+                target,
+                value,
+            } => {
+                let value = self.expression(value)?;
+                let target = type_tokens(target, None)?;
+                match kind {
+                    PointerKind::Unique => Ok(quote!((#value) as ::std::boxed::Box<#target>)),
+                    PointerKind::UniqueNullable => Ok(quote!((#value).map(|value| {
+                        value as ::std::boxed::Box<#target>
+                    }))),
+                    PointerKind::Shared => Ok(quote!((#value) as ::std::sync::Arc<#target>)),
+                    PointerKind::SharedNullable => Ok(quote!((#value).map(|value| {
+                        value as ::std::sync::Arc<#target>
+                    }))),
+                    _ => Err("non-owning pointer reached interface owner coercion".to_owned()),
+                }
+            }
             hir::Expression::DowngradeShared(value) => {
                 let value = self.expression(value)?;
                 Ok(quote!(::std::sync::Arc::downgrade(&(#value))))
@@ -835,6 +976,11 @@ impl Emitter {
             } => {
                 let owner = self.expression(owner)?;
                 match (kind, mutable) {
+                    (crate::interop::PointerKind::Unique, true)
+                    | (
+                        crate::interop::PointerKind::Unique | crate::interop::PointerKind::Shared,
+                        false,
+                    ) => Ok(quote!(*(#owner))),
                     (crate::interop::PointerKind::UniqueNullable, true) => {
                         Ok(quote!(*(#owner).as_mut().expect(
                             "Stainless non-null refinement was violated"
@@ -1144,6 +1290,7 @@ impl Emitter {
                 Ok(quote!((#allocation as #ty)))
             }
             hir::Expression::FunctionCall { .. }
+            | hir::Expression::InterfaceCall { .. }
             | hir::Expression::CallableCall { .. }
             | hir::Expression::AssociatedCall { .. }
             | hir::Expression::WrapperCall { .. }
@@ -1227,6 +1374,19 @@ impl Emitter {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(quote!(#target(#(#arguments),*)))
             }
+            hir::Expression::InterfaceCall {
+                receiver,
+                method,
+                arguments,
+            } => {
+                let receiver = self.expression(receiver)?;
+                let method = identifier(method)?;
+                let arguments = arguments
+                    .iter()
+                    .map(|argument| self.expression(argument))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(quote!((#receiver).#method(#(#arguments),*)))
+            }
             hir::Expression::AssociatedCall {
                 rust_path,
                 arguments,
@@ -1299,6 +1459,7 @@ fn parameter_tokens(
     Ok(quote!(#mutable #name: #ty))
 }
 
+#[allow(clippy::too_many_lines)]
 fn type_tokens(ty: &hir::Type, lifetime: Option<&syn::Lifetime>) -> Result<TokenStream, String> {
     match ty {
         hir::Type::Unit => Ok(quote!(())),
@@ -1389,10 +1550,19 @@ fn type_tokens(ty: &hir::Type, lifetime: Option<&syn::Lifetime>) -> Result<Token
             let path = path(rust_path)?;
             Ok(quote!(#path))
         }
+        hir::Type::Interface { rust_path } => {
+            let path = path(rust_path)?;
+            Ok(quote!(dyn #path + ::core::marker::Send + ::core::marker::Sync))
+        }
         hir::Type::Reference { mutable, target } => {
+            let interface = matches!(target.as_ref(), hir::Type::Interface { .. });
             let target = type_tokens(target, None)?;
             let mutable = mutable.then(|| quote!(mut));
-            Ok(quote!(& #lifetime #mutable #target))
+            if interface {
+                Ok(quote!(& #lifetime #mutable (#target)))
+            } else {
+                Ok(quote!(& #lifetime #mutable #target))
+            }
         }
     }
 }

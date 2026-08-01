@@ -27,6 +27,14 @@ fn encode_type(ty: &TypeRef, output: &mut String) {
             output.push_str("s_");
             encode_segments(path, output);
         }
+        TypeRef::Class { path } => {
+            output.push_str("c_");
+            encode_segments(path, output);
+        }
+        TypeRef::Interface { path } => {
+            output.push_str("i_");
+            encode_segments(path, output);
+        }
         TypeRef::Native { path, arguments } if arguments.is_empty() => {
             output.push_str("n_");
             encode_path(path, output);

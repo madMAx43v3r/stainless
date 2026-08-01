@@ -60,6 +60,9 @@ ast_node!(SourceFile, SourceFile);
 ast_node!(NamespaceDefinition, NamespaceDefinition);
 ast_node!(UseDeclaration, UseDeclaration);
 ast_node!(StructDefinition, StructDefinition);
+ast_node!(ClassDefinition, ClassDefinition);
+ast_node!(InterfaceDefinition, InterfaceDefinition);
+ast_node!(AccessSpecifier, AccessSpecifier);
 ast_node!(FieldDeclaration, FieldDeclaration);
 ast_node!(ConstructorDefinition, ConstructorDefinition);
 ast_node!(ConstructorDeclaration, ConstructorDeclaration);
@@ -118,6 +121,10 @@ pub enum Item {
     Use(UseDeclaration),
     /// A data-only `struct`.
     Struct(StructDefinition),
+    /// An identity-oriented `class`.
+    Class(ClassDefinition),
+    /// A behavior-only `interface`.
+    Interface(InterfaceDefinition),
     /// A constructor with a body.
     ConstructorDefinition(ConstructorDefinition),
     /// A constructor declaration or deletion.
@@ -135,6 +142,8 @@ impl AstNode for Item {
             SyntaxKind::NamespaceDefinition
                 | SyntaxKind::UseDeclaration
                 | SyntaxKind::StructDefinition
+                | SyntaxKind::ClassDefinition
+                | SyntaxKind::InterfaceDefinition
                 | SyntaxKind::ConstructorDefinition
                 | SyntaxKind::ConstructorDeclaration
                 | SyntaxKind::FunctionDefinition
@@ -149,6 +158,10 @@ impl AstNode for Item {
             }
             SyntaxKind::UseDeclaration => UseDeclaration::cast(syntax).map(Self::Use),
             SyntaxKind::StructDefinition => StructDefinition::cast(syntax).map(Self::Struct),
+            SyntaxKind::ClassDefinition => ClassDefinition::cast(syntax).map(Self::Class),
+            SyntaxKind::InterfaceDefinition => {
+                InterfaceDefinition::cast(syntax).map(Self::Interface)
+            }
             SyntaxKind::ConstructorDefinition => {
                 ConstructorDefinition::cast(syntax).map(Self::ConstructorDefinition)
             }
@@ -170,6 +183,8 @@ impl AstNode for Item {
             Self::Namespace(node) => node.syntax(),
             Self::Use(node) => node.syntax(),
             Self::Struct(node) => node.syntax(),
+            Self::Class(node) => node.syntax(),
+            Self::Interface(node) => node.syntax(),
             Self::ConstructorDefinition(node) => node.syntax(),
             Self::ConstructorDeclaration(node) => node.syntax(),
             Self::FunctionDefinition(node) => node.syntax(),
@@ -442,40 +457,63 @@ impl NamespaceDefinition {
     }
 }
 
-impl StructDefinition {
-    #[must_use]
-    pub fn name_token(&self) -> Option<SyntaxToken> {
-        direct_tokens(self.syntax()).find(|token| token.kind() == SyntaxKind::Identifier)
-    }
-
-    pub fn base_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
-        let mut after_colon = false;
-        direct_tokens(self.syntax()).filter(move |token| {
-            if token.kind() == SyntaxKind::Colon {
-                after_colon = true;
-                return false;
+macro_rules! type_definition_accessors {
+    ($name:ident) => {
+        impl $name {
+            #[must_use]
+            pub fn name_token(&self) -> Option<SyntaxToken> {
+                direct_tokens(self.syntax())
+                    .filter(|token| token.kind() == SyntaxKind::Identifier)
+                    .find(|token| token.text() != "sealed")
             }
-            after_colon
-                && matches!(
-                    token.kind(),
-                    SyntaxKind::Identifier | SyntaxKind::ColonColon
-                )
-        })
-    }
 
-    #[must_use]
-    pub fn fields(&self) -> AstChildren<FieldDeclaration> {
-        children(self.syntax())
-    }
+            #[must_use]
+            pub fn is_sealed(&self) -> bool {
+                direct_tokens(self.syntax())
+                    .any(|token| token.kind() == SyntaxKind::Identifier && token.text() == "sealed")
+            }
 
-    pub fn functions(&self) -> impl Iterator<Item = Function> + '_ {
-        self.syntax().children().filter_map(Function::cast)
-    }
+            pub fn bases(&self) -> AstChildren<TypeReference> {
+                children(self.syntax())
+            }
 
-    pub fn constructors(&self) -> impl Iterator<Item = Constructor> + '_ {
-        self.syntax().children().filter_map(Constructor::cast)
-    }
+            #[must_use]
+            pub fn fields(&self) -> AstChildren<FieldDeclaration> {
+                children(self.syntax())
+            }
+
+            pub fn functions(&self) -> impl Iterator<Item = Function> + '_ {
+                self.syntax().children().filter_map(Function::cast)
+            }
+
+            pub fn constructors(&self) -> impl Iterator<Item = Constructor> + '_ {
+                self.syntax().children().filter_map(Constructor::cast)
+            }
+
+            #[must_use]
+            pub fn member_is_public(&self, member: &SyntaxNode, default_public: bool) -> bool {
+                let mut public = default_public;
+                for child in self.syntax().children() {
+                    if child.kind() == SyntaxKind::AccessSpecifier {
+                        public = token(&child, SyntaxKind::PublicKw).is_some();
+                    } else if child == *member {
+                        return public;
+                    }
+                }
+                public
+            }
+
+            #[must_use]
+            pub fn has_access_specifier(&self) -> bool {
+                child::<AccessSpecifier>(self.syntax()).is_some()
+            }
+        }
+    };
 }
+
+type_definition_accessors!(StructDefinition);
+type_definition_accessors!(ClassDefinition);
+type_definition_accessors!(InterfaceDefinition);
 
 impl FieldDeclaration {
     #[must_use]

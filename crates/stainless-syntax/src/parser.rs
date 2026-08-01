@@ -96,12 +96,14 @@ impl Parser<'_> {
                 Some(SyntaxKind::NamespaceKw) => self.parse_namespace(),
                 Some(SyntaxKind::UseKw) => self.parse_use_declaration(),
                 Some(SyntaxKind::StructKw) => self.parse_struct_definition(),
+                Some(SyntaxKind::ClassKw) => self.parse_class_definition(),
+                Some(SyntaxKind::InterfaceKw) => self.parse_interface_definition(),
                 Some(SyntaxKind::Identifier) if self.looks_like_constructor() => {
                     self.parse_constructor();
                 }
                 Some(SyntaxKind::Identifier | SyntaxKind::ConstKw) => self.parse_function(),
                 Some(_) => {
-                    self.recover_item("expected a namespace, use declaration, struct, or function");
+                    self.recover_item("expected a namespace, use declaration, type, or function");
                 }
                 None => break,
             }
@@ -148,20 +150,55 @@ impl Parser<'_> {
     }
 
     fn parse_struct_definition(&mut self) {
-        self.start(SyntaxKind::StructDefinition);
+        self.parse_type_definition(SyntaxKind::StructDefinition, "struct", false);
+    }
+
+    fn parse_class_definition(&mut self) {
+        self.parse_type_definition(SyntaxKind::ClassDefinition, "class", false);
+    }
+
+    fn parse_interface_definition(&mut self) {
+        self.parse_type_definition(SyntaxKind::InterfaceDefinition, "interface", true);
+    }
+
+    fn parse_type_definition(
+        &mut self,
+        node_kind: SyntaxKind,
+        declaration_kind: &str,
+        interface: bool,
+    ) {
+        self.start(node_kind);
         self.bump();
-        self.expect(SyntaxKind::Identifier, "expected a struct name");
-        if self.eat(SyntaxKind::Colon) {
-            self.parse_qualified_name("expected a data base struct");
+        if self.at(SyntaxKind::Identifier) && self.current_text() == Some("sealed") {
+            self.bump();
         }
-        self.expect(SyntaxKind::LBrace, "expected `{` after struct name");
+        self.expect(
+            SyntaxKind::Identifier,
+            &format!("expected a {declaration_kind} name"),
+        );
+        if self.eat(SyntaxKind::Colon) {
+            loop {
+                self.parse_type(false);
+                if !self.eat(SyntaxKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(
+            SyntaxKind::LBrace,
+            &format!("expected `{{` after {declaration_kind} name"),
+        );
         while !self.at_end() && !self.at(SyntaxKind::RBrace) {
             let previous = self.position;
             if self.at_any(&[SyntaxKind::PublicKw, SyntaxKind::PrivateKw]) {
+                self.start(SyntaxKind::AccessSpecifier);
                 self.bump();
                 self.expect(SyntaxKind::Colon, "expected `:` after access specifier");
+                self.finish();
             } else if self.at_any(&[SyntaxKind::Identifier, SyntaxKind::ConstKw]) {
-                if self.looks_like_constructor() {
+                if interface {
+                    self.parse_function();
+                } else if self.looks_like_constructor() {
                     self.parse_constructor();
                 } else if self.struct_member_is_function() {
                     self.parse_function();
@@ -169,16 +206,23 @@ impl Parser<'_> {
                     self.parse_field_declaration();
                 }
             } else {
-                self.recover_statement("expected a data field or member function declaration");
+                self.recover_statement(if interface {
+                    "expected an interface function declaration"
+                } else {
+                    "expected a data field or member function declaration"
+                });
             }
             if self.position == previous {
-                self.recover_statement("parser could not make progress in struct");
+                self.recover_statement("parser could not make progress in type declaration");
             }
         }
-        self.expect(SyntaxKind::RBrace, "expected `}` to close struct");
+        self.expect(
+            SyntaxKind::RBrace,
+            &format!("expected `}}` to close {declaration_kind}"),
+        );
         self.expect(
             SyntaxKind::Semicolon,
-            "expected `;` after struct definition",
+            &format!("expected `;` after {declaration_kind} definition"),
         );
         self.finish();
     }

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use crate::Diagnostic;
 use crate::ast::{
     Block, Constructor, ForClause, ForInitializer, Function, Item, LocalDeclaration, Parameter,
-    SourceFile, Statement, StatementKind,
+    SourceFile, Statement, StatementKind, UserTypeKind,
 };
 
 /// Validates structural rules over a lowered source file.
@@ -37,11 +37,41 @@ impl Validator {
             match item {
                 Item::Namespace(namespace) => self.items(&namespace.items),
                 Item::Struct(structure) => {
+                    if structure.kind == UserTypeKind::Class && structure.is_sealed {
+                        self.push(
+                            "SEM014",
+                            "`class sealed` is redundant because classes cannot be inherited"
+                                .to_owned(),
+                            structure.span,
+                        );
+                    }
+                    if structure.kind == UserTypeKind::Interface && structure.has_access_specifier {
+                        self.push(
+                            "SEM015",
+                            "interfaces cannot contain access labels; their functions are always public"
+                                .to_owned(),
+                            structure.span,
+                        );
+                    }
+                    if structure.kind == UserTypeKind::Interface && !structure.fields.is_empty() {
+                        self.push(
+                            "SEM016",
+                            "interfaces cannot contain data fields".to_owned(),
+                            structure.span,
+                        );
+                    }
                     for constructor in &structure.constructors {
+                        if structure.kind == UserTypeKind::Interface {
+                            self.push(
+                                "SEM017",
+                                "interfaces cannot declare constructors".to_owned(),
+                                constructor.span,
+                            );
+                        }
                         if constructor.body.is_some() {
                             self.push(
                                 "SEM010",
-                                "constructors must be defined outside the struct body".to_owned(),
+                                "constructors must be defined outside the type body".to_owned(),
                                 constructor.span,
                             );
                         }
@@ -51,8 +81,7 @@ impl Validator {
                         if function.body.is_some() {
                             self.push(
                                 "SEM009",
-                                "member functions must be defined outside the struct body"
-                                    .to_owned(),
+                                "member functions must be defined outside the type body".to_owned(),
                                 function.span,
                             );
                         }

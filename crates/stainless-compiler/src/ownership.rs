@@ -1016,7 +1016,7 @@ impl Analyzer<'_> {
                 }
                 None
             }
-            CallTarget::Stainless(id) => {
+            CallTarget::Stainless(id) | CallTarget::InterfaceMethod(id) => {
                 let function = self.semantics.function(*id)?.clone();
                 let mut receiver_loan = None;
                 let mut receiver_origin = None;

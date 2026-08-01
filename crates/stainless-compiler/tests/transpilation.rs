@@ -193,6 +193,18 @@ fn transpiles_and_compiles_resolved_reference_programs() {
             include_str!("../../../docs/ref/02_structs_and_data_inheritance.stl"),
         ),
         (
+            "interfaces",
+            include_str!("../../../docs/ref/03_interfaces.stl"),
+        ),
+        (
+            "class-values",
+            include_str!("../../../docs/ref/09_value_semantics.stl"),
+        ),
+        (
+            "throwing-class-constructors",
+            include_str!("../../../docs/ref/10_checked_exceptions.stl"),
+        ),
+        (
             "vec_and_string",
             include_str!("../../../docs/ref/11_vec_and_string.stl"),
         ),
@@ -230,6 +242,189 @@ fn transpiles_and_compiles_resolved_reference_programs() {
         let rust = result.rust.expect("valid source should emit Rust");
         compile_rust(name, &rust, CrateKind::Library);
     }
+}
+
+#[test]
+fn classes_implement_rust_traits_and_dispatch_through_interface_owners() {
+    let source = include_str!("../../../docs/ref/03_interfaces.stl");
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let mut rust = result.rust.expect("interface source should emit Rust");
+    let main = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["main"])
+        .expect("Stainless main function")
+        .mangled_name
+        .clone();
+    write!(
+        rust,
+        r"
+fn main() {{
+    assert_eq!({main}(), 42);
+}}
+"
+    )
+    .expect("writing to a String cannot fail");
+
+    let binary = compile_rust("class-interface-dispatch", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run {}: {error}", binary.display()));
+    assert!(
+        output.status.success(),
+        "generated class/interface binary failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    remove_temporary_parent(&binary);
+}
+
+#[test]
+fn nullable_class_owners_erase_to_nullable_interface_owners() {
+    let source = r"interface Readable {
+    i32 read() const;
+};
+
+class Value : Readable {
+public:
+    i32 read() const;
+};
+
+i32 Value::read() const {
+    return 7;
+}
+
+i32 nullable_interface_behavior() {
+    unique_nullptr<Value> concrete_unique =
+        unique_nullptr<Value>(make_unique<Value>());
+    unique_nullptr<Readable> erased_unique = move(concrete_unique);
+    if (!erased_unique) {
+        return -1;
+    }
+
+    shared_nullptr<Value> concrete_shared =
+        shared_nullptr<Value>(make_shared<Value>());
+    shared_nullptr<Readable> erased_shared = concrete_shared;
+    if (!erased_shared) {
+        return -2;
+    }
+    return erased_unique.read() * 10 + erased_shared.read();
+}
+";
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let mut rust = result
+        .rust
+        .expect("nullable interface owners should emit Rust");
+    let behavior = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["nullable_interface_behavior"])
+        .expect("nullable behavior function")
+        .mangled_name
+        .clone();
+    write!(
+        rust,
+        r"
+fn main() {{
+    assert_eq!({behavior}(), 77);
+}}
+"
+    )
+    .expect("writing to a String cannot fail");
+
+    let binary = compile_rust("nullable-interface-owners", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run {}: {error}", binary.display()));
+    assert!(
+        output.status.success(),
+        "generated nullable interface binary failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    remove_temporary_parent(&binary);
+}
+
+#[test]
+fn throwing_fluent_interface_methods_erase_their_self_reference() {
+    let source = r"struct Failure : stainless::Exception {
+};
+
+interface Action {
+    void run() throws Failure;
+};
+
+class Worker : Action {
+public:
+    void run() throws Failure;
+};
+
+void Worker::run() throws Failure {
+}
+
+i32 interface_error_behavior() {
+    try {
+        unique_ptr<Action> action = make_unique<Worker>();
+        action.run();
+        return 1;
+    } catch (const Failure& error) {
+        return 0;
+    }
+}
+";
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let mut rust = result
+        .rust
+        .expect("throwing interface method should emit Rust");
+    let behavior = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["interface_error_behavior"])
+        .expect("interface error behavior function")
+        .mangled_name
+        .clone();
+    write!(
+        rust,
+        r"
+fn main() {{
+    assert_eq!({behavior}(), 1);
+}}
+"
+    )
+    .expect("writing to a String cannot fail");
+
+    let binary = compile_rust("throwing-interface-method", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run {}: {error}", binary.display()));
+    assert!(
+        output.status.success(),
+        "generated throwing interface binary failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    remove_temporary_parent(&binary);
 }
 
 #[test]

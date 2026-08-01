@@ -27,6 +27,8 @@ pub struct ConstructorId(pub usize);
 pub struct FieldSymbol {
     /// Source field name.
     pub name: String,
+    /// Whether access is permitted outside the declaring type.
+    pub is_public: bool,
     /// Resolved field type.
     pub ty: TypeRef,
     /// Source range.
@@ -40,8 +42,14 @@ pub struct StructSymbol {
     pub id: StructId,
     /// Fully qualified source path.
     pub path: Vec<String>,
+    /// Struct, class, or interface source semantics.
+    pub kind: crate::ast::UserTypeKind,
     /// Optional single data base.
     pub base: Option<StructId>,
+    /// Direct interface contracts in declaration order.
+    pub interfaces: Vec<StructId>,
+    /// Whether outside-module inheritance or implementation is forbidden.
+    pub is_sealed: bool,
     /// Direct fields in aggregate initialization order.
     pub fields: Vec<FieldSymbol>,
     /// Definition source range.
@@ -63,6 +71,8 @@ pub struct StructReceiver {
 pub struct ConstructorSymbol {
     /// Stable semantic ID.
     pub id: ConstructorId,
+    /// Whether construction is permitted outside the declaring type.
+    pub is_public: bool,
     /// Constructed struct.
     pub structure: StructId,
     /// Resolved parameters.
@@ -114,6 +124,8 @@ pub struct ParameterSymbol {
 pub struct FunctionSymbol {
     /// Stable ID used by resolved call sites.
     pub id: FunctionId,
+    /// Whether member invocation is permitted outside the declaring type.
+    pub is_public: bool,
     /// Fully qualified source path.
     pub path: Vec<String>,
     /// Resolved parameters.
@@ -132,6 +144,17 @@ pub struct FunctionSymbol {
     pub has_definition: bool,
     /// Whether the member signature was declared inside its struct body.
     pub has_member_declaration: bool,
+}
+
+/// One proven implementation of an interface by a concrete struct or class.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InterfaceImplementation {
+    /// Concrete implementer.
+    pub implementer: StructId,
+    /// Interface whose direct methods are implemented.
+    pub interface: StructId,
+    /// Interface declaration to concrete implementation mappings.
+    pub methods: Vec<(FunctionId, FunctionId)>,
 }
 
 /// Whether an expression denotes storage or a temporary value.
@@ -199,6 +222,8 @@ pub struct ResolvedCall {
 pub enum CallTarget {
     /// A Stainless-defined free function.
     Stainless(FunctionId),
+    /// A dynamically dispatched call through a Stainless interface reference.
+    InterfaceMethod(FunctionId),
     /// A user-defined or synthesized struct constructor.
     Constructor(ConstructorId),
     /// A compiler-described native Rust callable.
@@ -487,6 +512,8 @@ pub struct SemanticModel {
     pub constructors: Vec<ConstructorSymbol>,
     /// Resolved Stainless functions.
     pub functions: Vec<FunctionSymbol>,
+    /// Proven concrete interface implementations used for Rust trait impls.
+    pub interface_implementations: Vec<InterfaceImplementation>,
     /// Expression facts in traversal order.
     pub expressions: Vec<ExpressionResolution>,
     /// Local and range-loop bindings in traversal order.

@@ -7,13 +7,14 @@ Stainless is a new C++-like language that transpiles to Rust.
 > and Rowan parser, typed CST views, compiler-owned AST lowering, structural
 > diagnostics, an initial name/type/call resolver, a typed Rust-shaped HIR, and
 > structured Rust emission for the supported function/control-flow,
-> data-only-struct, constructor, checked-exception, `Vec`/`String`, native
+> struct/class/interface, constructor, checked-exception, `Vec`/`String`, native
 > JSON, the local/function ownership-pointer family, mutex/condition
 > synchronization, owned/scoped threads, and first external-wrapper subset. The
 > workspace now includes the compact
 > `stainless-runtime` used by generated JSON code. An initial move/borrow
-> dataflow pass validates that subset; classes and interfaces have not started
-> yet.
+> dataflow pass validates that subset. Classes are move-only concrete values;
+> interfaces lower to object-safe Rust traits with checked conformance and
+> class-owner erasure.
 
 ## Hello World
 
@@ -196,8 +197,8 @@ constructs with direct Rust equivalents:
   methods;
 - namespaces/modules and explicit imports rather than textual inclusion;
 - vtable-free structs with data-only inheritance implemented as composition;
-- sealed classes that can implement interfaces but cannot inherit other
-  classes;
+- non-inheritable classes that can implement interfaces but cannot inherit
+  structs or other classes;
 - interfaces and interface inheritance implemented as Rust traits,
   supertraits, and trait objects where dynamic dispatch is required;
 - Stainless ownership types with deliberately restricted Rust lowerings,
@@ -322,9 +323,9 @@ A `struct` has a data-only representation:
 - This reference coercion never converts or slices an owned derived value,
   permits a base-to-derived downcast, or introduces runtime type information.
 - There are no virtual data bases, compiler-inserted vtable pointers, C++ object
-  slicing, or C++ layout/ABI guarantees. An explicitly declared field may still
-  contain an interface value whose Rust representation carries trait-object
-  metadata.
+  slicing, or C++ layout/ABI guarantees. Bare interface values are not valid
+  fields or locals; dynamic interface metadata is carried by an explicit
+  reference or owning pointer.
 - Implementing an interface does not change a struct's representation. The
   generated Rust uses an ordinary trait implementation with static dispatch,
   and Stainless prohibits creating a `dyn Interface` from the struct.
@@ -2538,10 +2539,10 @@ The current recursive-descent grammar handles:
 - namespace blocks and losslessly retained `use` declarations;
 - function declarations and definitions, qualified names, parameters,
   reference types, generic type arguments, `const`, and `throws` clauses;
-- data-only struct definitions, direct fields, one optional data base, member
-  declarations, qualified out-of-struct definitions, and aggregate
-  initialization;
-- constructor declarations, `= delete`, qualified out-of-struct definitions,
+- struct, class, and interface definitions; direct fields; data and interface
+  base lists; `public:`/`private:` labels; member declarations; qualified
+  out-of-type definitions; and struct aggregate initialization;
+- constructor declarations, `= delete`, qualified out-of-type definitions,
   and C++-style data-base/member initializer lists;
 - blocks, initialized or default-constructed local declarations, `return`,
   `throw`, `try` with ordered typed or catch-all handlers, `if`/`else`, `break`,
@@ -2568,14 +2569,15 @@ implemented structural checks:
 - value returns from `void` functions and empty returns from non-`void`
   functions;
 - duplicate constructor parameter names and constructor bodies placed inside a
-  struct declaration;
+  type declaration;
+- access labels or constructors in interfaces, redundant `class sealed`, and
+  member-function bodies placed inside a type declaration;
 - bare rethrow outside a catch, non-const/non-reference typed catches, and a
   catch-all handler followed by another handler.
 
 These are deliberately pre-resolution checks, not full type checking.
-Class/interface declarations, macros, and the remaining reference samples still
-need grammar productions. Access labels are parsed in structs, but access
-checking is not implemented yet.
+Additional macros and the remaining reference samples still need grammar
+productions.
 
 The initial `stainless_compiler::resolution` pass now provides:
 
@@ -2583,10 +2585,15 @@ The initial `stainless_compiler::resolution` pass now provides:
   implemented single-file subset;
 - primitive and native type resolution, local/parameter scopes, contextual
   integer literal types, and expression typing for the current operators;
-- user-defined struct names and layouts, direct and inherited field lookup,
-  static member lookup, exact declaration/definition matching, aggregate
-  construction, fluent `void` member returns, and
-  cycle/duplicate/reference-field diagnostics;
+- user-defined struct/class/interface names and layouts, direct and inherited
+  field lookup, C++-style public/private access checks, static member lookup,
+  exact declaration/definition matching, struct aggregate construction,
+  fluent `void` member returns, and cycle/duplicate/reference-field
+  diagnostics;
+- single data inheritance for structs; interface inheritance and exact
+  implementation-contract validation; move-only, non-assignable class values;
+  static interface implementations for structs and classes; dynamic interface
+  references and unique/shared class-owner erasure, including nullable owners;
 - exact user-constructor overload selection, deleted/missing-definition
   diagnostics, ordered base/member initialization, and synthesized or
   implicitly deleted struct default constructors, including checked
@@ -2668,9 +2675,9 @@ binding registry. If the front end reports a diagnostic, or HIR lowering
 encounters a construct without defined Rust semantics, it returns no Rust. For
 the accepted subset it now:
 
-- lowers resolved namespaces, free functions, data-only structs, and statically
-  dispatched member functions and struct constructors into a public, typed
-  HIR;
+- lowers resolved namespaces, free functions, structs/classes, interface
+  traits, static trait implementations, dynamically dispatched interface calls,
+  member functions, and constructors into a public, typed HIR;
 - makes reference borrows/dereferences, exact overload targets, primitive
   casts, explicit moves, struct copies, aggregate construction, inherited-field
   paths, base-reference projections, fluent member receivers, constructor
@@ -2680,6 +2687,9 @@ the accepted subset it now:
   `RwLock<Arc>`/`RwLock<Option<Arc>>`; allocation, nullable recovery, handle
   cloning, weak promotion, and poison-tolerant atomic replacement are explicit
   HIR operations;
+- lowers interfaces to Rust traits with supertraits and `Send + Sync` trait
+  objects, and erases class owners using safe `Box`/`Arc` unsizing (or an
+  explicit nullable-owner map);
 - lowers classic loops without breaking C++ `continue`/update ordering and
   lowers shared, mutable, copied, and consuming `Vec<T>` range loops to the
   corresponding Rust iterator form;
@@ -2699,7 +2709,7 @@ the accepted subset it now:
 - emits deterministic Rust with `proc-macro2` and `quote`, validates the
   generated token tree by parsing it with `syn`, and formats it with
   `prettyplease`;
-- compiles the eight dependency-free supported reference files as Rust
+- compiles the dependency-free supported reference files as Rust
   libraries, compiles and executes the JSON and external `regex` references
   through Cargo, and executes behavior fixtures covering functions, borrows, loops,
   structs, memberwise copying, data inheritance, `Vec`, `String`, moves,
@@ -2709,9 +2719,9 @@ the accepted subset it now:
   JSON mutation, plus non-null unique allocation, borrowing, member access,
   moves, and throwing pointee construction.
 
-This is still not full semantic validation. Classes, interfaces, access
-control, nullable/shared/weak/atomic pointer families, cross-file modules,
-ownership through fields and future pointer types, full path-sensitive
+This is still not full semantic validation. Cross-file modules,
+namespace-scope storage, `require(...)`, dynamic interface erasure through weak
+and atomic pointer forms, ownership through fields, full path-sensitive
 loop-exit precision, general borrow
 lifetimes, member/native returned-reference provenance, and generalized native
 trait satisfaction remain unresolved. Thread-transferable, throwing,
@@ -2860,7 +2870,8 @@ recorded inline so implemented syntax is not confused with planned work:
 2. **Implemented:** tokenize identifiers, literals, comments, punctuation, and
    keywords with byte spans and lossless trivia.
 3. **Implemented for the listed subset:** parse namespaces, imports, function
-   definitions, data-only structs, fields, one data base, aggregates, typed
+   definitions, structs/classes/interfaces, fields, data and interface bases,
+   access labels, aggregates, typed
    local bindings, struct constructors and initializer lists, blocks, calls,
    arithmetic, `return`, `throw`, `try`/`catch`, `if`/`else`, and classic/range
    `for` loops plus typed lambdas with explicit, initializer, and mutable
@@ -2869,11 +2880,12 @@ recorded inline so implemented syntax is not confused with planned work:
 4. **In progress:** typed CST views, AST lowering, structural validation, the
    initial single-file name/type/call resolver, move/borrow analysis, and
    resolved HIR construction are implemented for the function/control-flow and
-   first struct subsets, including checked exceptions and throwing
+   struct/class/interface subsets, including checked exceptions and throwing
    constructors, shared `function` and move-only `function_mut` values, and the
    local/function ownership-pointer family with nullable flow tracking, shared
-   handle copies, weak promotion, and atomic slots. Classes, interfaces,
-   namespace-scope pointer storage, `require(...)`, and general ownership
+   handle copies, weak promotion, atomic slots, exact interface conformance,
+   Rust-trait lowering, and dynamic class-owner erasure. Namespace-scope pointer
+   storage, `require(...)`, weak/atomic interface erasure, and general ownership
    through fields remain.
 5. **In progress:** the initial `Vec`, `String`, and JSON metadata is connected through
    resolution and code generation. The versioned package binding manifest is

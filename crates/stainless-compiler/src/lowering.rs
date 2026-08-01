@@ -33,42 +33,81 @@ fn lower_item(item: cst::Item) -> Item {
             path: lower_use_path(&declaration),
             span: span(&declaration),
         }),
-        cst::Item::Struct(definition) => {
-            let definition_span = span(&definition);
-            Item::Struct(ast::Struct {
-                name: definition
-                    .name_token()
-                    .map_or_else(missing_name, |token| token.text().to_owned()),
-                base: {
-                    let path = path_from_tokens(definition.base_tokens());
-                    (!path.segments.is_empty()).then_some(path)
-                },
-                fields: definition
-                    .fields()
-                    .map(|field| {
-                        let field_span = span(&field);
-                        ast::Field {
-                            ty: field
-                                .ty()
-                                .map_or_else(|| error_type(field_span), |ty| lower_type(&ty)),
-                            name: field
-                                .name_token()
-                                .map_or_else(missing_name, |token| token.text().to_owned()),
-                            span: field_span,
-                        }
-                    })
-                    .collect(),
-                functions: definition
-                    .functions()
-                    .map(|function| lower_function(&function))
-                    .collect(),
-                constructors: definition
-                    .constructors()
-                    .map(|constructor| lower_constructor(&constructor))
-                    .collect(),
-                span: definition_span,
-            })
-        }
+        cst::Item::Struct(definition) => lower_struct_like_definition(
+            ast::UserTypeKind::Struct,
+            definition.name_token(),
+            definition.is_sealed(),
+            definition.has_access_specifier(),
+            definition.bases().collect(),
+            definition
+                .fields()
+                .map(|member| {
+                    let public = definition.member_is_public(member.syntax(), true);
+                    (member, public)
+                })
+                .collect(),
+            definition
+                .functions()
+                .map(|member| {
+                    let public = definition.member_is_public(member.syntax(), true);
+                    (member, public)
+                })
+                .collect(),
+            definition
+                .constructors()
+                .map(|member| {
+                    let public = definition.member_is_public(member.syntax(), true);
+                    (member, public)
+                })
+                .collect(),
+            span(&definition),
+        ),
+        cst::Item::Class(definition) => lower_struct_like_definition(
+            ast::UserTypeKind::Class,
+            definition.name_token(),
+            definition.is_sealed(),
+            definition.has_access_specifier(),
+            definition.bases().collect(),
+            definition
+                .fields()
+                .map(|member| {
+                    let public = definition.member_is_public(member.syntax(), false);
+                    (member, public)
+                })
+                .collect(),
+            definition
+                .functions()
+                .map(|member| {
+                    let public = definition.member_is_public(member.syntax(), false);
+                    (member, public)
+                })
+                .collect(),
+            definition
+                .constructors()
+                .map(|member| {
+                    let public = definition.member_is_public(member.syntax(), false);
+                    (member, public)
+                })
+                .collect(),
+            span(&definition),
+        ),
+        cst::Item::Interface(definition) => lower_struct_like_definition(
+            ast::UserTypeKind::Interface,
+            definition.name_token(),
+            definition.is_sealed(),
+            definition.has_access_specifier(),
+            definition.bases().collect(),
+            definition.fields().map(|member| (member, true)).collect(),
+            definition
+                .functions()
+                .map(|member| (member, true))
+                .collect(),
+            definition
+                .constructors()
+                .map(|member| (member, true))
+                .collect(),
+            span(&definition),
+        ),
         cst::Item::ConstructorDefinition(constructor) => Item::Constructor(lower_constructor(
             &cst::Constructor::Definition(constructor),
         )),
@@ -84,9 +123,64 @@ fn lower_item(item: cst::Item) -> Item {
     }
 }
 
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+fn lower_struct_like_definition(
+    kind: ast::UserTypeKind,
+    name: Option<stainless_syntax::SyntaxToken>,
+    is_sealed: bool,
+    has_access_specifier: bool,
+    bases: Vec<cst::TypeReference>,
+    fields: Vec<(cst::FieldDeclaration, bool)>,
+    functions: Vec<(cst::Function, bool)>,
+    constructors: Vec<(cst::Constructor, bool)>,
+    definition_span: Span,
+) -> Item {
+    Item::Struct(ast::Struct {
+        kind,
+        name: name.map_or_else(missing_name, |token| token.text().to_owned()),
+        bases: bases.iter().map(lower_type).collect(),
+        is_sealed,
+        has_access_specifier,
+        fields: fields
+            .iter()
+            .map(|(field, is_public)| {
+                let field_span = span(field);
+                ast::Field {
+                    is_public: *is_public,
+                    ty: field
+                        .ty()
+                        .map_or_else(|| error_type(field_span), |ty| lower_type(&ty)),
+                    name: field
+                        .name_token()
+                        .map_or_else(missing_name, |token| token.text().to_owned()),
+                    span: field_span,
+                }
+            })
+            .collect(),
+        functions: functions
+            .iter()
+            .map(|(function, is_public)| {
+                let mut function = lower_function(function);
+                function.is_public = *is_public;
+                function
+            })
+            .collect(),
+        constructors: constructors
+            .iter()
+            .map(|(constructor, is_public)| {
+                let mut constructor = lower_constructor(constructor);
+                constructor.is_public = *is_public;
+                constructor
+            })
+            .collect(),
+        span: definition_span,
+    })
+}
+
 fn lower_constructor(constructor: &cst::Constructor) -> ast::Constructor {
     let constructor_span = span(constructor);
     ast::Constructor {
+        is_public: true,
         name: path_from_tokens(constructor.name_tokens()),
         parameters: constructor
             .parameter_list()
@@ -135,6 +229,7 @@ fn lower_constructor(constructor: &cst::Constructor) -> ast::Constructor {
 fn lower_function(function: &cst::Function) -> ast::Function {
     let function_span = span(function);
     ast::Function {
+        is_public: true,
         name: path_from_tokens(function.name_tokens()),
         return_type: function
             .return_type()

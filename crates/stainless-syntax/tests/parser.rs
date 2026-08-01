@@ -44,6 +44,19 @@ fn parses_structs_members_inheritance_and_aggregates_losslessly() {
 }
 
 #[test]
+fn parses_classes_interfaces_inheritance_and_access_labels_losslessly() {
+    let source = include_str!("../../../docs/ref/03_interfaces.stl");
+    let parsed = parse(source);
+    let root = parsed.syntax();
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(root.to_string(), source);
+    assert_eq!(count_kind(&root, SyntaxKind::InterfaceDefinition), 3);
+    assert_eq!(count_kind(&root, SyntaxKind::ClassDefinition), 1);
+    assert_eq!(count_kind(&root, SyntaxKind::AccessSpecifier), 1);
+}
+
+#[test]
 fn parses_braced_owner_allocation_with_nested_generic_targets() {
     let source = "void allocate() {\n    auto shared = make_shared<mutex<State>>{false, 0};\n    auto unique = make_unique<State>{true, 1};\n}\n";
     let parsed = parse(source);

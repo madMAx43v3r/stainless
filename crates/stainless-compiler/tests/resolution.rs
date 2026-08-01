@@ -11,6 +11,9 @@ use stainless_compiler::{analyze, analyze_with_bindings};
 fn resolves_reference_parser_fixtures_without_semantic_errors() {
     for source in [
         include_str!("../../../docs/ref/01_basics.stl"),
+        include_str!("../../../docs/ref/03_interfaces.stl"),
+        include_str!("../../../docs/ref/09_value_semantics.stl"),
+        include_str!("../../../docs/ref/10_checked_exceptions.stl"),
         include_str!("../../../docs/ref/11_vec_and_string.stl"),
         include_str!("../../../docs/ref/13_range_for.stl"),
         include_str!("../../../docs/ref/15_checked_exception_subset.stl"),
@@ -706,9 +709,10 @@ usize native_calls(const String& suffix) {
         .iter()
         .filter_map(|call| match &call.target {
             CallTarget::Native(native) => Some(native),
-            CallTarget::Stainless(_) | CallTarget::Constructor(_) | CallTarget::Intrinsic(_) => {
-                None
-            }
+            CallTarget::Stainless(_)
+            | CallTarget::InterfaceMethod(_)
+            | CallTarget::Constructor(_)
+            | CallTarget::Intrinsic(_) => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(
@@ -810,7 +814,10 @@ i32 example() {
         .iter()
         .filter_map(|call| match call.target {
             CallTarget::Stainless(id) => Some(id),
-            CallTarget::Constructor(_) | CallTarget::Native(_) | CallTarget::Intrinsic(_) => None,
+            CallTarget::InterfaceMethod(_)
+            | CallTarget::Constructor(_)
+            | CallTarget::Native(_)
+            | CallTarget::Intrinsic(_) => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(selected_ids, [overloads[0].id, overloads[1].id]);
@@ -852,9 +859,10 @@ String identity(String value) {
         .iter()
         .filter_map(|call| match &call.target {
             CallTarget::Native(native) => Some(native),
-            CallTarget::Stainless(_) | CallTarget::Constructor(_) | CallTarget::Intrinsic(_) => {
-                None
-            }
+            CallTarget::Stainless(_)
+            | CallTarget::InterfaceMethod(_)
+            | CallTarget::Constructor(_)
+            | CallTarget::Intrinsic(_) => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(native_calls.len(), 2);

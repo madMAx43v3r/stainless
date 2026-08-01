@@ -30,6 +30,7 @@ pub(crate) fn lower(
         loop_labels: Vec::new(),
         native_wrappers: BTreeMap::new(),
     };
+    let lowered_interfaces = lowerer.lower_interfaces();
     let mut lowered_structs = lowerer.lower_structs(&source.items);
     for structure in semantics.structs.iter().filter(|structure| {
         matches!(
@@ -66,10 +67,21 @@ pub(crate) fn lower(
         .collect();
     let mut program = hir::Program {
         native_wrappers,
+        interfaces: Vec::new(),
         structs: Vec::new(),
         functions: Vec::new(),
         modules: Vec::new(),
     };
+    for interface in lowered_interfaces {
+        let module_path =
+            interface.source_path[..interface.source_path.len().saturating_sub(1)].to_vec();
+        insert_interface(
+            &mut program.interfaces,
+            &mut program.modules,
+            &module_path,
+            interface,
+        );
+    }
     for structure in lowered_structs {
         let module_path =
             structure.source_path[..structure.source_path.len().saturating_sub(1)].to_vec();
@@ -118,6 +130,69 @@ enum ExpressionMode {
 }
 
 impl Lowerer<'_> {
+    fn lower_interfaces(&mut self) -> Vec<hir::Interface> {
+        self.semantics
+            .structs
+            .iter()
+            .filter(|structure| structure.kind == ast::UserTypeKind::Interface)
+            .cloned()
+            .filter_map(|interface| {
+                let functions = self
+                    .semantics
+                    .functions
+                    .iter()
+                    .filter(|function| {
+                        function
+                            .receiver
+                            .as_ref()
+                            .is_some_and(|receiver| receiver.structure == interface.id)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let methods = functions
+                    .iter()
+                    .map(|function| self.lower_interface_method(function))
+                    .collect::<Option<Vec<_>>>()?;
+                Some(hir::Interface {
+                    source_path: interface.path.clone(),
+                    rust_name: interface.path.last()?.clone(),
+                    bases: interface
+                        .interfaces
+                        .iter()
+                        .filter_map(|base| self.semantics.structure(*base))
+                        .map(|base| user_type_path(&base.path))
+                        .collect(),
+                    methods,
+                })
+            })
+            .collect()
+    }
+
+    fn lower_interface_method(
+        &mut self,
+        function: &FunctionSymbol,
+    ) -> Option<hir::InterfaceMethod> {
+        let receiver = function.receiver.as_ref()?;
+        Some(hir::InterfaceMethod {
+            rust_name: function.mangled_name.clone(),
+            mutable: receiver.mutable,
+            parameters: function
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    Some(hir::Parameter {
+                        source_name: parameter.name.clone(),
+                        rust_name: binding_name(&parameter.name),
+                        ty: self.lower_type(&parameter.ty, parameter.span)?,
+                        mutable: false,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?,
+            return_type: self.lower_type(&function.return_type, function.declarations[0])?,
+            throws: !function.throws.is_empty(),
+        })
+    }
+
     fn lower_structs(&mut self, items: &[Item]) -> Vec<hir::Struct> {
         let mut structs = Vec::new();
         for item in items {
@@ -134,6 +209,9 @@ impl Lowerer<'_> {
                         );
                         continue;
                     };
+                    if symbol.kind == ast::UserTypeKind::Interface {
+                        continue;
+                    }
                     if let Some(lowered) =
                         self.lower_struct_symbol(&symbol, &structure.name, structure.span)
                     {
@@ -180,12 +258,45 @@ impl Lowerer<'_> {
         } else {
             None
         };
+        let interface_implementations = self
+            .semantics
+            .interface_implementations
+            .iter()
+            .filter(|implementation| implementation.implementer == symbol.id)
+            .map(|implementation| {
+                let interface = self.semantics.structure(implementation.interface)?;
+                let methods = implementation
+                    .methods
+                    .iter()
+                    .map(|(requirement, implementation)| {
+                        let requirement = self.semantics.function(*requirement)?;
+                        let implementation = self.semantics.function(*implementation)?;
+                        Some(hir::InterfaceImplementationMethod {
+                            method: self.lower_interface_method(requirement)?,
+                            function_modules: function_module_path(implementation, self.semantics)
+                                .iter()
+                                .map(|name| module_name(name))
+                                .collect(),
+                            function: implementation.mangled_name.clone(),
+                            adapt_self_reference: requirement.return_type
+                                != implementation.return_type,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(hir::InterfaceImplementation {
+                    interface_path: user_type_path(&interface.path),
+                    methods,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
         Some(hir::Struct {
             source_path: symbol.path.clone(),
             rust_name: rust_name.to_owned(),
+            copyable: symbol.kind == ast::UserTypeKind::Struct,
             fields,
             is_exception,
             exception_base_field,
+            interface_implementations,
         })
     }
 
@@ -301,8 +412,21 @@ impl Lowerer<'_> {
             }
             None => Vec::new(),
         };
-        let struct_type = TypeRef::Struct {
-            path: structure.path.clone(),
+        let struct_type = match structure.kind {
+            ast::UserTypeKind::Struct => TypeRef::Struct {
+                path: structure.path.clone(),
+            },
+            ast::UserTypeKind::Class => TypeRef::Class {
+                path: structure.path.clone(),
+            },
+            ast::UserTypeKind::Interface => {
+                self.push(
+                    "HIR016",
+                    "an interface reached constructor lowering".to_owned(),
+                    span,
+                );
+                return None;
+            }
         };
         let previous_throwing = self.current_throwing;
         let previous_target =
@@ -407,6 +531,7 @@ impl Lowerer<'_> {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn lower_function(&mut self, function: &ast::Function) -> Option<hir::Function> {
         let body = function.body.as_ref()?;
         let Some(symbol) = self.semantics.function_at(function.span) else {
@@ -449,8 +574,16 @@ impl Lowerer<'_> {
                     ty: hir::Type::Reference {
                         mutable: receiver.mutable,
                         target: Box::new(self.lower_type(
-                            &TypeRef::Struct {
-                                path: structure.path.clone(),
+                            &match structure.kind {
+                                ast::UserTypeKind::Struct => TypeRef::Struct {
+                                    path: structure.path.clone(),
+                                },
+                                ast::UserTypeKind::Class => TypeRef::Class {
+                                    path: structure.path.clone(),
+                                },
+                                ast::UserTypeKind::Interface => TypeRef::Interface {
+                                    path: structure.path.clone(),
+                                },
                             },
                             function.span,
                         )?),
@@ -833,6 +966,7 @@ impl Lowerer<'_> {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn lower_bound_expression(
         &mut self,
         expression: &ast::Expression,
@@ -875,10 +1009,11 @@ impl Lowerer<'_> {
                 },
             )?;
             let actual_target = resolution.map(|value| canonical_ref(&value.ty));
-            if let Some(kind) = actual_target.and_then(nullable_owner_kind) {
+            if let Some(kind) = actual_target.and_then(reference_owner_kind) {
                 lowered = hir::Expression::PointerPointee {
                     kind,
-                    mutable: *mutable && kind == PointerKind::UniqueNullable,
+                    mutable: *mutable
+                        && matches!(kind, PointerKind::Unique | PointerKind::UniqueNullable),
                     owner: Box::new(lowered),
                 };
             }
@@ -906,6 +1041,49 @@ impl Lowerer<'_> {
             }
         } else {
             let lowered = self.lower_expression(expression, ExpressionMode::Value)?;
+            let interface_owner = resolution.and_then(|value| {
+                let TypeRef::Pointer {
+                    kind: expected_kind,
+                    target: expected_target,
+                } = canonical_ref(expected)
+                else {
+                    return None;
+                };
+                let TypeRef::Pointer {
+                    kind: actual_kind,
+                    target: actual_target,
+                } = canonical_ref(&value.ty)
+                else {
+                    return None;
+                };
+                if expected_kind != actual_kind
+                    || !matches!(canonical_ref(expected_target), TypeRef::Interface { .. })
+                    || !matches!(canonical_ref(actual_target), TypeRef::Class { .. })
+                {
+                    return None;
+                }
+                Some((*expected_kind, canonical_ref(expected_target).clone()))
+            });
+            if let Some((kind, target)) = interface_owner {
+                let value = if matches!(kind, PointerKind::Shared | PointerKind::SharedNullable)
+                    && resolution.is_some_and(|value| value.category != ValueCategory::Temporary)
+                    && !is_move_call(self.semantics, expression)
+                {
+                    hir::Expression::Clone {
+                        expression: Box::new(hir::Expression::Borrow {
+                            mutable: false,
+                            expression: Box::new(lowered),
+                        }),
+                    }
+                } else {
+                    lowered
+                };
+                return Some(hir::Expression::InterfaceOwnerCoercion {
+                    kind,
+                    target: self.lower_type(&target, expression.span)?,
+                    value: Box::new(value),
+                });
+            }
             if (matches!(canonical_ref(expected), TypeRef::Struct { .. })
                 || matches!(
                     canonical_ref(expected),
@@ -1561,8 +1739,16 @@ impl Lowerer<'_> {
                             syntax_receiver,
                             &TypeRef::Reference {
                                 mutable: receiver.mutable,
-                                target: Box::new(TypeRef::Struct {
-                                    path: structure.path.clone(),
+                                target: Box::new(match structure.kind {
+                                    ast::UserTypeKind::Struct => TypeRef::Struct {
+                                        path: structure.path.clone(),
+                                    },
+                                    ast::UserTypeKind::Class => TypeRef::Class {
+                                        path: structure.path.clone(),
+                                    },
+                                    ast::UserTypeKind::Interface => TypeRef::Interface {
+                                        path: structure.path.clone(),
+                                    },
                                 }),
                             },
                         )?,
@@ -1574,6 +1760,48 @@ impl Lowerer<'_> {
                         .map(|name| module_name(name))
                         .collect(),
                     function: function.mangled_name.clone(),
+                    arguments: lowered_arguments,
+                })
+            }
+            CallTarget::InterfaceMethod(id) => {
+                let function = self.semantics.function(*id)?;
+                let receiver = function.receiver.as_ref()?;
+                let interface = self.semantics.structure(receiver.structure)?;
+                let Some(ast::Expression {
+                    kind:
+                        ExpressionKind::Field {
+                            receiver: syntax_receiver,
+                            ..
+                        },
+                    ..
+                }) = callee
+                else {
+                    self.push(
+                        "HIR011",
+                        "interface call has no receiver".to_owned(),
+                        call.span,
+                    );
+                    return None;
+                };
+                let lowered_receiver = self.lower_bound_expression(
+                    syntax_receiver,
+                    &TypeRef::Reference {
+                        mutable: receiver.mutable,
+                        target: Box::new(TypeRef::Interface {
+                            path: interface.path.clone(),
+                        }),
+                    },
+                )?;
+                let lowered_arguments = arguments
+                    .iter()
+                    .zip(&function.parameters)
+                    .map(|(argument, parameter)| {
+                        self.lower_bound_expression(argument, &parameter.ty)
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(hir::Expression::InterfaceCall {
+                    receiver: Box::new(lowered_receiver),
+                    method: function.mangled_name.clone(),
                     arguments: lowered_arguments,
                 })
             }
@@ -2274,7 +2502,10 @@ impl Lowerer<'_> {
             TypeRef::ScopedThreadHandle(target) => {
                 hir::Type::ScopedThreadHandle(Box::new(self.lower_type(target, span)?))
             }
-            TypeRef::Struct { path } => hir::Type::User {
+            TypeRef::Struct { path } | TypeRef::Class { path } => hir::Type::User {
+                rust_path: user_type_path(path),
+            },
+            TypeRef::Interface { path } => hir::Type::Interface {
                 rust_path: user_type_path(path),
             },
             TypeRef::Reference { mutable, target } => hir::Type::Reference {
@@ -2449,6 +2680,7 @@ fn insert_struct(
             modules.push(hir::Module {
                 source_name: source_module.clone(),
                 rust_name: module_name(source_module),
+                interfaces: Vec::new(),
                 structs: Vec::new(),
                 functions: Vec::new(),
                 modules: Vec::new(),
@@ -2461,6 +2693,39 @@ fn insert_struct(
         &mut module.modules,
         remaining_path,
         structure,
+    );
+}
+
+fn insert_interface(
+    interfaces: &mut Vec<hir::Interface>,
+    modules: &mut Vec<hir::Module>,
+    module_path: &[String],
+    interface: hir::Interface,
+) {
+    let Some((source_module, remaining_path)) = module_path.split_first() else {
+        interfaces.push(interface);
+        return;
+    };
+    let index = modules
+        .iter()
+        .position(|module| module.source_name == *source_module)
+        .unwrap_or_else(|| {
+            modules.push(hir::Module {
+                source_name: source_module.clone(),
+                rust_name: module_name(source_module),
+                interfaces: Vec::new(),
+                structs: Vec::new(),
+                functions: Vec::new(),
+                modules: Vec::new(),
+            });
+            modules.len() - 1
+        });
+    let module = &mut modules[index];
+    insert_interface(
+        &mut module.interfaces,
+        &mut module.modules,
+        remaining_path,
+        interface,
     );
 }
 
@@ -2481,6 +2746,7 @@ fn insert_function(
             modules.push(hir::Module {
                 source_name: source_module.clone(),
                 rust_name: module_name(source_module),
+                interfaces: Vec::new(),
                 structs: Vec::new(),
                 functions: Vec::new(),
                 modules: Vec::new(),
@@ -2538,6 +2804,20 @@ fn nullable_test_kind(ty: &TypeRef) -> Option<PointerKind> {
 
 fn nullable_owner_kind(ty: &TypeRef) -> Option<PointerKind> {
     nullable_test_kind(ty).filter(|kind| *kind != PointerKind::Weak)
+}
+
+fn reference_owner_kind(ty: &TypeRef) -> Option<PointerKind> {
+    let TypeRef::Pointer { kind, .. } = canonical_ref(ty) else {
+        return None;
+    };
+    matches!(
+        kind,
+        PointerKind::Unique
+            | PointerKind::UniqueNullable
+            | PointerKind::Shared
+            | PointerKind::SharedNullable
+    )
+    .then_some(*kind)
 }
 
 fn automatic_pointee_type(ty: &TypeRef) -> &TypeRef {
