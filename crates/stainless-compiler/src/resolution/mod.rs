@@ -524,6 +524,8 @@ pub struct SemanticModel {
     pub rust_result_adaptations: Vec<RustResultAdaptation>,
     /// Contextual callback expressions in traversal order.
     pub callbacks: Vec<ResolvedCallback>,
+    /// Data structs requiring generated structural JSON conversions.
+    pub json_struct_conversions: Vec<StructId>,
 }
 
 impl SemanticModel {

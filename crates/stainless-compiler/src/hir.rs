@@ -92,12 +92,23 @@ pub struct Struct {
     pub copyable: bool,
     /// Direct representation fields, including an optional base subobject.
     pub fields: Vec<Field>,
+    /// Flattened data fields used by automatic structural JSON conversion.
+    pub json_fields: Option<Vec<JsonStructField>>,
     /// Whether this struct participates in the checked-exception hierarchy.
     pub is_exception: bool,
     /// Embedded exception-base field, absent on the compiler-provided root.
     pub exception_base_field: Option<String>,
     /// Static Rust trait implementations proven by interface conformance.
     pub interface_implementations: Vec<InterfaceImplementation>,
+}
+
+/// One flattened field in a generated struct-to-JSON conversion.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JsonStructField {
+    /// JSON object member name.
+    pub name: String,
+    /// Generated Rust fields traversed from the converted struct value.
+    pub access_path: Vec<String>,
 }
 
 /// A Stainless interface lowered to a Rust trait.
@@ -472,7 +483,7 @@ pub enum Expression {
     JsonArray(Vec<Expression>),
     /// Construct a JSON object.
     JsonObject(Vec<(String, Expression)>),
-    /// Convert a statically typed JSON-compatible value into `var`.
+    /// Convert a statically typed scalar, collection, or data struct into `var`.
     JsonFrom(Box<Expression>),
     /// Null-safe JSON object member access.
     JsonField {

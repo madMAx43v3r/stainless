@@ -1599,6 +1599,9 @@ fn cargo_executes_native_json_support_and_json_error_conversion() {
         .clone();
     let mut rust = result.rust.expect("JSON sample should emit Rust");
     assert!(rust.contains("::stainless_runtime::Var::object"));
+    assert!(rust.contains("\"__type\""));
+    assert!(rust.contains("\"Profile\""));
+    assert!(rust.contains("\"Position\""));
     assert!(rust.contains("::stainless_runtime::Var::parse"));
     assert!(rust.contains("__stainless_namespace_stainless::JsonError"));
     write!(
@@ -1617,6 +1620,34 @@ fn cargo_executes_native_json_support_and_json_error_conversion() {
     );
     fs::remove_dir_all(&directory)
         .unwrap_or_else(|error| panic!("failed to remove {}: {error}", directory.display()));
+}
+
+#[test]
+fn struct_json_conversion_uses_the_qualified_stainless_type_name() {
+    let source = r"namespace web {
+namespace model {
+struct Point {
+    i32 x;
+    i32 y;
+};
+
+var encode() {
+    return var(Point{1, 2});
+}
+}
+}
+";
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:?}",
+        result.analysis.diagnostics
+    );
+    let rust = result
+        .rust
+        .expect("struct JSON conversion should emit Rust");
+    assert!(rust.contains("\"__type\""));
+    assert!(rust.contains("\"web::model::Point\""));
 }
 
 #[test]

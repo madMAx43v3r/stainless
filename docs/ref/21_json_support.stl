@@ -1,6 +1,25 @@
 // `var` is the compiler-native, owned JSON value type. `null`, JSON arrays,
 // and JSON objects are language syntax rather than Rust interop syntax.
-use rust::{println, String};
+use rust::{List, Map, println, String};
+
+struct Entity {
+    i32 id;
+};
+
+struct Position {
+    i32 x;
+    i32 y;
+};
+
+struct Empty {
+};
+
+struct Profile : Entity {
+    String name;
+    Position position;
+    List<String> tags;
+    Map<String, i32> metrics;
+};
 
 var read_json(const String& source) throws stainless::JsonError {
     // Assigning Result<var, JsonError> to var performs the normal implicit
@@ -35,6 +54,29 @@ i32 main() throws stainless::JsonError {
     };
     var array = [1, 2, "text", {}, null];
     var value = 1.23;
+
+    List<String> tags;
+    tags.push_back("compiler");
+    tags.push_back("rust");
+    Map<String, i32> metrics;
+    metrics.insert("answer", 42);
+    Profile profile = Profile{
+        Entity{7},
+        "Ada",
+        Position{3, 4},
+        move(tags),
+        move(metrics),
+    };
+    // Struct conversion is structural and recursive. Every converted struct
+    // object has a fully qualified `__type` member. Inherited data fields are
+    // flattened, while nested structs and collections retain their JSON
+    // object/array shapes. Converting a named struct uses Stainless copy
+    // semantics, so `profile` remains usable.
+    var profile_json = var(profile);
+    var implicit_profile_json = profile;
+    var direct_position_json = var(Position{8, 9});
+    var empty_json = var(Empty{});
+    bool profile_source_survived = profile.name.len() == 3usize;
 
     var test_element = array[2];
     var out_of_bounds = array[11111]; // JSON null
@@ -71,6 +113,20 @@ i32 main() throws stainless::JsonError {
         array_length != 6usize ||
         !cycle_rejected) {
         return 2;
+    }
+
+    if (i32(profile_json.id) != 7 ||
+        String(profile_json.name).len() != 3usize ||
+        i32(profile_json.position.x) != 3 ||
+        String(profile_json.tags[1]).len() != 4usize ||
+        i32(profile_json.metrics.answer) != 42 ||
+        String(profile_json.__type).len() != 7usize ||
+        String(profile_json.position.__type).len() != 8usize ||
+        i32(implicit_profile_json.id) != 7 ||
+        i32(direct_position_json.y) != 9 ||
+        String(empty_json.__type).len() != 5usize ||
+        !profile_source_survived) {
+        return 3;
     }
 
     if (test_element == null && out_of_bounds == null && missing_field == null) {

@@ -184,7 +184,7 @@ struct Unsupported {
 
 var invalid() {
     var duplicate = {field: 1, field: 2};
-    var unsupported = [Unsupported{1}];
+    var unsupported = [make_unique<Unsupported>(Unsupported{1})];
     return move(duplicate);
 }
 "#;

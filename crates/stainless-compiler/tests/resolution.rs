@@ -36,6 +36,78 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
 }
 
 #[test]
+fn records_recursive_struct_json_conversions_and_rejects_unsupported_shapes() {
+    let valid = analyze(include_str!("../../../docs/ref/21_json_support.stl"));
+    assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);
+    let converted = valid
+        .semantics
+        .json_struct_conversions
+        .iter()
+        .filter_map(|id| valid.semantics.structure(*id))
+        .map(|structure| structure.path.join("::"))
+        .collect::<Vec<_>>();
+    for expected in ["Empty", "Entity", "Position", "Profile"] {
+        assert!(
+            converted.iter().any(|path| path == expected),
+            "{converted:?}"
+        );
+    }
+
+    let invalid = analyze(
+        r"use rust::Result;
+
+struct Unsupported {
+    Result<i32, i32> outcome;
+};
+
+struct Base {
+    i32 id;
+};
+
+struct Duplicate : Base {
+    i32 id;
+};
+
+class Identity {
+public:
+    i32 id;
+};
+
+var unsupported(const Unsupported& value) {
+    return var(value);
+}
+
+var duplicate(const Duplicate& value) {
+    return var(value);
+}
+
+var identity(Identity value) {
+    return var(move(value));
+}
+",
+    );
+    let json_errors = invalid
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "RES103")
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(json_errors.len(), 3, "{:#?}", invalid.diagnostics);
+    assert!(
+        json_errors
+            .iter()
+            .any(|message| message.contains("outcome"))
+    );
+    assert!(
+        json_errors
+            .iter()
+            .any(|message| message.contains("ambiguous"))
+    );
+    assert!(json_errors.iter().any(|message| message.contains("class")));
+}
+
+#[test]
 fn resolves_linked_queue_and_ordered_collection_bindings() {
     let analysis = analyze(include_str!("../../../docs/ref/25_collections.stl"));
 

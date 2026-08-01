@@ -2692,11 +2692,11 @@ impl Resolver<'_> {
         for value in values {
             let actual = self.resolve_expression(value, None, context);
             let ty = canonical(&actual.ty);
-            if !is_json_compatible(&ty) && ty != TypeRef::Error {
+            if !self.is_json_compatible(&ty) && ty != TypeRef::Error {
                 self.push(
                     "RES103",
                     format!(
-                        "JSON values must be `var`, String, bool, char, or numeric; found `{}`",
+                        "JSON values must be scalars, collections, or data structs with a supported structural JSON representation; found `{}`",
                         display_type(&ty)
                     ),
                     value.span,
@@ -2710,6 +2710,8 @@ impl Resolver<'_> {
                     ),
                     value.span,
                 );
+            } else {
+                self.record_json_conversions(&ty);
             }
         }
         temporary(json_var_type())
@@ -5463,14 +5465,15 @@ impl Resolver<'_> {
         }
         let actual = self.resolve_expression(&arguments[0], None, context);
         let ty = canonical(&actual.ty);
-        if !is_json_compatible(&ty) {
+        if let Some(reason) = self.json_conversion_error(&ty) {
             self.push(
                 "RES103",
-                format!("cannot convert `{}` to `var`", display_type(&ty)),
+                format!("cannot convert `{}` to `var`: {reason}", display_type(&ty)),
                 arguments[0].span,
             );
             return (error_info(), None);
         }
+        self.record_json_conversions(&ty);
         self.validate_value_use(&ty, &actual, arguments[0].span, "var conversion");
         let target = json_var_type();
         let call = ResolvedCall {
@@ -5963,7 +5966,7 @@ impl Resolver<'_> {
                         .all(|(expected, actual)| {
                             canonical(expected) == canonical(&actual.ty)
                                 || is_json_var(&canonical(expected))
-                                    && is_json_compatible(&canonical(&actual.ty))
+                                    && self.is_json_compatible(&canonical(&actual.ty))
                         })
                 })
                 .cloned()
@@ -6169,9 +6172,10 @@ impl Resolver<'_> {
     ) {
         if !expected.is_reference()
             && is_json_var(&canonical(expected))
-            && is_json_compatible(&canonical(&actual.ty))
+            && self.is_json_compatible(&canonical(&actual.ty))
         {
             let actual_type = canonical(&actual.ty);
+            self.record_json_conversions(&actual_type);
             self.validate_value_use(&actual_type, actual, span, description);
             return;
         }
@@ -6978,6 +6982,183 @@ impl Resolver<'_> {
             })
     }
 
+    fn is_json_compatible(&self, ty: &TypeRef) -> bool {
+        self.json_conversion_error(ty).is_none()
+    }
+
+    fn json_conversion_error(&self, ty: &TypeRef) -> Option<String> {
+        self.json_conversion_error_inner(ty, &mut BTreeSet::new())
+    }
+
+    fn json_conversion_error_inner(
+        &self,
+        ty: &TypeRef,
+        visiting: &mut BTreeSet<StructId>,
+    ) -> Option<String> {
+        let ty = canonical_ref(ty);
+        if *ty == TypeRef::Error
+            || is_json_var(ty)
+            || is_numeric(ty)
+            || matches!(ty, TypeRef::Bool | TypeRef::Char)
+            || matches!(
+                ty,
+                TypeRef::Native { path, arguments }
+                    if path == "rust::String" && arguments.is_empty()
+            )
+        {
+            return None;
+        }
+        if let TypeRef::Native { path, arguments } = ty {
+            return match (path.as_str(), arguments.as_slice()) {
+                (
+                    "rust::Vec" | "rust::List" | "rust::Queue" | "rust::Set" | "rust::Option",
+                    [element],
+                ) => self
+                    .json_conversion_error_inner(element, visiting)
+                    .map(|reason| format!("collection element {reason}")),
+                ("rust::Map", [key, value]) => {
+                    if matches!(
+                        canonical_ref(key),
+                        TypeRef::Native { path, arguments }
+                            if path == "rust::String" && arguments.is_empty()
+                    ) {
+                        self.json_conversion_error_inner(value, visiting)
+                            .map(|reason| format!("ordered map value {reason}"))
+                    } else {
+                        Some(format!(
+                            "ordered map keys must be `rust::String`, found `{}`",
+                            display_type(key)
+                        ))
+                    }
+                }
+                _ => Some(format!(
+                    "native type `{}` has no structural JSON representation",
+                    display_type(ty)
+                )),
+            };
+        }
+        if let TypeRef::Struct { path } = ty {
+            let Some(structure) = self.struct_by_path.get(path).copied() else {
+                return Some(format!("struct `{}` is unresolved", display_path(path)));
+            };
+            return self.json_struct_conversion_error(structure, visiting);
+        }
+        if let TypeRef::Class { path } = ty {
+            return Some(format!(
+                "`{}` is a class; only data structs have automatic JSON conversion",
+                display_path(path)
+            ));
+        }
+        Some(format!(
+            "type `{}` has no structural JSON representation",
+            display_type(ty)
+        ))
+    }
+
+    fn json_struct_conversion_error(
+        &self,
+        structure: StructId,
+        visiting: &mut BTreeSet<StructId>,
+    ) -> Option<String> {
+        if !visiting.insert(structure) {
+            return Some(format!(
+                "recursive struct `{}` cannot be converted by value",
+                display_path(&self.model.structs[structure.0].path)
+            ));
+        }
+        let result = (|| {
+            let mut hierarchy = Vec::new();
+            let mut current = Some(structure);
+            let mut hierarchy_seen = BTreeSet::new();
+            while let Some(id) = current {
+                if !hierarchy_seen.insert(id) {
+                    return Some("data inheritance cycle has no JSON representation".to_owned());
+                }
+                hierarchy.push(id);
+                current = self.model.structs[id.0].base;
+            }
+
+            let mut names = BTreeSet::new();
+            for id in hierarchy.into_iter().rev() {
+                let owner = &self.model.structs[id.0];
+                for field in &owner.fields {
+                    if !names.insert(field.name.as_str()) {
+                        return Some(format!(
+                            "inherited field name `{}` is ambiguous in JSON",
+                            field.name
+                        ));
+                    }
+                    if let Some(reason) = self.json_conversion_error_inner(&field.ty, visiting) {
+                        return Some(format!(
+                            "field `{}.{}` has unsupported type `{}`: {reason}",
+                            display_path(&owner.path),
+                            field.name,
+                            display_type(&field.ty)
+                        ));
+                    }
+                }
+            }
+            None
+        })();
+        visiting.remove(&structure);
+        result
+    }
+
+    fn record_json_conversions(&mut self, ty: &TypeRef) {
+        let mut structures = BTreeSet::new();
+        self.collect_json_conversion_structs(ty, &mut BTreeSet::new(), &mut structures);
+        for structure in structures {
+            if !self.model.json_struct_conversions.contains(&structure) {
+                self.model.json_struct_conversions.push(structure);
+            }
+        }
+    }
+
+    fn collect_json_conversion_structs(
+        &self,
+        ty: &TypeRef,
+        visiting: &mut BTreeSet<StructId>,
+        output: &mut BTreeSet<StructId>,
+    ) {
+        match canonical_ref(ty) {
+            TypeRef::Native { path, arguments } => match (path.as_str(), arguments.as_slice()) {
+                (
+                    "rust::Vec" | "rust::List" | "rust::Queue" | "rust::Set" | "rust::Option",
+                    [element],
+                ) => self.collect_json_conversion_structs(element, visiting, output),
+                ("rust::Map", [_, value]) => {
+                    self.collect_json_conversion_structs(value, visiting, output);
+                }
+                _ => {}
+            },
+            TypeRef::Struct { path } => {
+                let Some(structure) = self.struct_by_path.get(path).copied() else {
+                    return;
+                };
+                if !visiting.insert(structure) {
+                    return;
+                }
+                output.insert(structure);
+                let symbol = &self.model.structs[structure.0];
+                if let Some(base) = symbol.base {
+                    let base = &self.model.structs[base.0];
+                    self.collect_json_conversion_structs(
+                        &TypeRef::Struct {
+                            path: base.path.clone(),
+                        },
+                        visiting,
+                        output,
+                    );
+                }
+                for field in &symbol.fields {
+                    self.collect_json_conversion_structs(&field.ty, visiting, output);
+                }
+                visiting.remove(&structure);
+            }
+            _ => {}
+        }
+    }
+
     fn thread_sendable(&self, ty: &TypeRef) -> bool {
         self.thread_auto_trait(ty, false, &mut BTreeSet::new())
     }
@@ -7744,17 +7925,6 @@ fn is_json_var(ty: &TypeRef) -> bool {
         TypeRef::Native { path, arguments }
             if path == VAR_TYPE_PATH && arguments.is_empty()
     )
-}
-
-fn is_json_compatible(ty: &TypeRef) -> bool {
-    is_json_var(ty)
-        || is_numeric(ty)
-        || matches!(ty, TypeRef::Bool | TypeRef::Char)
-        || matches!(
-            ty,
-            TypeRef::Native { path, arguments }
-                if path == "rust::String" && arguments.is_empty()
-        )
 }
 
 fn is_json_mutation_place(expression: &Expression, model: &SemanticModel) -> bool {

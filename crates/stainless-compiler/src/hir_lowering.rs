@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Diagnostic;
 use crate::ast::{self, ExpressionKind, ForClause, Item, StatementKind};
@@ -294,10 +294,113 @@ impl Lowerer<'_> {
             rust_name: rust_name.to_owned(),
             copyable: symbol.kind == ast::UserTypeKind::Struct,
             fields,
+            json_fields: self.lower_json_struct_fields(symbol),
             is_exception,
             exception_base_field,
             interface_implementations,
         })
+    }
+
+    fn lower_json_struct_fields(&self, symbol: &StructSymbol) -> Option<Vec<hir::JsonStructField>> {
+        if !self.semantics.json_struct_conversions.contains(&symbol.id)
+            || symbol.kind != ast::UserTypeKind::Struct
+            || !self.json_structure_supported(symbol.id, &mut BTreeSet::new())
+        {
+            return None;
+        }
+        let mut fields = Vec::new();
+        self.collect_json_struct_fields(symbol.id, &mut Vec::new(), &mut fields)?;
+        Some(fields)
+    }
+
+    fn json_structure_supported(
+        &self,
+        structure: crate::resolution::StructId,
+        visiting: &mut BTreeSet<crate::resolution::StructId>,
+    ) -> bool {
+        if !visiting.insert(structure) {
+            return false;
+        }
+        let result = (|| {
+            let mut hierarchy = Vec::new();
+            let mut current = Some(structure);
+            let mut hierarchy_seen = BTreeSet::new();
+            while let Some(id) = current {
+                if !hierarchy_seen.insert(id) {
+                    return false;
+                }
+                hierarchy.push(id);
+                let Some(symbol) = self.semantics.structure(id) else {
+                    return false;
+                };
+                current = symbol.base;
+            }
+            let mut names = BTreeSet::new();
+            hierarchy.into_iter().rev().all(|id| {
+                self.semantics.structure(id).is_some_and(|owner| {
+                    owner.fields.iter().all(|field| {
+                        names.insert(field.name.as_str())
+                            && self.json_type_supported(&field.ty, visiting)
+                    })
+                })
+            })
+        })();
+        visiting.remove(&structure);
+        result
+    }
+
+    fn json_type_supported(
+        &self,
+        ty: &TypeRef,
+        visiting: &mut BTreeSet<crate::resolution::StructId>,
+    ) -> bool {
+        let ty = canonical_ref(ty);
+        if is_json_scalar_type(ty) {
+            return true;
+        }
+        match ty {
+            TypeRef::Native { path, arguments } => match (path.as_str(), arguments.as_slice()) {
+                (
+                    "rust::Vec" | "rust::List" | "rust::Queue" | "rust::Set" | "rust::Option",
+                    [element],
+                ) => self.json_type_supported(element, visiting),
+                ("rust::Map", [key, value]) => {
+                    is_rust_string(key) && self.json_type_supported(value, visiting)
+                }
+                _ => false,
+            },
+            TypeRef::Struct { path } => self
+                .semantics
+                .structs
+                .iter()
+                .find(|structure| structure.path == *path)
+                .is_some_and(|structure| self.json_structure_supported(structure.id, visiting)),
+            _ => false,
+        }
+    }
+
+    fn collect_json_struct_fields(
+        &self,
+        structure: crate::resolution::StructId,
+        prefix: &mut Vec<String>,
+        output: &mut Vec<hir::JsonStructField>,
+    ) -> Option<()> {
+        let symbol = self.semantics.structure(structure)?;
+        if let Some(base) = symbol.base {
+            let base_symbol = self.semantics.structure(base)?;
+            prefix.push(base_field_name(base_symbol));
+            self.collect_json_struct_fields(base, prefix, output)?;
+            prefix.pop();
+        }
+        output.extend(symbol.fields.iter().map(|field| {
+            let mut access_path = prefix.clone();
+            access_path.push(field.name.clone());
+            hir::JsonStructField {
+                name: field.name.clone(),
+                access_path,
+            }
+        }));
+        Some(())
     }
 
     fn is_exception_structure(&self, structure: crate::resolution::StructId) -> bool {
@@ -1012,9 +1115,7 @@ impl Lowerer<'_> {
         if is_json_type(canonical_ref(expected))
             && resolution.is_some_and(|value| !is_json_type(canonical_ref(&value.ty)))
         {
-            return Some(hir::Expression::JsonFrom(Box::new(
-                self.lower_expression(expression, ExpressionMode::Value)?,
-            )));
+            return self.lower_json_value(expression);
         }
         if let TypeRef::Reference {
             mutable,
@@ -2355,11 +2456,13 @@ impl Lowerer<'_> {
     }
 
     fn lower_json_value(&mut self, expression: &ast::Expression) -> Option<hir::Expression> {
-        let lowered = self.lower_expression(expression, ExpressionMode::Value)?;
-        let resolution = self.semantics.expression(expression.span);
-        let ty = resolution.map(|resolution| canonical_ref(&resolution.ty));
+        let mut lowered = self.lower_expression(expression, ExpressionMode::Value)?;
+        let resolution = self.semantics.expression(expression.span).cloned();
+        let ty = resolution
+            .as_ref()
+            .map(|resolution| canonical_ref(&resolution.ty));
         if ty.is_some_and(is_json_type) {
-            if resolution.is_some_and(|resolution| {
+            if resolution.as_ref().is_some_and(|resolution| {
                 resolution.category != ValueCategory::Temporary
                     && !is_move_call(self.semantics, expression)
                     && !is_json_access(expression, self.semantics)
@@ -2374,6 +2477,19 @@ impl Lowerer<'_> {
                 Some(lowered)
             }
         } else {
+            if matches!(ty, Some(TypeRef::Struct { .. }))
+                && resolution
+                    .as_ref()
+                    .is_some_and(|resolution| resolution.category != ValueCategory::Temporary)
+                && !is_move_call(self.semantics, expression)
+            {
+                lowered = hir::Expression::Clone {
+                    expression: Box::new(hir::Expression::Borrow {
+                        mutable: false,
+                        expression: Box::new(lowered),
+                    }),
+                };
+            }
             Some(hir::Expression::JsonFrom(Box::new(lowered)))
         }
     }
@@ -2658,6 +2774,38 @@ fn is_json_type(ty: &TypeRef) -> bool {
         TypeRef::Native { path, arguments }
             if path == VAR_TYPE_PATH && arguments.is_empty()
     )
+}
+
+fn is_rust_string(ty: &TypeRef) -> bool {
+    matches!(
+        canonical_ref(ty),
+        TypeRef::Native { path, arguments }
+            if path == "rust::String" && arguments.is_empty()
+    )
+}
+
+fn is_json_scalar_type(ty: &TypeRef) -> bool {
+    is_json_type(ty)
+        || is_rust_string(ty)
+        || matches!(
+            canonical_ref(ty),
+            TypeRef::Bool
+                | TypeRef::Char
+                | TypeRef::I8
+                | TypeRef::I16
+                | TypeRef::I32
+                | TypeRef::I64
+                | TypeRef::I128
+                | TypeRef::Isize
+                | TypeRef::U8
+                | TypeRef::U16
+                | TypeRef::U32
+                | TypeRef::U64
+                | TypeRef::U128
+                | TypeRef::Usize
+                | TypeRef::F32
+                | TypeRef::F64
+        )
 }
 
 fn is_json_access(expression: &ast::Expression, semantics: &SemanticModel) -> bool {

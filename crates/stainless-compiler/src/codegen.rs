@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use proc_macro2::{Span as TokenSpan, TokenStream};
+use proc_macro2::{Ident, Span as TokenSpan, TokenStream};
 use quote::quote;
 
 use crate::ast::{BinaryOperator, LiteralKind, PrefixOperator};
@@ -228,6 +228,11 @@ impl Emitter {
                 Ok(quote!(pub #name: #ty))
             })
             .collect::<Result<Vec<_>, String>>()?;
+        let json_conversion = Self::struct_json_conversion(
+            &name,
+            &structure.source_path,
+            structure.json_fields.as_deref(),
+        )?;
         let exception_impl = if structure.is_exception {
             let projection_fallback = if let Some(base_field) = &structure.exception_base_field {
                 let base_field = identifier(base_field)?;
@@ -304,8 +309,49 @@ impl Emitter {
             pub struct #name {
                 #(#fields),*
             }
+            #json_conversion
             #exception_impl
             #(#interface_implementations)*
+        })
+    }
+
+    fn struct_json_conversion(
+        structure_name: &Ident,
+        source_path: &[String],
+        fields: Option<&[hir::JsonStructField]>,
+    ) -> Result<TokenStream, String> {
+        let Some(fields) = fields else {
+            return Ok(TokenStream::new());
+        };
+        let value = identifier("__stainless_json_value")?;
+        let source_type = source_path.join("::");
+        let field_members = fields
+            .iter()
+            .map(|field| {
+                let mut access = quote!(#value);
+                for segment in &field.access_path {
+                    let segment = identifier(segment)?;
+                    access = quote!((#access).#segment);
+                }
+                let member_name = &field.name;
+                Ok(quote!((
+                    #member_name,
+                    ::stainless_runtime::Var::from(#access),
+                )))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(quote! {
+            impl ::core::convert::From<#structure_name> for ::stainless_runtime::Var {
+                fn from(#value: #structure_name) -> Self {
+                    ::stainless_runtime::Var::object([
+                        (
+                            "__type",
+                            ::stainless_runtime::Var::from(#source_type),
+                        ),
+                        #(#field_members),*
+                    ])
+                }
+            }
         })
     }
 

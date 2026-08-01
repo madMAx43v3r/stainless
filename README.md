@@ -157,8 +157,9 @@ implemented:
   `stainless::FormatError` failures from string writes.
 - [`21_json_support.stl`](docs/ref/21_json_support.stl) — compiler-native `var`
   and `null`, JSON array/object literals, null-safe access, reference-counted
-  shared aggregate mutation, parsing strings/files, serialization, scalar
-  coercion, and checked `stainless::JsonError` failures.
+  shared aggregate mutation, structural data-struct conversion, parsing
+  strings/files, serialization, scalar coercion, and checked
+  `stainless::JsonError` failures.
 - [`22_pointer_family.stl`](docs/ref/22_pointer_family.stl) — the implemented
   unique/nullable/shared/weak/atomic ownership-pointer subset, including
   nullable guards and synchronized slots.
@@ -2185,6 +2186,48 @@ integer/floating type, and `String(value)` use JavaScript-compatible scalar
 coercion; integer coercion is extended deterministically to all Stainless
 integer widths. Non-finite floating values are represented as JSON `null`
 because JSON has no NaN or infinity.
+
+Data structs have automatic structural conversion through `var(value)` and
+the same implicit `var` destinations:
+
+```cpp
+struct Position {
+    i32 x;
+    i32 y;
+};
+
+var point = var(Position{3, 4});
+
+Position named = Position{5, 6};
+var copied = named; // `named` remains usable under struct copy semantics
+```
+
+Every converted struct object contains a `__type` string whose value is the
+fully qualified Stainless type path, such as `Position` or
+`geometry::Position`. This member is emitted first by the conversion (JSON
+serialization may still apply its deterministic object-key ordering). A
+derived struct uses its most-derived type; flattened base subobjects do not add
+a second `__type`. Nested structs are separate objects and therefore carry
+their own types.
+
+All declared data fields participate, including private fields; `private`
+controls Stainless source access, while explicitly requesting structural JSON
+conversion serializes the complete data value. The `__` source prefix is
+reserved, so a declared field cannot collide with the compiler-provided
+`__type` member. Data-base fields are flattened from base to derived. Reusing
+an inherited field name is therefore rejected for JSON conversion rather than
+silently replacing one value. Nested data structs become nested objects.
+`Vec`, `List`, `Queue`, and `Set` become arrays; `Map<String, V>` becomes an
+object; and `Option<T>` becomes either its converted value or `null`, provided
+the contained type is also convertible. Classes, ownership pointers, callbacks,
+mutexes, and native types without a declared JSON representation are rejected
+during Stainless analysis.
+
+The compiler emits conversion code only for struct types that actually reach a
+JSON conversion. It does not require or generate `serde` derives, and it does
+not expose arbitrary Rust functions to Stainless. A named struct is cloned
+before the generated conversion unless the source explicitly writes
+`move(value)`; a temporary such as `var(Position{3, 4})` is consumed directly.
 
 Parsing and serialization use the following initial API:
 

@@ -4,7 +4,7 @@
 //! exception: [`Var`] provides the language's dynamically typed JSON value
 //! while delegating parsing and serialization to `serde_json`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, LinkedList, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::fs::File;
@@ -514,6 +514,60 @@ impl From<&str> for Var {
     }
 }
 
+impl<T> From<Option<T>> for Var
+where
+    T: Into<Self>,
+{
+    fn from(value: Option<T>) -> Self {
+        value.map_or_else(Self::null, Into::into)
+    }
+}
+
+impl<T> From<Vec<T>> for Var
+where
+    T: Into<Self>,
+{
+    fn from(values: Vec<T>) -> Self {
+        Self::array(values.into_iter().map(Into::into))
+    }
+}
+
+impl<T> From<LinkedList<T>> for Var
+where
+    T: Into<Self>,
+{
+    fn from(values: LinkedList<T>) -> Self {
+        Self::array(values.into_iter().map(Into::into))
+    }
+}
+
+impl<T> From<VecDeque<T>> for Var
+where
+    T: Into<Self>,
+{
+    fn from(values: VecDeque<T>) -> Self {
+        Self::array(values.into_iter().map(Into::into))
+    }
+}
+
+impl<T> From<BTreeSet<T>> for Var
+where
+    T: Into<Self>,
+{
+    fn from(values: BTreeSet<T>) -> Self {
+        Self::array(values.into_iter().map(Into::into))
+    }
+}
+
+impl<T> From<BTreeMap<String, T>> for Var
+where
+    T: Into<Self>,
+{
+    fn from(values: BTreeMap<String, T>) -> Self {
+        Self::object(values.into_iter().map(|(key, value)| (key, value.into())))
+    }
+}
+
 macro_rules! integer_from {
     ($($ty:ty),+ $(,)?) => {$(
         impl From<$ty> for Var {
@@ -740,6 +794,8 @@ fn signed_integer(value: f64, bits: u32) -> i128 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet, LinkedList, VecDeque};
+
     use super::Var;
 
     #[test]
@@ -761,6 +817,25 @@ mod tests {
 
         assert_eq!(value.field("name"), Var::from("Stainless"));
         assert_eq!(value.to_json(), r#"{"name":"Stainless","values":[1,null]}"#);
+    }
+
+    #[test]
+    fn converts_owned_standard_collections_recursively() {
+        let list = LinkedList::from([1, 2]);
+        let queue = VecDeque::from([3, 4]);
+        let set = BTreeSet::from([6, 5]);
+        let map = BTreeMap::from([
+            ("list".to_owned(), Var::from(list)),
+            ("queue".to_owned(), Var::from(queue)),
+            ("set".to_owned(), Var::from(set)),
+            ("missing".to_owned(), Var::from(None::<i32>)),
+        ]);
+        let value = Var::from(map);
+
+        assert_eq!(
+            value.to_json(),
+            r#"{"list":[1,2],"missing":null,"queue":[3,4],"set":[5,6]}"#
+        );
     }
 
     #[test]
