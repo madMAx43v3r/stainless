@@ -287,6 +287,11 @@ pub struct ResolvedTraitRequirement {
 pub enum Intrinsic {
     /// Explicitly consume a named value.
     Move,
+    /// Construct a compiler-known heterogeneous tuple element by element.
+    TupleNew {
+        /// One selected construction operation per tuple element.
+        constructions: Vec<ResolvedCall>,
+    },
     /// Allocate a constructed value into a non-null unique owner.
     MakeOwner {
         /// Unique or shared allocation representation.

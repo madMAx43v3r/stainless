@@ -1844,6 +1844,7 @@ impl Lowerer<'_> {
             CallTarget::Intrinsic(
                 Intrinsic::UnwrapRustResult { .. }
                     | Intrinsic::MakeOwner { .. }
+                    | Intrinsic::TupleNew { .. }
                     | Intrinsic::MutexNew { .. }
                     | Intrinsic::RwLockNew { .. }
             )
@@ -1852,6 +1853,35 @@ impl Lowerer<'_> {
             CallTarget::Native(native) if native.result_adaptation.is_some()
         );
         let lowered = match &call.target {
+            CallTarget::Intrinsic(Intrinsic::TupleNew { constructions }) => {
+                let elements = if arguments.is_empty() {
+                    constructions
+                        .iter()
+                        .map(|construction| self.lower_resolved_call(construction, None, &[]))
+                        .collect::<Option<Vec<_>>>()?
+                } else {
+                    if constructions.len() != arguments.len() {
+                        self.push(
+                            "HIR011",
+                            "tuple construction arity changed after resolution".to_owned(),
+                            call.span,
+                        );
+                        return None;
+                    }
+                    constructions
+                        .iter()
+                        .zip(arguments)
+                        .map(|(construction, argument)| {
+                            self.lower_resolved_call(
+                                construction,
+                                None,
+                                std::slice::from_ref(argument),
+                            )
+                        })
+                        .collect::<Option<Vec<_>>>()?
+                };
+                Some(hir::Expression::Tuple(elements))
+            }
             CallTarget::Stainless(id) => {
                 let Some(function) = self.semantics.function(*id) else {
                     self.push(
@@ -2433,6 +2463,7 @@ impl Lowerer<'_> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn lower_native_call(
         &mut self,
         native: &NativeCall,
@@ -2502,6 +2533,51 @@ impl Lowerer<'_> {
                     rust_name: rust_name.clone(),
                     receiver_mode,
                     arguments: lowered_arguments,
+                })
+            }
+            RustLowering::FunctionWithReceiver { rust_path } => {
+                let Some(ast::Expression {
+                    kind: ExpressionKind::Field { receiver, .. },
+                    ..
+                }) = callee
+                else {
+                    self.push(
+                        "HIR011",
+                        "native receiver-function call has no receiver".to_owned(),
+                        span,
+                    );
+                    return None;
+                };
+                let receiver_mode = native.receiver.unwrap_or(Receiver::Shared);
+                let expression_mode = match receiver_mode {
+                    Receiver::Shared | Receiver::Mutable => ExpressionMode::Reference,
+                    Receiver::Value => ExpressionMode::Value,
+                };
+                let mut arguments = Vec::with_capacity(lowered_arguments.len() + 1);
+                let already_reference = self
+                    .semantics
+                    .expression(receiver.span)
+                    .is_some_and(|resolution| resolution.ty.is_reference());
+                let receiver = self.lower_expression(receiver, expression_mode)?;
+                arguments.push(if already_reference {
+                    receiver
+                } else {
+                    match receiver_mode {
+                        Receiver::Shared => hir::Expression::Borrow {
+                            mutable: false,
+                            expression: Box::new(receiver),
+                        },
+                        Receiver::Mutable => hir::Expression::Borrow {
+                            mutable: true,
+                            expression: Box::new(receiver),
+                        },
+                        Receiver::Value => receiver,
+                    }
+                });
+                arguments.extend(lowered_arguments);
+                Some(hir::Expression::AssociatedCall {
+                    rust_path: rust_path.clone(),
+                    arguments,
                 })
             }
             RustLowering::CloneArgument { index } => {
@@ -2725,6 +2801,12 @@ impl Lowerer<'_> {
                 kind: *kind,
                 target: Box::new(self.lower_type(target, span)?),
             },
+            TypeRef::Tuple(elements) => hir::Type::Tuple(
+                elements
+                    .iter()
+                    .map(|element| self.lower_type(element, span))
+                    .collect::<Option<Vec<_>>>()?,
+            ),
             TypeRef::Mutex(target) => hir::Type::Mutex(Box::new(self.lower_type(target, span)?)),
             TypeRef::MutexGuard(target) => {
                 hir::Type::MutexGuard(Box::new(self.lower_type(target, span)?))

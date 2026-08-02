@@ -943,6 +943,18 @@ impl Analyzer<'_> {
                 self.construction_arguments(construction, arguments);
                 None
             }
+            CallTarget::Intrinsic(Intrinsic::TupleNew { constructions }) => {
+                if arguments.is_empty() {
+                    for construction in constructions {
+                        self.construction_arguments(construction, &[]);
+                    }
+                } else {
+                    for (construction, argument) in constructions.iter().zip(arguments) {
+                        self.construction_arguments(construction, std::slice::from_ref(argument));
+                    }
+                }
+                None
+            }
             CallTarget::Intrinsic(Intrinsic::ConditionNew | Intrinsic::PointerDefault { .. }) => {
                 None
             }
@@ -1178,6 +1190,17 @@ impl Analyzer<'_> {
                 | Intrinsic::RwLockNew { construction, .. },
             ) => {
                 self.construction_arguments(construction, arguments);
+            }
+            CallTarget::Intrinsic(Intrinsic::TupleNew { constructions }) => {
+                if arguments.is_empty() {
+                    for construction in constructions {
+                        self.construction_arguments(construction, &[]);
+                    }
+                } else {
+                    for (construction, argument) in constructions.iter().zip(arguments) {
+                        self.construction_arguments(construction, std::slice::from_ref(argument));
+                    }
+                }
             }
             _ => {
                 for argument in arguments {
@@ -1616,21 +1639,24 @@ fn is_copyable(ty: &TypeRef) -> bool {
             | TypeRef::F32
             | TypeRef::F64
             | TypeRef::Struct { .. }
-    ) || matches!(
-        ty,
-        TypeRef::Native { path, arguments }
-            if path == "rust::stainless_runtime::Var" && arguments.is_empty()
-    ) || matches!(
-        ty,
-        TypeRef::Pointer {
-            kind: PointerKind::Shared | PointerKind::SharedNullable | PointerKind::Weak,
-            ..
-        }
-    ) || matches!(
-        ty,
-        TypeRef::Function(function)
-            if function.kind == crate::interop::StoredFunctionKind::Shared
-    )
+    ) || matches!(ty, TypeRef::Tuple(elements) if elements.iter().all(is_copyable))
+        || matches!(
+            ty,
+            TypeRef::Native { path, arguments }
+                if path == "rust::stainless_runtime::Var" && arguments.is_empty()
+        )
+        || matches!(
+            ty,
+            TypeRef::Pointer {
+                kind: PointerKind::Shared | PointerKind::SharedNullable | PointerKind::Weak,
+                ..
+            }
+        )
+        || matches!(
+            ty,
+            TypeRef::Function(function)
+                if function.kind == crate::interop::StoredFunctionKind::Shared
+        )
 }
 
 fn canonical_ref(ty: &TypeRef) -> &TypeRef {

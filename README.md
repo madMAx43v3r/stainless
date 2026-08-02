@@ -174,6 +174,8 @@ implemented:
 - [`26_file_io.stl`](docs/ref/26_file_io.stl) — whole-file text/byte I/O,
   filesystem copying, renaming and existence checks, directory operations, and
   checked `stainless::IoError` failures.
+- [`27_tuples.stl`](docs/ref/27_tuples.stl) — compiler-known heterogeneous
+  tuples used as lexicographically ordered compound map keys.
 
 `01_basics.stl`, `02_structs_and_data_inheritance.stl`,
 `11_vec_and_string.stl`, `13_range_for.stl`, and `14_constructors.stl` are
@@ -949,6 +951,27 @@ checks potentially repeated loop moves conservatively. Lowering `move(value)`
 to an actual Rust move lets `rustc` independently verify the result, but
 generated-Rust errors are a backstop rather than the primary Stainless
 diagnostic mechanism.
+
+### Compiler-known tuples
+
+`tuple<T, U, ...>` is a heterogeneous value type with between two and twelve
+elements. It lowers directly to the corresponding Rust tuple; there is no
+runtime wrapper or heap allocation. Construction names every element type and
+uses ordinary Stainless initialization rules:
+
+```cpp
+tuple<u32, String> key = tuple<u32, String>(7u32, "alice");
+Map<tuple<u32, String>, i32> values;
+values.insert(move(key), 42);
+```
+
+Tuples are copied only when every element is copyable; otherwise their elements
+obey the ordinary explicit-`move()` rules. Rust supplies lexicographic
+`PartialEq`, `Eq`, `PartialOrd`, and `Ord` implementations when every element
+supports the corresponding trait, so tuples can be compound keys for
+`Map<K, V>` and `Set<T>`. Tuple elements cannot contain references. Named or
+indexed tuple projection is still deferred; map structured bindings can bind a
+tuple key as one value but do not recursively destructure it.
 
 ### References and borrowed returns
 
@@ -2113,7 +2136,10 @@ The compiler crate currently registers the following source-visible APIs:
   `clone`.
 - `rust::Map<K, V>`: an ordered map backed by Rust `BTreeMap<K, V>`, with
   `Map()`, `len`, `is_empty`, `clear`, `insert`, `remove`, `contains_key`,
-  `append`, `clone`, and key/value structured-binding range iteration.
+  `with`, `with_mut`, `append`, `clone`, and key/value structured-binding range
+  iteration. `with(key, callback)` and `with_mut(key, callback)` perform an
+  O(log n) lookup and confine the borrowed value to one non-escaping callback,
+  avoiding a storable `Option<&V>`.
 - `rust::Set<T>`: an ordered set backed by Rust `BTreeSet<T>`, with `Set()`,
   `len`, `is_empty`, `clear`, `insert`, `replace`, `remove`, `take`,
   `contains`, `append`, and `clone`.
@@ -2132,7 +2158,8 @@ the selected Rust toolchain.
 
 The binding model supports direct reference returns and records whether their
 borrow originates from the receiver or the callable's one reference parameter.
-None of the initial collection bindings need such a return yet.
+Map lookup deliberately uses non-escaping callbacks because the language does
+not yet admit reference-bearing values such as `Option<const V&>`.
 Reference-bearing values, iterator-producing APIs, and indexing are not exposed
 in this first subset: `Vec::get` returns `Option<&T>`, `Vec::iter` returns a
 borrowing iterator, and `String::as_str`, `String::split`, and `String::chars`
@@ -2369,12 +2396,21 @@ only through the last valid control record and truncates incomplete or
 uncommitted tail data.
 
 The index is held in RAM and rebuilt by replaying the append-only log at open.
-An internal `rwlock<StoreState>` allows concurrent lookups: `find()` scans the
-index and calls `pread_exact()` under one shared read guard. It never copies the
-whole index, and the complete lookup is synchronized against inserts, commits,
-reverts, and recovery, which take an exclusive write guard. The initial
-linked-list index still makes lookup O(n); ordered/sparse indexes and compaction
-are planned as later layers.
+It is a Stainless `Map<Vec<u8>, List<IndexEntry>>`, lowering to Rust's ordered
+`BTreeMap`. `find()` uses the map's non-escaping `with()` callback for an
+O(log n) key lookup and calls `pread_exact()` under the same shared
+`rwlock<StoreState>` guard. It never copies the index or a key's history.
+Inserts use `with_mut()` and commits, reverts, and recovery take an exclusive
+write guard.
+
+The crate exposes `Table<K, V>` to Rust projects. `K` implements
+`OrderedKey`, whose persistent encoding must preserve `Ord`, and `V` implements
+`Codec`. Built-in codecs cover booleans, fixed-width integers, strings, byte
+vectors, and two-/three-element Rust tuples. Tuple key components use escaped,
+self-delimiting segments so encoded byte order remains lexicographic. User
+structs can implement `Codec`; a user key implements `OrderedKey` only when its
+encoding preserves its declared ordering. This explicit contract avoids
+guessing an unstable representation for arbitrary generic values.
 
 Each Stainless compiler release supports one stable Rust minor release. The
 build helper compares `rustc -Vv` with the metadata version and rejects a

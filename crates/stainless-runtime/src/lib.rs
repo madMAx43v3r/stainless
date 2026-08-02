@@ -20,6 +20,38 @@ use serde_json::{Number, Value};
 #[doc(hidden)]
 pub const CRATE_SOURCE_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
+/// Invokes `callback` with a shared map value when `key` exists.
+///
+/// This confines the borrow to one non-escaping callback instead of exposing
+/// `Option<&V>` as a storable Stainless type.
+pub fn btree_map_with<K, V, F>(map: &BTreeMap<K, V>, key: &K, callback: F) -> bool
+where
+    K: Ord,
+    F: FnOnce(&V),
+{
+    let Some(value) = map.get(key) else {
+        return false;
+    };
+    callback(value);
+    true
+}
+
+/// Invokes `callback` with a mutable map value when `key` exists.
+///
+/// The reference cannot escape the callback, preserving `BTreeMap`'s key and
+/// value borrowing rules at the Stainless boundary.
+pub fn btree_map_with_mut<K, V, F>(map: &mut BTreeMap<K, V>, key: &K, callback: F) -> bool
+where
+    K: Ord,
+    F: FnOnce(&mut V),
+{
+    let Some(value) = map.get_mut(key) else {
+        return false;
+    };
+    callback(value);
+    true
+}
+
 /// Exact-signature facade for the Rust standard library's whole-file and
 /// directory operations exposed through Stainless `rust::std::fs` bindings.
 ///

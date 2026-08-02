@@ -236,6 +236,7 @@ fn transpiles_and_compiles_resolved_reference_programs() {
             "collections",
             include_str!("../../../docs/ref/25_collections.stl"),
         ),
+        ("tuples", include_str!("../../../docs/ref/27_tuples.stl")),
     ] {
         let result = transpile(source);
         assert!(
@@ -246,6 +247,44 @@ fn transpiles_and_compiles_resolved_reference_programs() {
         let rust = result.rust.expect("valid source should emit Rust");
         compile_rust(name, &rust, CrateKind::Library);
     }
+}
+
+#[test]
+fn generated_tuples_preserve_lexicographic_map_order() {
+    let result = transpile(include_str!("../../../docs/ref/27_tuples.stl"));
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let function = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "compound_key_order"])
+        .expect("compound_key_order symbol")
+        .mangled_name
+        .clone();
+    let mut rust = result.rust.expect("tuples should emit Rust");
+    assert!(rust.contains("(i32, ::std::string::String)"), "{rust}");
+    write!(
+        rust,
+        "\nfn main() {{ assert_eq!(__stainless_namespace_samples::{function}(), 312); }}\n"
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("tuple-order", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .expect("generated tuple program should run");
+    assert!(
+        output.status.success(),
+        "status: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    remove_temporary_parent(&binary);
 }
 
 #[test]

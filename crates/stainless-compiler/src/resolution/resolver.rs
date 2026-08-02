@@ -958,6 +958,9 @@ impl Resolver<'_> {
                     | PointerKind::AtomicNullable,
                 ..
             } => true,
+            TypeRef::Tuple(elements) => elements
+                .iter()
+                .all(|element| self.type_has_default_constructor(element, visiting)),
             TypeRef::Native { path, .. } => {
                 self.bindings.type_by_path(path).is_some_and(|binding| {
                     binding.callables.iter().any(|callable| {
@@ -1462,6 +1465,7 @@ impl Resolver<'_> {
             .map(|index| offset + index)
     }
 
+    #[allow(clippy::too_many_lines)]
     fn resolve_slot_construction(
         &mut self,
         target: &TypeRef,
@@ -1470,6 +1474,9 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
     ) -> Option<ResolvedCall> {
         match canonical_ref(target) {
+            TypeRef::Tuple(elements) => {
+                self.resolve_tuple_slot_construction(elements, arguments, span, context)
+            }
             TypeRef::Mutex(protected) => {
                 self.resolve_mutex_slot_construction(protected, arguments, span, context)
             }
@@ -1589,6 +1596,50 @@ impl Resolver<'_> {
         })
     }
 
+    fn resolve_tuple_slot_construction(
+        &mut self,
+        elements: &[TypeRef],
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> Option<ResolvedCall> {
+        if elements.len() != arguments.len() {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES119",
+                format!(
+                    "tuple construction requires {} arguments, found {}",
+                    elements.len(),
+                    arguments.len()
+                ),
+                span,
+            );
+            return None;
+        }
+        let mut constructions = Vec::with_capacity(elements.len());
+        let mut throws = Vec::new();
+        for (element, argument) in elements.iter().zip(arguments) {
+            let construction = self.resolve_slot_construction(
+                element,
+                std::slice::from_ref(argument),
+                argument.span,
+                context,
+            )?;
+            throws.extend(construction.throws.iter().copied());
+            constructions.push(construction);
+        }
+        throws.sort_unstable();
+        throws.dedup();
+        Some(ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::TupleNew { constructions }),
+            return_type: TypeRef::Tuple(elements.to_vec()),
+            throws,
+        })
+    }
+
     fn resolve_rwlock_slot_construction(
         &mut self,
         protected: &TypeRef,
@@ -1670,6 +1721,23 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
     ) -> Option<ResolvedCall> {
         match canonical_ref(target) {
+            TypeRef::Tuple(elements) => {
+                let mut constructions = Vec::with_capacity(elements.len());
+                let mut throws = Vec::new();
+                for element in elements {
+                    let construction = self.resolve_default_call(element, span, context)?;
+                    throws.extend(construction.throws.iter().copied());
+                    constructions.push(construction);
+                }
+                throws.sort_unstable();
+                throws.dedup();
+                Some(ResolvedCall {
+                    span,
+                    target: CallTarget::Intrinsic(Intrinsic::TupleNew { constructions }),
+                    return_type: TypeRef::Tuple(elements.clone()),
+                    throws,
+                })
+            }
             TypeRef::Mutex(protected) => {
                 let construction = self.resolve_default_call(protected, span, context)?;
                 let throws = construction.throws.clone();
@@ -3694,6 +3762,7 @@ impl Resolver<'_> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn resolve_binary(
         &mut self,
         left: &Expression,
@@ -3788,6 +3857,21 @@ impl Resolver<'_> {
         {
             return temporary(TypeRef::Bool);
         }
+        if matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual)
+            && supports_equality(&left_type)
+        {
+            return temporary(TypeRef::Bool);
+        }
+        if matches!(
+            operator,
+            BinaryOperator::Less
+                | BinaryOperator::LessEqual
+                | BinaryOperator::Greater
+                | BinaryOperator::GreaterEqual
+        ) && supports_ordering(&left_type)
+        {
+            return temporary(TypeRef::Bool);
+        }
         if !is_numeric(&left_type) {
             self.invalid_operand(binary_name(operator), &left_type, left.span);
             return error_info();
@@ -3809,6 +3893,12 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
     ) -> (ExpressionInfo, Option<ResolvedCall>) {
         match &callee.kind {
+            ExpressionKind::GenericName {
+                path,
+                arguments: type_arguments,
+            } if matches!(path.segments.as_slice(), [name] if name == "tuple") => {
+                self.resolve_tuple_constructor(type_arguments, arguments, span, context)
+            }
             ExpressionKind::GenericName {
                 path,
                 arguments: type_arguments,
@@ -5296,6 +5386,57 @@ impl Resolver<'_> {
             }),
             return_type: return_type.clone(),
             throws,
+        };
+        (temporary(return_type), Some(call))
+    }
+
+    fn resolve_tuple_constructor(
+        &mut self,
+        type_arguments: &[ast::Type],
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        let elements = type_arguments
+            .iter()
+            .map(|element| self.resolve_type(element, &context.namespace, false))
+            .collect::<Vec<_>>();
+        if !(2..=12).contains(&elements.len()) {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES119",
+                format!(
+                    "`tuple` requires between 2 and 12 element types, found {}",
+                    elements.len()
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+        if elements.iter().any(|element| {
+            matches!(
+                element,
+                TypeRef::Error | TypeRef::Void | TypeRef::Reference { .. }
+            ) || element.contains_reference()
+        }) {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            if !elements.contains(&TypeRef::Error) {
+                self.push(
+                    "RES119",
+                    "tuple elements must be storable value types".to_owned(),
+                    span,
+                );
+            }
+            return (error_info(), None);
+        }
+        let return_type = TypeRef::Tuple(elements.clone());
+        let Some(call) = self.resolve_tuple_slot_construction(&elements, arguments, span, context)
+        else {
+            return (error_info(), None);
         };
         (temporary(return_type), Some(call))
     }
@@ -7073,6 +7214,35 @@ impl Resolver<'_> {
                     } else {
                         TypeRef::ScopedThreadHandle(Box::new(arguments[0].clone()))
                     }
+                } else if matches!(segments.as_slice(), [name] if name == "tuple") {
+                    let arguments = named
+                        .arguments
+                        .iter()
+                        .map(|argument| self.resolve_type(argument, namespace, false))
+                        .collect::<Vec<_>>();
+                    if !(2..=12).contains(&arguments.len()) {
+                        self.push(
+                            "RES119",
+                            format!(
+                                "`tuple` expects between 2 and 12 element types, found {}",
+                                arguments.len()
+                            ),
+                            ty.span,
+                        );
+                        TypeRef::Error
+                    } else if arguments.iter().any(|argument| {
+                        matches!(argument, TypeRef::Void | TypeRef::Reference { .. })
+                            || argument.contains_reference()
+                    }) {
+                        self.push(
+                            "RES119",
+                            "tuple elements must be storable value types".to_owned(),
+                            ty.span,
+                        );
+                        TypeRef::Error
+                    } else {
+                        TypeRef::Tuple(arguments)
+                    }
                 } else if let Some(kind) = pointer_kind(segments) {
                     let arguments = named
                         .arguments
@@ -7600,6 +7770,9 @@ impl Resolver<'_> {
             | TypeRef::F64
             | TypeRef::Condition
             | TypeRef::Interface { .. } => true,
+            TypeRef::Tuple(elements) => elements
+                .iter()
+                .all(|element| self.thread_auto_trait(element, sync, visiting)),
             TypeRef::Struct { path } | TypeRef::Class { path } => {
                 self.struct_by_path.get(path).is_some_and(|id| {
                     let structure = &self.model.structs[id.0];
@@ -7894,6 +8067,7 @@ impl Resolver<'_> {
             }
             TypeRef::Void
             | TypeRef::Parameter(_)
+            | TypeRef::Tuple(_)
             | TypeRef::Callback(_)
             | TypeRef::Function(_)
             | TypeRef::Pointer { .. }
@@ -7972,6 +8146,12 @@ fn substitute(ty: &TypeRef, substitutions: &BTreeMap<String, TypeRef>) -> TypeRe
                 .map(|argument| substitute(argument, substitutions))
                 .collect(),
         },
+        TypeRef::Tuple(elements) => TypeRef::Tuple(
+            elements
+                .iter()
+                .map(|element| substitute(element, substitutions))
+                .collect(),
+        ),
         TypeRef::Callback(callback) => {
             let parameters = callback
                 .parameters
@@ -8429,7 +8609,8 @@ fn is_copyable(ty: &TypeRef) -> bool {
             | TypeRef::F64
             | TypeRef::Struct { .. }
             | TypeRef::Reference { .. }
-    ) || is_json_var(ty)
+    ) || matches!(ty, TypeRef::Tuple(elements) if elements.iter().all(is_copyable))
+        || is_json_var(ty)
         || matches!(
             ty,
             TypeRef::Pointer {
@@ -8441,6 +8622,50 @@ fn is_copyable(ty: &TypeRef) -> bool {
             ty,
             TypeRef::Function(function) if function.kind == StoredFunctionKind::Shared
         )
+}
+
+fn supports_equality(ty: &TypeRef) -> bool {
+    if is_numeric(ty) || matches!(ty, TypeRef::Bool | TypeRef::Char) {
+        return true;
+    }
+    match ty {
+        TypeRef::Tuple(elements) => elements.iter().all(supports_equality),
+        TypeRef::Native { path, arguments } => match (path.as_str(), arguments.as_slice()) {
+            ("rust::String", []) => true,
+            ("rust::Vec" | "rust::List" | "rust::Queue" | "rust::Option", [element]) => {
+                supports_equality(element)
+            }
+            ("rust::Map", [key, value]) => supports_equality(key) && supports_equality(value),
+            ("rust::Set", [element]) => supports_equality(element),
+            ("rust::Result", [value, error]) => {
+                supports_equality(value) && supports_equality(error)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn supports_ordering(ty: &TypeRef) -> bool {
+    if is_numeric(ty) || matches!(ty, TypeRef::Bool | TypeRef::Char) {
+        return true;
+    }
+    match ty {
+        TypeRef::Tuple(elements) => elements.iter().all(supports_ordering),
+        TypeRef::Native { path, arguments } => match (path.as_str(), arguments.as_slice()) {
+            ("rust::String", []) => true,
+            ("rust::Vec" | "rust::List" | "rust::Queue" | "rust::Option", [element]) => {
+                supports_ordering(element)
+            }
+            ("rust::Map", [key, value]) => supports_ordering(key) && supports_ordering(value),
+            ("rust::Set", [element]) => supports_ordering(element),
+            ("rust::Result", [value, error]) => {
+                supports_ordering(value) && supports_ordering(error)
+            }
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 fn callable_signature(ty: &TypeRef) -> Option<(&[TypeRef], &TypeRef)> {
@@ -8461,6 +8686,7 @@ fn awaited_call_span(expression: &Expression) -> Option<Span> {
 
 fn contains_move_only_storage(ty: &TypeRef) -> bool {
     match ty {
+        TypeRef::Tuple(elements) => elements.iter().any(contains_move_only_storage),
         TypeRef::Mutex(_)
         | TypeRef::MutexGuard(_)
         | TypeRef::RwLock(_)
@@ -8556,6 +8782,14 @@ fn display_type(ty: &TypeRef) -> String {
         TypeRef::F32 => "f32".to_owned(),
         TypeRef::F64 => "f64".to_owned(),
         TypeRef::Parameter(name) => (*name).clone(),
+        TypeRef::Tuple(elements) => format!(
+            "tuple<{}>",
+            elements
+                .iter()
+                .map(display_type)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         TypeRef::Native { path, arguments } if arguments.is_empty() => (*path).clone(),
         TypeRef::Native { path, arguments } => format!(
             "{path}<{}>",

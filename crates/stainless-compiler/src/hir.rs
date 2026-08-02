@@ -215,6 +215,8 @@ pub enum Type {
     Unit,
     /// A Rust primitive type.
     Primitive(&'static str),
+    /// A heterogeneous Rust tuple value.
+    Tuple(Vec<Type>),
     /// A native Rust type with concrete type arguments.
     Native {
         /// Fully qualified Rust path.
@@ -482,6 +484,8 @@ pub struct RangeBinding {
 /// A typed expression ready for Rust generation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Expression {
+    /// A heterogeneous Rust tuple expression.
+    Tuple(Vec<Expression>),
     /// A local or parameter binding.
     Name(String),
     /// A scalar or owned string literal.

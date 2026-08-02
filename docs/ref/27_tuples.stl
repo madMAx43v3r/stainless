@@ -1,0 +1,26 @@
+// Compiler-known heterogeneous tuples lower directly to Rust tuples. They are
+// value types and inherit equality/ordering from every element, which makes
+// them suitable for compound keys in ordered maps and sets.
+
+use rust::{Map, String};
+
+namespace samples {
+
+tuple<i32, String> make_compound_key(i32 group, const String& name) {
+    return tuple<i32, String>(group, name);
+}
+
+i32 compound_key_order() {
+    Map<tuple<i32, String>, i32> values;
+    values.insert(tuple<i32, String>(2, "beta"), 2);
+    values.insert(tuple<i32, String>(1, "zeta"), 1);
+    values.insert(tuple<i32, String>(1, "alpha"), 3);
+
+    i32 order = 0;
+    for (const auto& [key, value] : values) {
+        order = order * 10 + value;
+    }
+    return order;
+}
+
+} // namespace samples

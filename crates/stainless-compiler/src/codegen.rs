@@ -831,6 +831,13 @@ impl Emitter {
     #[allow(clippy::too_many_lines)]
     fn expression(&mut self, expression: &hir::Expression) -> Result<TokenStream, String> {
         match expression {
+            hir::Expression::Tuple(elements) => {
+                let elements = elements
+                    .iter()
+                    .map(|element| self.expression(element))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(quote!((#(#elements),*)))
+            }
             hir::Expression::Name(name) => {
                 let name = identifier(name)?;
                 Ok(quote!(#name))
@@ -1607,6 +1614,13 @@ fn type_tokens(ty: &hir::Type, lifetime: Option<&syn::Lifetime>) -> Result<Token
         hir::Type::Primitive(name) => {
             let name = identifier(name)?;
             Ok(quote!(#name))
+        }
+        hir::Type::Tuple(elements) => {
+            let elements = elements
+                .iter()
+                .map(|element| type_tokens(element, None))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(quote!((#(#elements),*)))
         }
         hir::Type::Native {
             rust_path,

@@ -43,6 +43,8 @@ pub enum TypeRef {
     F64,
     /// A generic type parameter declared by the native type.
     Parameter(String),
+    /// A compiler-known heterogeneous value tuple with two or more elements.
+    Tuple(Vec<TypeRef>),
     /// A native Rust type under the reserved Stainless `rust::` namespace.
     Native {
         /// Canonical Stainless path, such as `rust::Vec`.
@@ -200,7 +202,9 @@ impl TypeRef {
     #[must_use]
     pub fn contains_reference(&self) -> bool {
         match self {
-            Self::Native { arguments, .. } => arguments.iter().any(Self::contains_reference),
+            Self::Native { arguments, .. } | Self::Tuple(arguments) => {
+                arguments.iter().any(Self::contains_reference)
+            }
             Self::Pointer { target, .. }
             | Self::Mutex(target)
             | Self::RwLock(target)
@@ -392,6 +396,9 @@ pub enum RustLowering {
     AssociatedFunction { rust_path: String },
     /// Invoke a Rust method on the lowered receiver.
     Method { rust_name: String },
+    /// Call a fully qualified safe Rust function with the source receiver as
+    /// its first argument.
+    FunctionWithReceiver { rust_path: String },
     /// Clone a constructor argument without exposing Rust `From` details.
     CloneArgument { index: usize },
     /// Call through a generated, compile-checked Rust wrapper.
@@ -660,6 +667,9 @@ fn callback_resolution_type(ty: &TypeRef) -> TypeRef {
                 .collect(),
             callback_resolution_type(&function.return_type),
         ),
+        TypeRef::Tuple(elements) => {
+            TypeRef::Tuple(elements.iter().map(callback_resolution_type).collect())
+        }
         TypeRef::Pointer { kind, target } => {
             TypeRef::pointer(*kind, callback_resolution_type(target))
         }

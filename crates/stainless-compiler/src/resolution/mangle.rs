@@ -17,6 +17,7 @@ pub(super) fn function_name(path: &[String], parameters: &[TypeRef]) -> String {
     output
 }
 
+#[allow(clippy::too_many_lines)]
 fn encode_type(ty: &TypeRef, output: &mut String) {
     if let Some(spelling) = primitive_spelling(ty) {
         output.push_str(spelling);
@@ -110,6 +111,14 @@ fn encode_type(ty: &TypeRef, output: &mut String) {
             output.push_str(&name.len().to_string());
             output.push('_');
             output.push_str(name);
+        }
+        TypeRef::Tuple(elements) => {
+            output.push_str("tuple_");
+            output.push_str(&elements.len().to_string());
+            output.push('_');
+            for element in elements {
+                encode_type(element, output);
+            }
         }
         TypeRef::Error => output.push_str("error"),
         _ => output.push_str("unknown"),

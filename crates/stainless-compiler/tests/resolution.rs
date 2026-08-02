@@ -25,6 +25,7 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
         include_str!("../../../docs/ref/24_threads.stl"),
         include_str!("../../../docs/ref/25_collections.stl"),
         include_str!("../../../docs/ref/26_file_io.stl"),
+        include_str!("../../../docs/ref/27_tuples.stl"),
     ] {
         let analysis = analyze(source);
 
@@ -34,6 +35,27 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
             analysis.diagnostics
         );
     }
+}
+
+#[test]
+fn resolves_compiler_known_tuples_as_ordered_map_keys() {
+    let analysis = analyze(include_str!("../../../docs/ref/27_tuples.stl"));
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+    assert!(analysis.semantics.functions.iter().any(|function| matches!(
+        &function.return_type,
+        TypeRef::Tuple(elements)
+            if matches!(elements.as_slice(), [TypeRef::I32, TypeRef::Native { path, arguments }]
+                if path == "rust::String" && arguments.is_empty())
+    )));
+    assert!(analysis.semantics.calls.iter().any(|call| matches!(
+        &call.target,
+        CallTarget::Intrinsic(Intrinsic::TupleNew { constructions })
+            if constructions.len() == 2
+    )));
 }
 
 #[test]

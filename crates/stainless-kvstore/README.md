@@ -12,16 +12,37 @@ the last committed/reverted state, and truncates incomplete or uncommitted log
 tail data.
 
 The store owns one read/write `File` handle. Its index and version metadata are
-kept in RAM and rebuilt from the append-only log at startup. An internal
-`rwlock<StoreState>` lets lookups scan that index concurrently. A lookup holds
-its shared read guard through `File.pread_exact()` on the shared handle, so the
-entire read is synchronized against mutations without cloning the index.
-Mutations, commits, reverts, and recovery use an exclusive write guard.
+kept in RAM and rebuilt from the append-only log at startup. The index is a
+Stainless `Map<Vec<u8>, List<IndexEntry>>`, backed by Rust's ordered
+`BTreeMap`. `with()` and `with_mut()` provide O(log n) access through
+non-escaping callbacks, so lookups neither scan nor clone the index/history.
+An internal `rwlock<StoreState>` lets multiple lookups run concurrently while
+mutations, commits, reverts, and recovery use an exclusive write guard.
 
-The current index is a linked list, so lookup is still O(number of entries),
-but it performs no whole-index allocation or copy. Multiple threads can read
-values concurrently without reopening the path and without contending on a
-file cursor.
+The WAL stores variable-length encoded key and value bytes. The Rust-facing
+`Table<K, V>` remains statically typed through two explicit traits:
+
+- `Codec` defines the stable persistent representation of a key or value.
+- `OrderedKey: Codec + Ord` additionally guarantees that encoded byte order
+  preserves the source key order.
+
+Built-in implementations cover booleans, fixed-width integers, `String`,
+`Vec<u8>`, and two-/three-element tuples. Applications can implement `Codec`
+for their own structs. Compound tuple keys use escaped, self-delimiting
+segments so their encoded order is lexicographic.
+
+```rust
+use stainless_kvstore::Table;
+
+let store = Table::<(u32, String), String>::open("users.db")?;
+store.insert((7, "alice".into()), "active".into())?;
+store.commit(1)?;
+assert_eq!(store.find(&(7, "alice".into()))?, Some("active".into()));
+# Ok::<(), stainless_kvstore::Error>(())
+```
+
+Multiple threads can read values concurrently from the same open file handle
+without sharing a cursor or reopening the path.
 
 Run the end-to-end showcase with:
 

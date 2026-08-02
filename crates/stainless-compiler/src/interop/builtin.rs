@@ -1,6 +1,7 @@
 use super::model::{
-    ArgumentAdaptation, CallStyle, CallableBinding, NativeBindings, NativeErrorFormat,
-    NativeTypeBinding, Parameter, Receiver, RustLowering, TraitRequirement, TypeRef,
+    ArgumentAdaptation, CallStyle, CallableBinding, CallbackEscape, CallbackKind, NativeBindings,
+    NativeErrorFormat, NativeTypeBinding, Parameter, Receiver, RustLowering, TraitRequirement,
+    TypeRef,
 };
 
 const T: &str = "T";
@@ -749,11 +750,24 @@ fn queue_binding() -> NativeTypeBinding {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn map_binding() -> NativeTypeBinding {
     let k = TypeRef::Parameter(K.to_owned());
     let v = TypeRef::Parameter(V.to_owned());
     let map_t = map_of(k.clone(), v.clone());
     let key_ord = || vec![requirement(K, "::core::cmp::Ord")];
+    let with_value = TypeRef::callback(
+        CallbackKind::FnOnce,
+        CallbackEscape::Call,
+        vec![TypeRef::shared_ref(v.clone())],
+        TypeRef::Void,
+    );
+    let with_value_mut = TypeRef::callback(
+        CallbackKind::FnOnce,
+        CallbackEscape::Call,
+        vec![TypeRef::mutable_ref(v.clone())],
+        TypeRef::Void,
+    );
 
     NativeTypeBinding {
         stainless_path: "rust::Map".to_owned(),
@@ -792,10 +806,44 @@ fn map_binding() -> NativeTypeBinding {
             method_with_requirements(
                 "contains_key",
                 Receiver::Shared,
-                vec![Parameter::new("key", TypeRef::shared_ref(k))],
+                vec![Parameter::new("key", TypeRef::shared_ref(k.clone()))],
                 TypeRef::Bool,
                 key_ord(),
             ),
+            CallableBinding {
+                source_name: "with".to_owned(),
+                style: CallStyle::Method,
+                receiver: Some(Receiver::Shared),
+                parameters: vec![
+                    Parameter::new("key", TypeRef::shared_ref(k.clone())),
+                    Parameter::new("callback", with_value),
+                ],
+                is_async: false,
+                return_type: TypeRef::Bool,
+                rust_result_error: None,
+                return_borrow: None,
+                requirements: key_ord(),
+                lowering: RustLowering::FunctionWithReceiver {
+                    rust_path: "::stainless_runtime::btree_map_with".to_owned(),
+                },
+            },
+            CallableBinding {
+                source_name: "with_mut".to_owned(),
+                style: CallStyle::Method,
+                receiver: Some(Receiver::Mutable),
+                parameters: vec![
+                    Parameter::new("key", TypeRef::shared_ref(k)),
+                    Parameter::new("callback", with_value_mut),
+                ],
+                is_async: false,
+                return_type: TypeRef::Bool,
+                rust_result_error: None,
+                return_borrow: None,
+                requirements: key_ord(),
+                lowering: RustLowering::FunctionWithReceiver {
+                    rust_path: "::stainless_runtime::btree_map_with_mut".to_owned(),
+                },
+            },
             method_with_requirements(
                 "append",
                 Receiver::Mutable,
