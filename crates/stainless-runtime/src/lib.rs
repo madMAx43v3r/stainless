@@ -73,6 +73,27 @@ where
     true
 }
 
+/// Invokes `callback` with the least entry inside an inclusive key range.
+pub fn btree_map_with_first_in_range<K, V, F>(
+    map: &BTreeMap<K, V>,
+    lower: &K,
+    upper: &K,
+    callback: F,
+) -> bool
+where
+    K: Ord,
+    F: FnOnce(&K, &V),
+{
+    if lower > upper {
+        return false;
+    }
+    let Some((key, value)) = map.range(lower..=upper).next() else {
+        return false;
+    };
+    callback(key, value);
+    true
+}
+
 /// Retains map entries accepted by a read-only, non-escaping callback.
 pub fn btree_map_retain<K, V, F>(map: &mut BTreeMap<K, V>, mut predicate: F)
 where
@@ -80,6 +101,31 @@ where
     F: FnMut(&K, &V) -> bool,
 {
     map.retain(|key, value| predicate(key, value));
+}
+
+/// Retains map entries whose keys are accepted by a read-only, non-escaping
+/// callback without exposing values that the predicate does not need.
+pub fn btree_map_retain_keys<K, V, F>(map: &mut BTreeMap<K, V>, mut predicate: F)
+where
+    K: Ord,
+    F: FnMut(&K) -> bool,
+{
+    map.retain(|key, _| predicate(key));
+}
+
+/// Visits a half-open vector range without exposing a storable slice or
+/// allocating a temporary vector. Returns `false` for an invalid range.
+pub fn vec_with_range<T, F>(values: &[T], begin: usize, end: usize, mut callback: F) -> bool
+where
+    F: FnMut(&T),
+{
+    let Some(values) = values.get(begin..end) else {
+        return false;
+    };
+    for value in values {
+        callback(value);
+    }
+    true
 }
 
 /// An ordered multimap of independently iterable key/value associations.
@@ -316,6 +362,18 @@ impl BigEndian {
         Ok(*value)
     }
 
+    /// Decodes one byte at `offset` without allocating a subslice.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` when `offset` is outside `bytes`.
+    pub fn read_u8_at(bytes: &[u8], offset: usize) -> std::io::Result<u8> {
+        bytes
+            .get(offset)
+            .copied()
+            .ok_or_else(|| invalid_integer_offset("big-endian", "u8", offset, 1, bytes.len()))
+    }
+
     /// Decodes one big-endian `u32`.
     ///
     /// # Errors
@@ -328,6 +386,22 @@ impl BigEndian {
         Ok(u32::from_be_bytes(bytes))
     }
 
+    /// Decodes one big-endian `u32` at `offset`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` when four bytes are not available at `offset`.
+    pub fn read_u32_at(bytes: &[u8], offset: usize) -> std::io::Result<u32> {
+        let end = offset
+            .checked_add(4)
+            .ok_or_else(|| invalid_integer_offset("big-endian", "u32", offset, 4, bytes.len()))?;
+        Self::read_u32(
+            bytes.get(offset..end).ok_or_else(|| {
+                invalid_integer_offset("big-endian", "u32", offset, 4, bytes.len())
+            })?,
+        )
+    }
+
     /// Decodes one big-endian `u64`.
     ///
     /// # Errors
@@ -338,6 +412,22 @@ impl BigEndian {
             .try_into()
             .map_err(|_| invalid_integer_width("big-endian", "u64", 8, bytes.len()))?;
         Ok(u64::from_be_bytes(bytes))
+    }
+
+    /// Decodes one big-endian `u64` at `offset`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` when eight bytes are not available at `offset`.
+    pub fn read_u64_at(bytes: &[u8], offset: usize) -> std::io::Result<u64> {
+        let end = offset
+            .checked_add(8)
+            .ok_or_else(|| invalid_integer_offset("big-endian", "u64", offset, 8, bytes.len()))?;
+        Self::read_u64(
+            bytes.get(offset..end).ok_or_else(|| {
+                invalid_integer_offset("big-endian", "u64", offset, 8, bytes.len())
+            })?,
+        )
     }
 }
 
@@ -371,6 +461,18 @@ impl LittleEndian {
         Ok(*value)
     }
 
+    /// Decodes one byte at `offset` without allocating a subslice.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` when `offset` is outside `bytes`.
+    pub fn read_u8_at(bytes: &[u8], offset: usize) -> std::io::Result<u8> {
+        bytes
+            .get(offset)
+            .copied()
+            .ok_or_else(|| invalid_integer_offset("little-endian", "u8", offset, 1, bytes.len()))
+    }
+
     /// Decodes one little-endian `u32`.
     ///
     /// # Errors
@@ -381,6 +483,20 @@ impl LittleEndian {
             .try_into()
             .map_err(|_| invalid_integer_width("little-endian", "u32", 4, bytes.len()))?;
         Ok(u32::from_le_bytes(bytes))
+    }
+
+    /// Decodes one little-endian `u32` at `offset`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` when four bytes are not available at `offset`.
+    pub fn read_u32_at(bytes: &[u8], offset: usize) -> std::io::Result<u32> {
+        let end = offset.checked_add(4).ok_or_else(|| {
+            invalid_integer_offset("little-endian", "u32", offset, 4, bytes.len())
+        })?;
+        Self::read_u32(bytes.get(offset..end).ok_or_else(|| {
+            invalid_integer_offset("little-endian", "u32", offset, 4, bytes.len())
+        })?)
     }
 
     /// Decodes one little-endian `u64`.
@@ -394,6 +510,20 @@ impl LittleEndian {
             .map_err(|_| invalid_integer_width("little-endian", "u64", 8, bytes.len()))?;
         Ok(u64::from_le_bytes(bytes))
     }
+
+    /// Decodes one little-endian `u64` at `offset`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` when eight bytes are not available at `offset`.
+    pub fn read_u64_at(bytes: &[u8], offset: usize) -> std::io::Result<u64> {
+        let end = offset.checked_add(8).ok_or_else(|| {
+            invalid_integer_offset("little-endian", "u64", offset, 8, bytes.len())
+        })?;
+        Self::read_u64(bytes.get(offset..end).ok_or_else(|| {
+            invalid_integer_offset("little-endian", "u64", offset, 8, bytes.len())
+        })?)
+    }
 }
 
 fn invalid_integer_width(
@@ -405,6 +535,21 @@ fn invalid_integer_width(
     std::io::Error::new(
         std::io::ErrorKind::InvalidData,
         format!("{byte_order} {name} requires {expected} bytes, found {actual}"),
+    )
+}
+
+fn invalid_integer_offset(
+    byte_order: &str,
+    name: &str,
+    offset: usize,
+    width: usize,
+    actual: usize,
+) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "{byte_order} {name} at offset {offset} requires {width} bytes, buffer has {actual}"
+        ),
     )
 }
 
@@ -1575,8 +1720,18 @@ mod tests {
 
     use super::{
         BigEndian, Fs, LittleEndian, MultiMap, PositionedFile, Var, btree_map_retain,
-        btree_map_with_last_in_range,
+        btree_map_retain_keys, btree_map_with_first_in_range, btree_map_with_last_in_range,
+        vec_with_range,
     };
+
+    #[test]
+    fn vector_ranges_are_checked_and_non_allocating() {
+        let values = [1, 2, 3, 4];
+        let mut visited = Vec::new();
+        assert!(vec_with_range(&values, 1, 3, |value| visited.push(*value)));
+        assert_eq!(visited, [2, 3]);
+        assert!(!vec_with_range(&values, 3, 5, |_| {}));
+    }
 
     #[test]
     fn fixed_width_endian_encoding_round_trips() {
@@ -1593,6 +1748,12 @@ mod tests {
         assert_eq!(BigEndian::read_u32(&bytes[1..5]).unwrap(), 0x0102_0304);
         assert_eq!(
             BigEndian::read_u64(&bytes[5..13]).unwrap(),
+            0x0506_0708_090a_0b0c
+        );
+        assert_eq!(BigEndian::read_u8_at(&bytes, 0).unwrap(), 0xaa);
+        assert_eq!(BigEndian::read_u32_at(&bytes, 1).unwrap(), 0x0102_0304);
+        assert_eq!(
+            BigEndian::read_u64_at(&bytes, 5).unwrap(),
             0x0506_0708_090a_0b0c
         );
         assert_eq!(
@@ -1614,6 +1775,11 @@ mod tests {
             LittleEndian::read_u64(&little[4..12]).unwrap(),
             0x0506_0708_090a_0b0c
         );
+        assert_eq!(LittleEndian::read_u32_at(&little, 0).unwrap(), 0x0102_0304);
+        assert_eq!(
+            LittleEndian::read_u64_at(&little, 4).unwrap(),
+            0x0506_0708_090a_0b0c
+        );
     }
 
     #[test]
@@ -1631,6 +1797,16 @@ mod tests {
             |_, value| selected = *value,
         ));
         assert_eq!(selected, 10);
+        assert!(btree_map_with_first_in_range(
+            &values,
+            &("alpha", 2),
+            &("beta", 1),
+            |key, value| {
+                assert_eq!(*key, ("alpha", 3));
+                selected = *value;
+            },
+        ));
+        assert_eq!(selected, 30);
         assert!(!btree_map_with_last_in_range(
             &values,
             &("alpha", 4),
@@ -1640,6 +1816,8 @@ mod tests {
 
         btree_map_retain(&mut values, |key, _| key.1 < 3);
         assert_eq!(values.len(), 2);
+        btree_map_retain_keys(&mut values, |key| key.0 == "alpha");
+        assert_eq!(values.len(), 1);
     }
 
     #[test]
