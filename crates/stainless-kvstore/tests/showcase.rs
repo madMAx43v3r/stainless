@@ -142,31 +142,31 @@ fn wal_integer_fields_use_fixed_width_big_endian_encoding() {
     drop(table);
 
     let bytes = std::fs::read(&path).expect("data WAL should be readable");
-    assert_eq!(bytes.len(), 37);
-    assert_eq!(&bytes[0..8], &37_u64.to_be_bytes());
-    assert_eq!(bytes[8], 0);
-    assert_eq!(&bytes[9..13], &0_u32.to_be_bytes());
-    assert_eq!(&bytes[13..21], &4_u64.to_be_bytes());
-    assert_eq!(&bytes[21..25], &4_u32.to_be_bytes());
-    assert_eq!(&bytes[25..29], &0x0102_0304_u32.to_be_bytes());
-    assert_eq!(&bytes[29..33], &0x0506_0708_u32.to_be_bytes());
+    assert_eq!(bytes.len(), 33);
+    assert_eq!(&bytes[0..4], &33_u32.to_be_bytes());
+    assert_eq!(bytes[4], 0);
+    assert_eq!(&bytes[5..9], &0_u32.to_be_bytes());
+    assert_eq!(&bytes[9..17], &4_u64.to_be_bytes());
+    assert_eq!(&bytes[17..21], &4_u32.to_be_bytes());
+    assert_eq!(&bytes[21..25], &0x0102_0304_u32.to_be_bytes());
+    assert_eq!(&bytes[25..29], &0x0506_0708_u32.to_be_bytes());
 
     let index = std::fs::read(index_log(&path)).expect("index WAL should be readable");
-    assert_eq!(index.len(), 41 + 25);
-    assert_eq!(&index[0..8], &41_u64.to_be_bytes());
-    assert_eq!(index[8], 0);
-    assert_eq!(&index[9..13], &0_u32.to_be_bytes());
-    assert_eq!(&index[13..21], &29_u64.to_be_bytes());
-    assert_eq!(&index[21..25], &4_u32.to_be_bytes());
-    assert_eq!(&index[25..33], &4_u64.to_be_bytes());
-    assert_eq!(&index[33..37], &0x0102_0304_u32.to_be_bytes());
-    assert_eq!(&index[37..41], &0x0266_0030_u32.to_be_bytes());
+    assert_eq!(index.len(), 37 + 21);
+    assert_eq!(&index[0..4], &37_u32.to_be_bytes());
+    assert_eq!(index[4], 0);
+    assert_eq!(&index[5..9], &0_u32.to_be_bytes());
+    assert_eq!(&index[9..17], &25_u64.to_be_bytes());
+    assert_eq!(&index[17..21], &4_u32.to_be_bytes());
+    assert_eq!(&index[21..29], &4_u64.to_be_bytes());
+    assert_eq!(&index[29..33], &0x0102_0304_u32.to_be_bytes());
+    assert_eq!(&index[33..37], &0x0222_002c_u32.to_be_bytes());
 
-    assert_eq!(&index[41..49], &25_u64.to_be_bytes());
-    assert_eq!(index[49], 1);
-    assert_eq!(&index[50..54], &1_u32.to_be_bytes());
-    assert_eq!(&index[54..62], &37_u64.to_be_bytes());
-    assert_eq!(&index[62..66], &0x0048_0028_u32.to_be_bytes());
+    assert_eq!(&index[37..41], &21_u32.to_be_bytes());
+    assert_eq!(index[41], 1);
+    assert_eq!(&index[42..46], &1_u32.to_be_bytes());
+    assert_eq!(&index[46..54], &33_u64.to_be_bytes());
+    assert_eq!(&index[54..58], &0x0044_0024_u32.to_be_bytes());
 
     remove_logs(&path);
 }
@@ -250,7 +250,7 @@ fn recovery_discards_only_the_uncommitted_index_suffix() {
 
 #[test]
 fn revert_uses_the_least_successor_for_an_unindexed_version() {
-    let path = temporary_log("index-super-index-successor");
+    let path = temporary_log("index-version-index-successor");
     let table = Table::<u32, u32>::open(&path).expect("open should succeed");
 
     table.insert(1, 10).expect("version zero insert");

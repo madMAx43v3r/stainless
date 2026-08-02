@@ -254,7 +254,22 @@ fn transpiles_and_compiles_resolved_reference_programs() {
             result.analysis.diagnostics
         );
         let rust = result.rust.expect("valid source should emit Rust");
-        compile_rust(name, &rust, CrateKind::Library);
+        if rust.contains("::stainless_runtime::") {
+            let runtime_rust = format!("{rust}\nfn main() {{}}\n");
+            let directory = write_runtime_cargo_fixture(name, &runtime_rust);
+            let output = run_fixture_cargo(&directory, "check");
+            assert!(
+                output.status.success(),
+                "Cargo rejected generated Rust for {name}:\n{rust}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            fs::remove_dir_all(&directory).unwrap_or_else(|error| {
+                panic!("failed to remove {}: {error}", directory.display())
+            });
+        } else {
+            compile_rust(name, &rust, CrateKind::Library);
+        }
     }
 }
 

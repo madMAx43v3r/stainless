@@ -124,10 +124,10 @@ void copy_class() {
 fn enforces_cpp_style_member_access() {
     let analysis = analyze(
         r"class Secret {
+    Secret();
+private:
     i32 value;
     i32 read() const;
-public:
-    Secret();
 };
 
 Secret::Secret() : value(7) {}
@@ -149,6 +149,35 @@ i32 expose() {
         .count();
 
     assert_eq!(private_diagnostics, 2, "{:#?}", analysis.diagnostics);
+}
+
+#[test]
+fn class_members_are_public_by_default() {
+    let analysis = analyze(
+        r"class Visible {
+    Visible();
+    i32 value;
+    i32 read() const;
+};
+
+Visible::Visible() : value(7) {}
+
+i32 Visible::read() const {
+    return value;
+}
+
+i32 expose() {
+    Visible visible;
+    return visible.value + visible.read();
+}
+",
+    );
+
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
 }
 
 #[test]

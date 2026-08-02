@@ -44,4 +44,9 @@ Vec<u8> consume_string(String text)
     return move(text).into_bytes();
 }
 
+Vec<String> copy_vec_range(const Vec<String>& values)
+{
+    return values.copy_range(1, values.len());
+}
+
 } // namespace samples

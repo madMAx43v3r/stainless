@@ -12,12 +12,13 @@ record framing and checksums, restores the last committed state, and truncates
 incomplete or uncommitted tails in both files.
 Index records use kind-specific layouts: inserts store only their version,
 value location, and key, while commit markers store only their version and
-committed data-WAL length. `InsertRecord` and `CommitRecord` own their exact
-`read()` and `write()` implementations; there is no union-like decoded record
-with inactive fields.
-Every fixed-width WAL integer is big-endian, including record sizes, versions,
-key/value lengths, and checksums. The Stainless implementation delegates these
-operations to Rust's optimized fixed-width byte conversions through
+committed data-WAL length. Internal `detail::InsertRecord` and
+`detail::CommitRecord` own their exact `read()` and `write()` implementations;
+there is no union-like decoded record with inactive fields.
+Every fixed-width WAL integer is big-endian. Record-size headers are `u32`,
+while persistent file offsets and committed file lengths are `u64`. The
+Stainless implementation delegates these fields to Rust's optimized
+fixed-width byte conversions through
 `stainless::BigEndian`. WAL record discriminants are grouped as typed
 `static const u8` members of `RecordKind`, so their byte representation remains
 explicit without consuming storage in a `RecordKind` value.
@@ -42,7 +43,7 @@ in ascending order. The bounded calls perform ordered predecessor or successor
 lookups per result, so finding a small prefix or suffix does not scan the
 entire range.
 
-Recovery additionally builds an in-memory `Map<u32, u64>` super-index mapping
+Recovery additionally builds an in-memory `Map<u32, u64>` version index mapping
 each committed version to its commit-record offset. `revert(version)` uses an
 exact entry or the least successor entry to seek directly to the branch
 boundary, then reads the discarded suffix forward. It collects those exact

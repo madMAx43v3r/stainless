@@ -19,7 +19,6 @@ struct Config {
 };
 
 class Session {
-public:
     Session(bool available) throws IoError;
 };
 

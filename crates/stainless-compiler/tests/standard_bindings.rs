@@ -710,6 +710,24 @@ fn vec_common_methods_have_expected_receiver_effects() {
         RustLowering::FunctionWithReceiver { ref rust_path }
             if rust_path == "::stainless_runtime::vec_with_range"
     ));
+
+    let copy_range = vec_binding
+        .find_callable(
+            CallStyle::Method,
+            "copy_range",
+            &[TypeRef::Usize, TypeRef::Usize],
+        )
+        .unwrap();
+    assert_eq!(copy_range.receiver, Some(Receiver::Shared));
+    assert_eq!(
+        copy_range.return_type,
+        TypeRef::native("rust::Vec", vec![TypeRef::Parameter("T".to_owned())])
+    );
+    assert!(matches!(
+        copy_range.lowering,
+        RustLowering::FunctionWithReceiver { ref rust_path }
+            if rust_path == "::stainless_runtime::vec_copy_range"
+    ));
 }
 
 #[test]
@@ -731,6 +749,19 @@ fn vec_trait_requirements_are_preserved() {
     assert_eq!(extend.receiver, Some(Receiver::Mutable));
     assert_eq!(extend.requirements.len(), 1);
     assert_eq!(extend.requirements[0].rust_trait, "::core::clone::Clone");
+
+    let copy_range = vec_binding
+        .find_callable(
+            CallStyle::Method,
+            "copy_range",
+            &[TypeRef::Usize, TypeRef::Usize],
+        )
+        .unwrap();
+    assert_eq!(copy_range.requirements.len(), 1);
+    assert_eq!(
+        copy_range.requirements[0].rust_trait,
+        "::core::clone::Clone"
+    );
 
     let contains = vec_binding
         .find_callable(CallStyle::Method, "contains", &[TypeRef::shared_ref(t)])

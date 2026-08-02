@@ -620,10 +620,9 @@ name. External-crate items are exposed through the generated interop mechanism
 described below; the raw dependency crate never appears as an unqualified
 Stainless namespace.
 
-Member access control follows C++:
+Member access control uses C++ access-label syntax with a safer public default:
 
-- Members of a `struct` are public by default; members of a `class` are private
-  by default.
+- Members of both a `struct` and a `class` are public by default.
 - `public:` and `private:` labels change access for subsequent declarations.
   `protected:` is not supported because Stainless has no behavioral class
   inheritance.
@@ -931,7 +930,6 @@ Like Java, a Stainless constructor may declare checked exceptions:
 
 ```cpp
 class Session {
-public:
     Session(bool available) throws OpenError;
 };
 
@@ -2178,10 +2176,13 @@ an associated Rust `Type::new(arguments...) -> Self` is written
 `Type(arguments...)`, `From<U>` may provide an exact one-argument constructor,
 and a default construction may be written simply as `Type value;`. After
 `use rust::Vec;`, examples therefore include `Vec()`, `.push`, and `.len`.
-After `use rust::String;`, they include `String()` and `.push_str`. There is no
-general Stainless facade that renames `.len()` to `.size()`. The deliberate
-exception is ownership: source code uses the restricted Stainless pointer
-operations specified above instead of naming `Box`, `Arc`, or `Weak` directly.
+After `use rust::String;`, they include `String()` and `.push_str`. Explicit
+generic construction needs no contextual target, so
+`Map<u32, u64>()` and `Map<tuple<Vec<u8>, u32>, IndexEntry>()` are valid
+expressions. No general Stainless facade renames `.len()` to `.size()`. The
+deliberate exception is ownership: source code uses the restricted Stainless
+pointer operations specified above instead of naming `Box`, `Arc`, or `Weak`
+directly.
 `rustc` remains the final check that every emitted standard-library call is
 valid.
 
@@ -2204,10 +2205,12 @@ The compiler crate currently registers the following source-visible APIs:
 - `rust::Vec<T>`: `Vec()`, `Vec::with_capacity`, `len`, `is_empty`,
   `capacity`, `reserve`, `reserve_exact`, `shrink_to`, `shrink_to_fit`,
   `push`, `pop`, `clear`, `truncate`, `insert`, `remove`, `swap_remove`,
-  `append`, `extend_from_slice`, `reverse`, `clone`, `contains`, `sort`, `dedup`, and the
-  non-escaping `with_range(begin, end, callback)` slice adapter. The adapter
-  visits a checked half-open range without allocating or exposing a storable
-  Rust slice and returns `false` for invalid bounds.
+  `append`, `extend_from_slice`, `copy_range`, `reverse`, `clone`, `contains`,
+  `sort`, `dedup`, and the non-escaping `with_range(begin, end, callback)`
+  slice adapter. `copy_range(begin, end)` clones a checked half-open range into
+  a new owned `Vec<T>` and requires `T: Clone`. `with_range` visits the range
+  without allocating or exposing a storable Rust slice and returns `false` for
+  invalid bounds.
 - `rust::String`: `String()`, the explicit copy constructor
   `String(const String&)`, `String::with_capacity`, `clone`, `into_bytes`,
   `len`, `is_empty`, `capacity`, `reserve`, `reserve_exact`, `shrink_to`,
@@ -2539,7 +2542,7 @@ They use ordered successor or predecessor lookups per logical key, returning
 the first results ascending and the last results descending without scanning
 the rest of the interval. All three keep the same shared guard while reading
 value bytes, so they remain consistent with concurrent commits and reverts.
-Recovery also builds an in-memory `Map<u32, u64>` super-index from each
+Recovery also builds an in-memory `Map<u32, u64>` version index from each
 committed version to its index-WAL marker offset. `revert(version)` uses an
 exact marker or the least successor marker to seek directly to the selected
 branch boundary, then reads the discarded index-WAL suffix forward. It gathers
@@ -2551,7 +2554,8 @@ reads. Commits, reverts, and recovery take an exclusive write guard.
 Each `IndexEntry` stores a `u32` value length. Encoded values are therefore
 limited to `u32::MAX` bytes; larger writes fail with checked
 `kvstore::ValueTooLarge` before their length is narrowed or a WAL record is
-written.
+written. Both WALs use a big-endian `u32` record-size header; file offsets and
+committed file lengths remain `u64`.
 
 The crate exposes `Table<K, V>` to Rust projects. `K` implements
 `OrderedKey`, whose persistent encoding must preserve `Ord`, and `V` implements

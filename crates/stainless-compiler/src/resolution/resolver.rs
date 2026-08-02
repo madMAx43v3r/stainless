@@ -4447,6 +4447,21 @@ impl Resolver<'_> {
                 path,
                 arguments: type_arguments,
             } if self
+                .native_path(&path.segments, &context.namespace, false, span)
+                .is_some() =>
+            {
+                self.resolve_explicit_native_constructor(
+                    path,
+                    type_arguments,
+                    arguments,
+                    span,
+                    context,
+                )
+            }
+            ExpressionKind::GenericName {
+                path,
+                arguments: type_arguments,
+            } if self
                 .lookup_struct_path(&path.segments, &context.namespace)
                 .is_some() =>
             {
@@ -6044,6 +6059,54 @@ impl Resolver<'_> {
             return (error_info(), None);
         };
         (temporary(return_type), Some(call))
+    }
+
+    fn resolve_explicit_native_constructor(
+        &mut self,
+        path: &ast::Path,
+        type_arguments: &[ast::Type],
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        let source_type = ast::Type {
+            is_const: false,
+            is_reference: false,
+            kind: TypeKind::Named(ast::NamedType {
+                path: path.clone(),
+                arguments: type_arguments.to_vec(),
+            }),
+            span,
+        };
+        let target = self.resolve_type(
+            &source_type,
+            &context.namespace,
+            &context.type_parameters,
+            false,
+        );
+        let TypeRef::Native {
+            path: type_path,
+            arguments: resolved_arguments,
+        } = target
+        else {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            return (error_info(), None);
+        };
+        let instance = NativeInstance {
+            type_path,
+            arguments: resolved_arguments,
+        };
+        self.resolve_native_callable(
+            &instance,
+            CallStyle::Constructor,
+            instance_short_name(&instance.type_path),
+            arguments,
+            span,
+            None,
+            context,
+        )
     }
 
     fn resolve_rwlock_constructor(

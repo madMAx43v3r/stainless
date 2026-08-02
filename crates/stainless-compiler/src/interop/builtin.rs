@@ -657,6 +657,23 @@ fn vec_binding() -> NativeTypeBinding {
     callables.extend(vec_element_methods(&t, &vec_t));
     callables.extend(vec_trait_methods(&t, &vec_t));
     callables.push(CallableBinding {
+        source_name: "copy_range".to_owned(),
+        style: CallStyle::Method,
+        receiver: Some(Receiver::Shared),
+        parameters: vec![
+            Parameter::new("begin", TypeRef::Usize),
+            Parameter::new("end", TypeRef::Usize),
+        ],
+        is_async: false,
+        return_type: vec_t.clone(),
+        rust_result_error: None,
+        return_borrow: None,
+        requirements: vec![requirement(T, "::core::clone::Clone")],
+        lowering: RustLowering::FunctionWithReceiver {
+            rust_path: "::stainless_runtime::vec_copy_range".to_owned(),
+        },
+    });
+    callables.push(CallableBinding {
         source_name: "with_range".to_owned(),
         style: CallStyle::Method,
         receiver: Some(Receiver::Shared),

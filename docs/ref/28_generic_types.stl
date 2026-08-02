@@ -21,7 +21,6 @@ const T& Box<T>::get() const
 }
 
 class Holder<T> {
-public:
     Holder(T value);
     const T& get() const;
 

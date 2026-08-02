@@ -80,21 +80,21 @@ fn lower_item(item: cst::Item) -> Item {
             definition
                 .fields()
                 .map(|member| {
-                    let public = definition.member_is_public(member.syntax(), false);
+                    let public = definition.member_is_public(member.syntax(), true);
                     (member, public)
                 })
                 .collect(),
             definition
                 .functions()
                 .map(|member| {
-                    let public = definition.member_is_public(member.syntax(), false);
+                    let public = definition.member_is_public(member.syntax(), true);
                     (member, public)
                 })
                 .collect(),
             definition
                 .constructors()
                 .map(|member| {
-                    let public = definition.member_is_public(member.syntax(), false);
+                    let public = definition.member_is_public(member.syntax(), true);
                     (member, public)
                 })
                 .collect(),

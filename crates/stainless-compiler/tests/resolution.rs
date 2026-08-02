@@ -8,6 +8,27 @@ use stainless_compiler::resolution::{
 use stainless_compiler::{analyze, analyze_with_bindings};
 
 #[test]
+fn explicit_generic_native_constructors_need_no_contextual_target() {
+    let analysis = analyze(
+        r"use rust::{Map, String, Vec};
+
+Map<u32, String> make_map() {
+    return Map<u32, String>();
+}
+
+Vec<u8> make_vec() {
+    return Vec<u8>();
+}
+",
+    );
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
 fn positive_integer_literals_default_to_u32_and_infer_from_context() {
     let analysis = analyze(
         r"void literals() {

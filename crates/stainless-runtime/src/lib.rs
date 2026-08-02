@@ -200,6 +200,18 @@ where
     true
 }
 
+/// Copies a checked half-open vector range into a new owned vector.
+///
+/// # Panics
+///
+/// Panics with Rust's normal range semantics when the bounds are invalid.
+pub fn vec_copy_range<T: Clone>(values: &[T], begin: usize, end: usize) -> Vec<T> {
+    values
+        .get(begin..end)
+        .expect("Stainless Vec::copy_range bounds are invalid")
+        .to_vec()
+}
+
 /// An ordered multimap of independently iterable key/value associations.
 ///
 /// Stainless exposes this as `rust::MultiMap<K, V>`. Its private buckets use
@@ -1838,7 +1850,7 @@ mod tests {
         BigEndian, Fs, LittleEndian, MultiMap, PositionedFile, Var, btree_map_retain,
         btree_map_retain_keys, btree_map_with_first_after, btree_map_with_first_in_range,
         btree_map_with_last_before, btree_map_with_last_in_range, btree_map_with_range,
-        vec_with_range,
+        vec_copy_range, vec_with_range,
     };
 
     #[test]
@@ -1847,6 +1859,7 @@ mod tests {
         let mut visited = Vec::new();
         assert!(vec_with_range(&values, 1, 3, |value| visited.push(*value)));
         assert_eq!(visited, [2, 3]);
+        assert_eq!(vec_copy_range(&values, 1, 3), [2, 3]);
         assert!(!vec_with_range(&values, 3, 5, |_| {}));
     }
 

@@ -23,7 +23,6 @@ i32 struct_copy_example()
 }
 
 class Token {
-public:
     unique_ptr<Token> clone() const;
 };
 
