@@ -27,9 +27,10 @@ usize moved_native_tuple_element() {
     Vec<u8> bytes;
     bytes.push(7u8);
     tuple<Vec<u8>, u32> key = tuple<Vec<u8>, u32>(move(bytes), 3u32);
+    u32 version = key.1;
     Map<tuple<Vec<u8>, u32>, i32> values;
     values.insert(move(key), 1);
-    return values.len();
+    return values.len() + usize(version);
 }
 
 } // namespace samples

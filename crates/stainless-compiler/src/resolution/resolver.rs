@@ -3875,6 +3875,9 @@ impl Resolver<'_> {
             );
         }
         let pointee = self.refined_automatic_pointee(receiver, &receiver_info, context, span);
+        if let TypeRef::Tuple(elements) = &pointee {
+            return self.resolve_tuple_field(&receiver_info, &pointee, elements, name, span);
+        }
         let (TypeRef::Struct { path, arguments } | TypeRef::Class { path, arguments }) = &pointee
         else {
             if pointee != TypeRef::Error {
@@ -3919,6 +3922,55 @@ impl Resolver<'_> {
             },
             Some(ResolvedField {
                 access_path: field.access_path,
+            }),
+        )
+    }
+
+    fn resolve_tuple_field(
+        &mut self,
+        receiver: &ExpressionInfo,
+        tuple: &TypeRef,
+        elements: &[TypeRef],
+        name: &ast::Path,
+        span: Span,
+    ) -> (ExpressionInfo, Option<ResolvedField>) {
+        let Some(index_text) = name.segments.first().filter(|_| name.segments.len() == 1) else {
+            self.push(
+                "RES010",
+                "tuple projection requires one numeric field such as `.0` or `.1`".to_owned(),
+                span,
+            );
+            return (error_info(), None);
+        };
+        let Ok(index) = index_text.parse::<usize>() else {
+            self.push(
+                "RES010",
+                format!(
+                    "tuple projection `{}` is not an unsuffixed decimal index",
+                    name.display()
+                ),
+                span,
+            );
+            return (error_info(), None);
+        };
+        let Some(element) = elements.get(index) else {
+            self.push(
+                "RES010",
+                format!(
+                    "tuple type `{}` has no element at index {index}",
+                    display_type(tuple)
+                ),
+                span,
+            );
+            return (error_info(), None);
+        };
+        (
+            ExpressionInfo {
+                ty: element.clone(),
+                category: pointee_category(&receiver.ty, receiver.category),
+            },
+            Some(ResolvedField {
+                access_path: vec![index.to_string()],
             }),
         )
     }

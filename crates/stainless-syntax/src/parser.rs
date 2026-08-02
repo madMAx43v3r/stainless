@@ -930,7 +930,11 @@ impl Parser<'_> {
                     self.builder
                         .start_node_at(checkpoint, SyntaxKind::FieldExpression.into());
                     self.bump();
-                    self.expect(SyntaxKind::Identifier, "expected a member name after `.`");
+                    if self.at(SyntaxKind::Integer) {
+                        self.bump();
+                    } else {
+                        self.expect(SyntaxKind::Identifier, "expected a member name after `.`");
+                    }
                     while self.eat(SyntaxKind::ColonColon) {
                         self.expect(SyntaxKind::Identifier, "expected a member name after `::`");
                     }

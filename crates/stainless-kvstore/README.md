@@ -13,14 +13,14 @@ tail data.
 
 The store owns one read/write `File` handle. Its index and version metadata are
 kept in RAM and rebuilt from the append-only log at startup. The index is a
-Stainless `Map<tuple<Vec<u8>, u32>, Versioned<ValueLocation>>`, backed by
-Rust's ordered `BTreeMap`. Its compound key orders each logical key by version;
-another write to the same key in one version replaces that version's location.
-`with_last_in_range()` selects the greatest entry in the inclusive
-`(key, 0)..=(key, current_version)` range through a non-escaping callback, so
-lookups neither scan nor clone the index. An internal `rwlock<StoreState>` lets
-multiple lookups run concurrently while mutations, commits, reverts, and
-recovery use an exclusive write guard.
+Stainless `Map<tuple<Vec<u8>, u32>, ValueLocation>`, backed by Rust's ordered
+`BTreeMap`. Its compound key is the sole version metadata and orders each
+logical key by version; another write to the same key in one version replaces
+that version's location. `with_last_in_range()` selects the greatest entry in
+the inclusive `(key, 0)..=(key, current_version)` range through a non-escaping
+callback, so lookups neither scan nor clone the index. An internal
+`rwlock<StoreState>` lets multiple lookups run concurrently while mutations,
+commits, reverts, and recovery use an exclusive write guard.
 
 The WAL stores variable-length encoded key and value bytes. The Rust-facing
 `Table<K, V>` remains statically typed through two explicit traits:
@@ -34,12 +34,10 @@ Built-in implementations cover booleans, fixed-width integers, `String`,
 for their own structs. Compound tuple keys use escaped, self-delimiting
 segments so their encoded order is lexicographic.
 
-The Stainless implementation itself now exercises user generics with
-`Versioned<T>`; the in-memory index stores `Versioned<ValueLocation>` at each
-compound key/version entry. Keys and application values still cross the
-persistence boundary as bytes because arbitrary Rust `Codec` implementations
-can fail. The Rust `Table<K, V>` facade performs that fallible conversion and
-keeps the Stainless WAL engine independent of application-specific codecs.
+Keys and application values cross the persistence boundary as bytes because
+arbitrary Rust `Codec` implementations can fail. The Rust `Table<K, V>` facade
+performs that fallible conversion and keeps the Stainless WAL engine
+independent of application-specific codecs.
 
 ```rust
 use stainless_kvstore::Table;

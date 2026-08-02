@@ -60,6 +60,46 @@ fn resolves_compiler_known_tuples_as_ordered_map_keys() {
 }
 
 #[test]
+fn tuple_projection_preserves_places_and_checks_the_numeric_index() {
+    let valid = analyze(
+        r"u32 read(const tuple<i32, u32>& value) {
+    return value.1;
+}
+
+void update(tuple<i32, u32>& value) {
+    value.1 += 1u32;
+}
+",
+    );
+    assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);
+
+    let invalid = analyze(
+        r"u32 out_of_bounds(const tuple<i32, u32>& value) {
+    return value.2;
+}
+
+u32 named(const tuple<i32, u32>& value) {
+    return value.second;
+}
+
+u32 suffixed(const tuple<i32, u32>& value) {
+    return value.1u32;
+}
+",
+    );
+    assert_eq!(
+        invalid
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "RES010")
+            .count(),
+        3,
+        "{:#?}",
+        invalid.diagnostics
+    );
+}
+
+#[test]
 fn resolves_user_generic_structs_classes_and_concrete_member_results() {
     let analysis = analyze(include_str!("../../../docs/ref/28_generic_types.stl"));
     assert!(

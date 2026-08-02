@@ -334,6 +334,16 @@ fn parses_stored_function_signatures_losslessly() {
 }
 
 #[test]
+fn parses_numeric_tuple_projection_losslessly() {
+    let source = "u32 version(const tuple<i32, u32>& key) { return key.1; }\n";
+    let parsed = parse(source);
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(parsed.syntax().to_string(), source);
+    assert_eq!(count_kind(&parsed.syntax(), SyntaxKind::FieldExpression), 1);
+}
+
+#[test]
 fn parses_supported_formatting_macros_losslessly() {
     let source = r#"use rust::{eprintln, format, println, write, writeln, String};
 

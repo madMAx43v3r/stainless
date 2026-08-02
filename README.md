@@ -985,9 +985,10 @@ Tuples are copied only when every element is copyable; otherwise their elements
 obey the ordinary explicit-`move()` rules. Rust supplies lexicographic
 `PartialEq`, `Eq`, `PartialOrd`, and `Ord` implementations when every element
 supports the corresponding trait, so tuples can be compound keys for
-`Map<K, V>` and `Set<T>`. Tuple elements cannot contain references. Named or
-indexed tuple projection is still deferred; map structured bindings can bind a
-tuple key as one value but do not recursively destructure it.
+`Map<K, V>` and `Set<T>`. Tuple elements cannot contain references. Rust-style
+numeric projection accesses an element directly (`key.0`, `key.1`, and so on),
+with the usual shared or mutable place semantics. Map structured bindings can
+bind a tuple key as one value but do not recursively destructure it.
 
 ### References and borrowed returns
 
@@ -2424,14 +2425,14 @@ uncommitted tail data.
 
 The index is held in RAM and rebuilt by replaying the append-only log at open.
 It is a Stainless
-`Map<tuple<Vec<u8>, u32>, Versioned<ValueLocation>>`, lowering to Rust's
-ordered `BTreeMap`. The compound key orders every logical key by version, and
-inserting the same key again within one version replaces that version's
-location. `find()` uses the map's non-escaping `with_last_in_range()` callback
-to select the greatest entry between `(key, 0)` and `(key, current_version)` in
-O(log n), then calls `pread_exact()` under the same shared
-`rwlock<StoreState>` guard. It never copies or scans the index. Commits,
-reverts, and recovery take an exclusive write guard.
+`Map<tuple<Vec<u8>, u32>, ValueLocation>`, lowering to Rust's ordered
+`BTreeMap`. The compound key is the sole version metadata: it orders every
+logical key by version, and inserting the same key again within one version
+replaces that version's location. `find()` uses the map's non-escaping
+`with_last_in_range()` callback to select the greatest entry between `(key, 0)`
+and `(key, current_version)` in O(log n), then calls `pread_exact()` under the
+same shared `rwlock<StoreState>` guard. It never copies or scans the index.
+Commits, reverts, and recovery take an exclusive write guard.
 
 The crate exposes `Table<K, V>` to Rust projects. `K` implements
 `OrderedKey`, whose persistent encoding must preserve `Ord`, and `V` implements

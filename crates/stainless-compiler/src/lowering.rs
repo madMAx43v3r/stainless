@@ -775,7 +775,12 @@ fn binary_operator(kind: SyntaxKind) -> Option<BinaryOperator> {
 fn path_from_tokens(tokens: impl Iterator<Item = stainless_syntax::SyntaxToken>) -> ast::Path {
     ast::Path {
         segments: tokens
-            .filter(|token| matches!(token.kind(), SyntaxKind::Identifier | SyntaxKind::MoveKw))
+            .filter(|token| {
+                matches!(
+                    token.kind(),
+                    SyntaxKind::Identifier | SyntaxKind::Integer | SyntaxKind::MoveKw
+                )
+            })
             .map(|token| token.text().to_owned())
             .collect(),
     }

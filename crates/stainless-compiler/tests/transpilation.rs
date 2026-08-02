@@ -279,7 +279,7 @@ fn generated_tuples_preserve_lexicographic_map_order() {
     assert!(rust.contains("(i32, ::std::string::String)"), "{rust}");
     write!(
         rust,
-        "\nfn main() {{\n    assert_eq!(__stainless_namespace_samples::{function}(), 312);\n    assert_eq!(__stainless_namespace_samples::{moved_native}(), 1);\n}}\n"
+        "\nfn main() {{\n    assert_eq!(__stainless_namespace_samples::{function}(), 312);\n    assert_eq!(__stainless_namespace_samples::{moved_native}(), 4);\n}}\n"
     )
     .expect("writing to a String cannot fail");
     let binary = compile_rust("tuple-order", &rust, CrateKind::Binary);

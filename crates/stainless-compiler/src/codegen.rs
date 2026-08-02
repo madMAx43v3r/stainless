@@ -1361,8 +1361,13 @@ impl Emitter {
             } => {
                 let mut receiver = self.expression(receiver)?;
                 for field in access_path {
-                    let field = identifier(field)?;
-                    receiver = quote!((#receiver).#field);
+                    if let Ok(index) = field.parse::<usize>() {
+                        let index = syn::Index::from(index);
+                        receiver = quote!((#receiver).#index);
+                    } else {
+                        let field = identifier(field)?;
+                        receiver = quote!((#receiver).#field);
+                    }
                 }
                 Ok(receiver)
             }

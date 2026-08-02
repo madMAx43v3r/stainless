@@ -1254,7 +1254,7 @@ impl FieldExpression {
         direct_tokens(self.syntax()).filter(|token| {
             matches!(
                 token.kind(),
-                SyntaxKind::Identifier | SyntaxKind::ColonColon
+                SyntaxKind::Identifier | SyntaxKind::Integer | SyntaxKind::ColonColon
             )
         })
     }
