@@ -232,10 +232,6 @@ fn transpiles_and_compiles_resolved_reference_programs() {
             "pointer-family",
             include_str!("../../../docs/ref/22_pointer_family.stl"),
         ),
-        (
-            "collections",
-            include_str!("../../../docs/ref/25_collections.stl"),
-        ),
         ("tuples", include_str!("../../../docs/ref/27_tuples.stl")),
         (
             "generic-types",
@@ -270,11 +266,20 @@ fn generated_tuples_preserve_lexicographic_map_order() {
         .expect("compound_key_order symbol")
         .mangled_name
         .clone();
+    let moved_native = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "moved_native_tuple_element"])
+        .expect("moved_native_tuple_element symbol")
+        .mangled_name
+        .clone();
     let mut rust = result.rust.expect("tuples should emit Rust");
     assert!(rust.contains("(i32, ::std::string::String)"), "{rust}");
     write!(
         rust,
-        "\nfn main() {{ assert_eq!(__stainless_namespace_samples::{function}(), 312); }}\n"
+        "\nfn main() {{\n    assert_eq!(__stainless_namespace_samples::{function}(), 312);\n    assert_eq!(__stainless_namespace_samples::{moved_native}(), 1);\n}}\n"
     )
     .expect("writing to a String cannot fail");
     let binary = compile_rust("tuple-order", &rust, CrateKind::Binary);
@@ -317,16 +322,23 @@ fn generated_collections_preserve_linked_queue_and_sorted_iteration_order() {
         .expect("copied_and_moved_map_entries symbol")
         .mangled_name
         .clone();
+    let multimap = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "ordered_multimap_entries"])
+        .expect("ordered_multimap_entries symbol")
+        .mangled_name
+        .clone();
     let mut rust = result.rust.expect("collections should emit Rust");
     write!(
         rust,
-        "\nfn main() {{\n    assert_eq!(__stainless_namespace_samples::{function}(), 216);\n    assert_eq!(__stainless_namespace_samples::{copied_and_moved}(), 66);\n}}\n"
+        "\nfn main() {{\n    assert_eq!(__stainless_namespace_samples::{function}(), 216);\n    assert_eq!(__stainless_namespace_samples::{copied_and_moved}(), 66);\n    assert_eq!(__stainless_namespace_samples::{multimap}(), 220);\n}}\n"
     )
     .expect("writing to a String cannot fail");
-    let binary = compile_rust("collection-order", &rust, CrateKind::Binary);
-    let output = Command::new(&binary)
-        .output()
-        .expect("generated collection program should run");
+    let directory = write_runtime_cargo_fixture("collection-order", &rust);
+    let output = run_fixture_cargo(&directory, "run");
     assert!(
         output.status.success(),
         "status: {}\nstdout:\n{}\nstderr:\n{}",
@@ -334,7 +346,8 @@ fn generated_collections_preserve_linked_queue_and_sorted_iteration_order() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    remove_temporary_parent(&binary);
+    fs::remove_dir_all(&directory)
+        .unwrap_or_else(|error| panic!("failed to remove {}: {error}", directory.display()));
 }
 
 #[test]

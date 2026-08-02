@@ -246,7 +246,13 @@ fn resolves_linked_queue_and_ordered_collection_bindings() {
         "{:#?}",
         analysis.diagnostics
     );
-    for expected in ["rust::List", "rust::Map", "rust::Queue", "rust::Set"] {
+    for expected in [
+        "rust::List",
+        "rust::Map",
+        "rust::MultiMap",
+        "rust::Queue",
+        "rust::Set",
+    ] {
         assert!(
             analysis.semantics.calls.iter().any(|call| matches!(
                 &call.target,

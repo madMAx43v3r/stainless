@@ -1749,7 +1749,7 @@ impl Resolver<'_> {
         span: Span,
         context: &mut FunctionContext,
     ) -> Option<ResolvedCall> {
-        if elements.len() != arguments.len() {
+        if !arguments.is_empty() && elements.len() != arguments.len() {
             for argument in arguments {
                 self.resolve_expression(argument, None, context);
             }
@@ -1766,13 +1766,17 @@ impl Resolver<'_> {
         }
         let mut constructions = Vec::with_capacity(elements.len());
         let mut throws = Vec::new();
-        for (element, argument) in elements.iter().zip(arguments) {
-            let construction = self.resolve_slot_construction(
-                element,
-                std::slice::from_ref(argument),
-                argument.span,
-                context,
-            )?;
+        for (index, element) in elements.iter().enumerate() {
+            let construction = if let Some(argument) = arguments.get(index) {
+                self.resolve_slot_construction(
+                    element,
+                    std::slice::from_ref(argument),
+                    argument.span,
+                    context,
+                )?
+            } else {
+                self.resolve_slot_construction(element, &[], span, context)?
+            };
             throws.extend(construction.throws.iter().copied());
             constructions.push(construction);
         }
@@ -2702,7 +2706,9 @@ impl Resolver<'_> {
                     (vec![element.clone()], true, false)
                 }
                 ("rust::Set", [element]) => (vec![element.clone()], false, false),
-                ("rust::Map", [key, value]) => (vec![key.clone(), value.clone()], true, true),
+                ("rust::Map" | "rust::MultiMap", [key, value]) => {
+                    (vec![key.clone(), value.clone()], true, true)
+                }
                 _ => {
                     self.push(
                         "RES006",
@@ -6744,6 +6750,18 @@ impl Resolver<'_> {
             return (error_info(), None);
         };
         if candidates.is_empty() {
+            if style == CallStyle::Constructor && arguments.len() == 1 {
+                let target = TypeRef::Native {
+                    path: instance.type_path.clone(),
+                    arguments: instance.arguments.clone(),
+                };
+                let call =
+                    self.resolve_direct_initialization(&target, &arguments[0], span, context);
+                return (
+                    call.as_ref().map_or_else(error_info, |_| temporary(target)),
+                    call,
+                );
+            }
             for argument in arguments {
                 self.resolve_expression(argument, None, context);
             }
@@ -8212,6 +8230,7 @@ impl Resolver<'_> {
                         | "rust::Vec"
                         | "rust::List"
                         | "rust::Map"
+                        | "rust::MultiMap"
                         | "rust::Queue"
                         | "rust::Set"
                         | "rust::Option"
@@ -8319,6 +8338,7 @@ impl Resolver<'_> {
                         | "rust::Vec"
                         | "rust::List"
                         | "rust::Map"
+                        | "rust::MultiMap"
                         | "rust::Queue"
                         | "rust::Set"
                         | "rust::Option"
@@ -9225,7 +9245,9 @@ fn supports_equality(ty: &TypeRef) -> bool {
             ("rust::Vec" | "rust::List" | "rust::Queue" | "rust::Option", [element]) => {
                 supports_equality(element)
             }
-            ("rust::Map", [key, value]) => supports_equality(key) && supports_equality(value),
+            ("rust::Map" | "rust::MultiMap", [key, value]) => {
+                supports_equality(key) && supports_equality(value)
+            }
             ("rust::Set", [element]) => supports_equality(element),
             ("rust::Result", [value, error]) => {
                 supports_equality(value) && supports_equality(error)

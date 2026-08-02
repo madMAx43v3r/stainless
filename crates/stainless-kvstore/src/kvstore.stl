@@ -6,7 +6,7 @@
 // replays only through the last valid commit/revert record and truncates an
 // incomplete or uncommitted tail.
 
-use rust::{List, Map, String, Vec};
+use rust::{Map, String, Vec};
 use rust::std::fs;
 use rust::std::fs::{File, OpenOptions};
 use rust::std::thread;
@@ -29,7 +29,7 @@ struct Versioned<T> {
 };
 
 struct StoreState {
-    Map<Vec<u8>, List<Versioned<ValueLocation>>> index;
+    Map<tuple<Vec<u8>, u32>, Versioned<ValueLocation>> index;
     u32 current_version;
     u64 next_sequence;
     u64 log_end;
@@ -118,25 +118,9 @@ Vec<u8> empty_bytes() {
 }
 
 StoreState initial_state() {
-    Map<Vec<u8>, List<Versioned<ValueLocation>>> index;
+    Map<tuple<Vec<u8>, u32>, Versioned<ValueLocation>> index;
     StoreState state = StoreState{move(index), 0u32, 0u64, 0u64};
     return state;
-}
-
-void add_index_entry(
-    Map<Vec<u8>, List<Versioned<ValueLocation>>>& index,
-    Vec<u8> key,
-    Versioned<ValueLocation> entry) {
-    bool indexed = index.with_mut(
-        key,
-        [entry](List<Versioned<ValueLocation>>& history) {
-            history.push_back(entry);
-        });
-    if (!indexed) {
-        List<Versioned<ValueLocation>> history;
-        history.push_back(entry);
-        index.insert(move(key), move(history));
-    }
 }
 
 File open_log(const String& path) throws stainless::IoError {
@@ -185,7 +169,9 @@ void Table::insert(Vec<u8> key, Vec<u8> value) const throws stainless::IoError {
         sequence,
         ValueLocation{value_offset, value.len()}
     };
-    add_index_entry(guard.index, move(key), entry);
+    guard.index.insert(
+        tuple<Vec<u8>, u32>(move(key), version),
+        entry);
 }
 
 bool Table::commit(u32 next_version) const throws stainless::IoError {
@@ -221,15 +207,12 @@ bool Table::revert(u32 version) const throws stainless::IoError {
     guard.log_end += u64(record.len());
     log.sync_data();
 
-    for (auto& [key, history] : guard.index) {
-        List<Versioned<ValueLocation>> retained;
-        for (auto entry : history) {
-            if (entry.version < version) {
-                retained.push_back(entry);
-            }
-        }
-        history = move(retained);
-    }
+    guard.index.retain(
+        [version](
+            const tuple<Vec<u8>, u32>& _key,
+            const Versioned<ValueLocation>& entry) {
+            return entry.version < version;
+        });
     guard.current_version = version;
     return true;
 }
@@ -242,31 +225,27 @@ u32 Table::current_version() const {
 shared_nullptr<Value> Table::find(const Vec<u8>& key) const throws stainless::IoError {
     auto guard = state.read();
     bool found = false;
-    u32 best_version = 0u32;
-    u64 best_sequence = 0u64;
     u64 best_offset = 0u64;
     usize best_length = 0usize;
     u32 current_version = guard.current_version;
 
-    guard.index.with(
-        key,
+    tuple<Vec<u8>, u32> lower = tuple<Vec<u8>, u32>(key.clone(), 0u32);
+    tuple<Vec<u8>, u32> upper = tuple<Vec<u8>, u32>(
+        key.clone(),
+        current_version);
+    guard.index.with_last_in_range(
+        lower,
+        upper,
         [current_version,
          &found,
-         &best_version,
-         &best_sequence,
          &best_offset,
-         &best_length](const List<Versioned<ValueLocation>>& history) {
-            for (const auto& entry : history) {
-                if (entry.version <= current_version &&
-                    (!found || entry.version > best_version ||
-                     (entry.version == best_version &&
-                      entry.sequence > best_sequence))) {
-                    found = true;
-                    best_version = entry.version;
-                    best_sequence = entry.sequence;
-                    best_offset = entry.value.offset;
-                    best_length = entry.value.length;
-                }
+         &best_length](
+            const tuple<Vec<u8>, u32>& _index_key,
+            const Versioned<ValueLocation>& entry) {
+            if (entry.version <= current_version) {
+                found = true;
+                best_offset = entry.value.offset;
+                best_length = entry.value.length;
             }
         });
     if (!found) {
@@ -290,8 +269,8 @@ void Table::recover() const throws stainless::IoError {
     u32 committed_version = 0u32;
     u64 working_next_sequence = 0u64;
     u64 committed_next_sequence = 0u64;
-    Map<Vec<u8>, List<Versioned<ValueLocation>>> working;
-    Map<Vec<u8>, List<Versioned<ValueLocation>>> committed;
+    Map<tuple<Vec<u8>, u32>, Versioned<ValueLocation>> working;
+    Map<tuple<Vec<u8>, u32>, Versioned<ValueLocation>> committed;
 
     for (; offset + 41u64 <= file_size;) {
         u64 record_size = decode_u64(log.pread_exact(offset, 8usize));
@@ -317,14 +296,16 @@ void Table::recover() const throws stainless::IoError {
 
         if (kind == 0u8) {
             Vec<u8> key = log.pread_exact(offset + 37u64, usize(key_length));
-            add_index_entry(working, move(key), Versioned<ValueLocation>{
-                version,
-                sequence,
-                ValueLocation{
-                    offset + 37u64 + key_length,
-                    usize(value_length)
-                }
-            });
+            working.insert(
+                tuple<Vec<u8>, u32>(move(key), version),
+                Versioned<ValueLocation>{
+                    version,
+                    sequence,
+                    ValueLocation{
+                        offset + 37u64 + key_length,
+                        usize(value_length)
+                    }
+                });
             if (sequence >= working_next_sequence) {
                 working_next_sequence = sequence + 1u64;
             }
@@ -334,15 +315,12 @@ void Table::recover() const throws stainless::IoError {
             committed_next_sequence = working_next_sequence;
             committed_end = offset + record_size;
         } else if (kind == 2u8) {
-            for (auto& [key, history] : working) {
-                List<Versioned<ValueLocation>> retained;
-                for (auto entry : history) {
-                    if (entry.version < version) {
-                        retained.push_back(entry);
-                    }
-                }
-                history = move(retained);
-            }
+            working.retain(
+                [version](
+                    const tuple<Vec<u8>, u32>& _key,
+                    const Versioned<ValueLocation>& entry) {
+                    return entry.version < version;
+                });
             committed = working.clone();
             committed_version = version;
             committed_next_sequence = working_next_sequence;

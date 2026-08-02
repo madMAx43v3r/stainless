@@ -26,6 +26,7 @@ pub fn standard_bindings() -> Result<NativeBindings, super::BindingError> {
         json_error_binding(),
         list_binding(),
         map_binding(),
+        multimap_binding(),
         queue_binding(),
         set_binding(),
         string_binding(),
@@ -768,6 +769,24 @@ fn map_binding() -> NativeTypeBinding {
         vec![TypeRef::mutable_ref(v.clone())],
         TypeRef::Void,
     );
+    let with_entry = TypeRef::callback(
+        CallbackKind::FnOnce,
+        CallbackEscape::Call,
+        vec![
+            TypeRef::shared_ref(k.clone()),
+            TypeRef::shared_ref(v.clone()),
+        ],
+        TypeRef::Void,
+    );
+    let retain_entry = TypeRef::callback(
+        CallbackKind::FnMut,
+        CallbackEscape::Call,
+        vec![
+            TypeRef::shared_ref(k.clone()),
+            TypeRef::shared_ref(v.clone()),
+        ],
+        TypeRef::Bool,
+    );
 
     NativeTypeBinding {
         stainless_path: "rust::Map".to_owned(),
@@ -832,7 +851,7 @@ fn map_binding() -> NativeTypeBinding {
                 style: CallStyle::Method,
                 receiver: Some(Receiver::Mutable),
                 parameters: vec![
-                    Parameter::new("key", TypeRef::shared_ref(k)),
+                    Parameter::new("key", TypeRef::shared_ref(k.clone())),
                     Parameter::new("callback", with_value_mut),
                 ],
                 is_async: false,
@@ -842,6 +861,38 @@ fn map_binding() -> NativeTypeBinding {
                 requirements: key_ord(),
                 lowering: RustLowering::FunctionWithReceiver {
                     rust_path: "::stainless_runtime::btree_map_with_mut".to_owned(),
+                },
+            },
+            CallableBinding {
+                source_name: "with_last_in_range".to_owned(),
+                style: CallStyle::Method,
+                receiver: Some(Receiver::Shared),
+                parameters: vec![
+                    Parameter::new("lower", TypeRef::shared_ref(k.clone())),
+                    Parameter::new("upper", TypeRef::shared_ref(k)),
+                    Parameter::new("callback", with_entry),
+                ],
+                is_async: false,
+                return_type: TypeRef::Bool,
+                rust_result_error: None,
+                return_borrow: None,
+                requirements: key_ord(),
+                lowering: RustLowering::FunctionWithReceiver {
+                    rust_path: "::stainless_runtime::btree_map_with_last_in_range".to_owned(),
+                },
+            },
+            CallableBinding {
+                source_name: "retain".to_owned(),
+                style: CallStyle::Method,
+                receiver: Some(Receiver::Mutable),
+                parameters: vec![Parameter::new("predicate", retain_entry)],
+                is_async: false,
+                return_type: TypeRef::Void,
+                rust_result_error: None,
+                return_borrow: None,
+                requirements: key_ord(),
+                lowering: RustLowering::FunctionWithReceiver {
+                    rust_path: "::stainless_runtime::btree_map_retain".to_owned(),
                 },
             },
             method_with_requirements(
@@ -856,6 +907,130 @@ fn map_binding() -> NativeTypeBinding {
                 Receiver::Shared,
                 vec![],
                 map_t,
+                vec![
+                    requirement(K, "::core::clone::Clone"),
+                    requirement(V, "::core::clone::Clone"),
+                ],
+            ),
+        ],
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn multimap_binding() -> NativeTypeBinding {
+    let k = TypeRef::Parameter(K.to_owned());
+    let v = TypeRef::Parameter(V.to_owned());
+    let multimap_t = multimap_of(k.clone(), v.clone());
+    let key_ord = || vec![requirement(K, "::core::cmp::Ord")];
+    let with_value = TypeRef::callback(
+        CallbackKind::FnMut,
+        CallbackEscape::Call,
+        vec![TypeRef::shared_ref(v.clone())],
+        TypeRef::Void,
+    );
+    let with_value_mut = TypeRef::callback(
+        CallbackKind::FnMut,
+        CallbackEscape::Call,
+        vec![TypeRef::mutable_ref(v.clone())],
+        TypeRef::Void,
+    );
+    let retain_pair = TypeRef::callback(
+        CallbackKind::FnMut,
+        CallbackEscape::Call,
+        vec![
+            TypeRef::shared_ref(k.clone()),
+            TypeRef::shared_ref(v.clone()),
+        ],
+        TypeRef::Bool,
+    );
+
+    NativeTypeBinding {
+        stainless_path: "rust::MultiMap".to_owned(),
+        rust_path: "::stainless_runtime::MultiMap".to_owned(),
+        type_parameters: vec![K.to_owned(), V.to_owned()],
+        error_format: None,
+        callables: vec![
+            constructor(
+                "MultiMap",
+                vec![],
+                multimap_t.clone(),
+                RustLowering::AssociatedFunction {
+                    rust_path: "::stainless_runtime::MultiMap::new".to_owned(),
+                },
+            ),
+            method("len", Receiver::Shared, vec![], TypeRef::Usize),
+            method("key_len", Receiver::Shared, vec![], TypeRef::Usize),
+            method("is_empty", Receiver::Shared, vec![], TypeRef::Bool),
+            method("clear", Receiver::Mutable, vec![], TypeRef::Void),
+            method_with_requirements(
+                "insert",
+                Receiver::Mutable,
+                vec![
+                    Parameter::new("key", k.clone()),
+                    Parameter::new("value", v.clone()),
+                ],
+                TypeRef::Void,
+                key_ord(),
+            ),
+            method_with_requirements(
+                "contains_key",
+                Receiver::Shared,
+                vec![Parameter::new("key", TypeRef::shared_ref(k.clone()))],
+                TypeRef::Bool,
+                key_ord(),
+            ),
+            method_with_requirements(
+                "with",
+                Receiver::Shared,
+                vec![
+                    Parameter::new("key", TypeRef::shared_ref(k.clone())),
+                    Parameter::new("callback", with_value),
+                ],
+                TypeRef::Usize,
+                key_ord(),
+            ),
+            method_with_requirements(
+                "with_mut",
+                Receiver::Mutable,
+                vec![
+                    Parameter::new("key", TypeRef::shared_ref(k.clone())),
+                    Parameter::new("callback", with_value_mut),
+                ],
+                TypeRef::Usize,
+                key_ord(),
+            ),
+            method_with_requirements(
+                "remove",
+                Receiver::Mutable,
+                vec![
+                    Parameter::new("key", TypeRef::shared_ref(k.clone())),
+                    Parameter::new("value", TypeRef::shared_ref(v.clone())),
+                ],
+                TypeRef::Bool,
+                vec![
+                    requirement(K, "::core::cmp::Ord"),
+                    requirement(V, "::core::cmp::PartialEq"),
+                ],
+            ),
+            method_with_requirements(
+                "remove_all",
+                Receiver::Mutable,
+                vec![Parameter::new("key", TypeRef::shared_ref(k))],
+                TypeRef::Usize,
+                key_ord(),
+            ),
+            method_with_requirements(
+                "retain",
+                Receiver::Mutable,
+                vec![Parameter::new("predicate", retain_pair)],
+                TypeRef::Void,
+                key_ord(),
+            ),
+            method_with_requirements(
+                "clone",
+                Receiver::Shared,
+                vec![],
+                multimap_t,
                 vec![
                     requirement(K, "::core::clone::Clone"),
                     requirement(V, "::core::clone::Clone"),
@@ -1409,6 +1584,10 @@ fn queue_of(element: TypeRef) -> TypeRef {
 
 fn map_of(key: TypeRef, value: TypeRef) -> TypeRef {
     TypeRef::native("rust::Map", vec![key, value])
+}
+
+fn multimap_of(key: TypeRef, value: TypeRef) -> TypeRef {
+    TypeRef::native("rust::MultiMap", vec![key, value])
 }
 
 fn set_of(element: TypeRef) -> TypeRef {

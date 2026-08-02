@@ -1,7 +1,8 @@
 // Compiler-provided standard collection bindings. List is a doubly linked
-// list, Queue is a double-ended queue, and Map/Set retain sorted order.
+// list, Queue is a double-ended queue, and Map/MultiMap/Set retain sorted
+// key order.
 
-use rust::{List, Map, Queue, Set};
+use rust::{List, Map, MultiMap, Queue, Set};
 
 namespace samples {
 
@@ -72,6 +73,35 @@ i32 copied_and_moved_map_entries() {
         total += key + value;
     }
     return total;
+}
+
+i32 ordered_multimap_entries() {
+    MultiMap<i32, i32> values;
+    values.insert(2, 20);
+    values.insert(1, 10);
+    values.insert(2, 21);
+
+    i32 key_order = 0;
+    i32 total = 0;
+    for (const auto& [key, value] : values) {
+        key_order = key_order * 10 + key;
+        total += value;
+    }
+
+    i32 matching = 0;
+    usize match_count = values.with(
+        2,
+        [&matching](const i32& value) {
+            matching += value;
+        });
+    if (!values.remove(2, 20)) {
+        return 0;
+    }
+    values.retain([](const i32& _key, const i32& value) {
+        return value != 20;
+    });
+    return key_order + total + matching + i32(match_count)
+        + i32(values.len()) + i32(values.key_len());
 }
 
 } // namespace samples

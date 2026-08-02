@@ -52,6 +52,241 @@ where
     true
 }
 
+/// Invokes `callback` with the greatest entry inside an inclusive key range.
+pub fn btree_map_with_last_in_range<K, V, F>(
+    map: &BTreeMap<K, V>,
+    lower: &K,
+    upper: &K,
+    callback: F,
+) -> bool
+where
+    K: Ord,
+    F: FnOnce(&K, &V),
+{
+    if lower > upper {
+        return false;
+    }
+    let Some((key, value)) = map.range(lower..=upper).next_back() else {
+        return false;
+    };
+    callback(key, value);
+    true
+}
+
+/// Retains map entries accepted by a read-only, non-escaping callback.
+pub fn btree_map_retain<K, V, F>(map: &mut BTreeMap<K, V>, mut predicate: F)
+where
+    K: Ord,
+    F: FnMut(&K, &V) -> bool,
+{
+    map.retain(|key, value| predicate(key, value));
+}
+
+/// An ordered multimap of independently iterable key/value associations.
+///
+/// Stainless exposes this as `rust::MultiMap<K, V>`. Its private buckets use
+/// the same linked representation as Stainless `List<V>` while its public API
+/// presents duplicate key/value entries, never nested collections.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[allow(clippy::linkedlist)]
+pub struct MultiMap<K, V> {
+    entries: BTreeMap<K, LinkedList<V>>,
+    len: usize,
+}
+
+/// Consuming iterator for [`MultiMap`].
+///
+/// A key is cloned for each yielded association because one stored key can
+/// own multiple independently yielded values.
+#[allow(clippy::linkedlist)]
+pub struct MultiMapIntoIter<K, V> {
+    entries: std::collections::btree_map::IntoIter<K, LinkedList<V>>,
+    current_key: Option<K>,
+    current_values: std::collections::linked_list::IntoIter<V>,
+}
+
+impl<K: Clone, V> Iterator for MultiMapIntoIter<K, V> {
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(value) = self.current_values.next() {
+                let key = self
+                    .current_key
+                    .as_ref()
+                    .expect("a current multimap value always has a key")
+                    .clone();
+                return Some((key, value));
+            }
+            let (key, values) = self.entries.next()?;
+            self.current_key = Some(key);
+            self.current_values = values.into_iter();
+        }
+    }
+}
+
+impl<K: Clone, V> IntoIterator for MultiMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = MultiMapIntoIter<K, V>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        MultiMapIntoIter {
+            entries: self.entries.into_iter(),
+            current_key: None,
+            current_values: LinkedList::new().into_iter(),
+        }
+    }
+}
+
+impl<K, V> MultiMap<K, V> {
+    /// Creates an empty multimap.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            len: 0,
+        }
+    }
+
+    /// Returns the number of key/value associations.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns the number of distinct keys.
+    #[must_use]
+    pub fn key_len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns whether the multimap has no key/value associations.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Removes every association.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.len = 0;
+    }
+
+    /// Returns an iterator in ascending key and per-key insertion order.
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.entries
+            .iter()
+            .flat_map(|(key, values)| values.iter().map(move |value| (key, value)))
+    }
+
+    /// Returns a mutable value iterator in ascending key and per-key insertion
+    /// order. Keys stay immutable so their ordering cannot be invalidated.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
+        self.entries
+            .iter_mut()
+            .flat_map(|(key, values)| values.iter_mut().map(move |value| (key, value)))
+    }
+}
+
+impl<K: Ord, V> MultiMap<K, V> {
+    /// Appends one association after the existing values for `key`.
+    pub fn insert(&mut self, key: K, value: V) {
+        self.entries.entry(key).or_default().push_back(value);
+        self.len += 1;
+    }
+
+    /// Returns whether at least one value is associated with `key`.
+    #[must_use]
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.entries.contains_key(key)
+    }
+
+    /// Invokes `callback` once per association for `key` and returns its count.
+    pub fn with<F>(&self, key: &K, mut callback: F) -> usize
+    where
+        F: FnMut(&V),
+    {
+        let Some(values) = self.entries.get(key) else {
+            return 0;
+        };
+        for value in values {
+            callback(value);
+        }
+        values.len()
+    }
+
+    /// Invokes `callback` mutably once per association for `key` and returns
+    /// its count.
+    pub fn with_mut<F>(&mut self, key: &K, mut callback: F) -> usize
+    where
+        F: FnMut(&mut V),
+    {
+        let Some(values) = self.entries.get_mut(key) else {
+            return 0;
+        };
+        let count = values.len();
+        for value in values {
+            callback(value);
+        }
+        count
+    }
+
+    /// Removes every association for `key` and returns how many were removed.
+    pub fn remove_all(&mut self, key: &K) -> usize {
+        let removed = self.entries.remove(key).map_or(0, |values| values.len());
+        self.len -= removed;
+        removed
+    }
+
+    /// Removes the first association whose key and value both match.
+    pub fn remove(&mut self, key: &K, value: &V) -> bool
+    where
+        V: PartialEq,
+    {
+        let Some(values) = self.entries.get_mut(key) else {
+            return false;
+        };
+        let mut retained = LinkedList::new();
+        let mut removed = false;
+        while let Some(candidate) = values.pop_front() {
+            if !removed && candidate == *value {
+                removed = true;
+            } else {
+                retained.push_back(candidate);
+            }
+        }
+        let empty = retained.is_empty();
+        *values = retained;
+        if removed {
+            self.len -= 1;
+        }
+        if empty {
+            self.entries.remove(key);
+        }
+        removed
+    }
+
+    /// Retains associations accepted by `predicate` and removes empty keys.
+    pub fn retain<F>(&mut self, mut predicate: F)
+    where
+        F: FnMut(&K, &V) -> bool,
+    {
+        let mut retained_len = 0;
+        self.entries.retain(|key, values| {
+            let mut retained = LinkedList::new();
+            while let Some(value) = values.pop_front() {
+                if predicate(key, &value) {
+                    retained.push_back(value);
+                    retained_len += 1;
+                }
+            }
+            *values = retained;
+            !values.is_empty()
+        });
+        self.len = retained_len;
+    }
+}
+
 /// Exact-signature facade for the Rust standard library's whole-file and
 /// directory operations exposed through Stainless `rust::std::fs` bindings.
 ///
@@ -1217,7 +1452,65 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet, LinkedList, VecDeque};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{Fs, PositionedFile, Var};
+    use super::{
+        Fs, MultiMap, PositionedFile, Var, btree_map_retain, btree_map_with_last_in_range,
+    };
+
+    #[test]
+    fn ordered_map_range_callback_selects_one_predecessor() {
+        let mut values = BTreeMap::from([
+            (("alpha", 1_u32), 10),
+            (("alpha", 3_u32), 30),
+            (("beta", 1_u32), 40),
+        ]);
+        let mut selected = 0;
+        assert!(btree_map_with_last_in_range(
+            &values,
+            &("alpha", 0),
+            &("alpha", 2),
+            |_, value| selected = *value,
+        ));
+        assert_eq!(selected, 10);
+        assert!(!btree_map_with_last_in_range(
+            &values,
+            &("alpha", 4),
+            &("alpha", 2),
+            |_, _| unreachable!(),
+        ));
+
+        btree_map_retain(&mut values, |key, _| key.1 < 3);
+        assert_eq!(values.len(), 2);
+    }
+
+    #[test]
+    fn ordered_multimap_flattens_duplicate_key_associations() {
+        let mut values = MultiMap::new();
+        values.insert(2, "second-a".to_owned());
+        values.insert(1, "first".to_owned());
+        values.insert(2, "second-b".to_owned());
+
+        assert_eq!(values.len(), 3);
+        assert_eq!(values.key_len(), 2);
+        assert_eq!(
+            values
+                .iter()
+                .map(|(key, value)| (*key, value.as_str()))
+                .collect::<Vec<_>>(),
+            [(1, "first"), (2, "second-a"), (2, "second-b")]
+        );
+
+        let mut matching = Vec::new();
+        assert_eq!(values.with(&2, |value| matching.push(value.clone())), 2);
+        assert_eq!(matching, ["second-a", "second-b"]);
+
+        assert!(values.remove(&2, &"second-a".to_owned()));
+        assert!(!values.remove(&2, &"missing".to_owned()));
+        values.retain(|key, value| *key == 1 || value.ends_with('b'));
+        assert_eq!(
+            values.into_iter().collect::<Vec<_>>(),
+            [(1, "first".to_owned()), (2, "second-b".to_owned())]
+        );
+    }
 
     #[test]
     fn whole_file_io_preserves_bytes_text_and_errors() {

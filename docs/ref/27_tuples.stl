@@ -2,7 +2,7 @@
 // value types and inherit equality/ordering from every element, which makes
 // them suitable for compound keys in ordered maps and sets.
 
-use rust::{Map, String};
+use rust::{Map, String, Vec};
 
 namespace samples {
 
@@ -21,6 +21,15 @@ i32 compound_key_order() {
         order = order * 10 + value;
     }
     return order;
+}
+
+usize moved_native_tuple_element() {
+    Vec<u8> bytes;
+    bytes.push(7u8);
+    tuple<Vec<u8>, u32> key = tuple<Vec<u8>, u32>(move(bytes), 3u32);
+    Map<tuple<Vec<u8>, u32>, i32> values;
+    values.insert(move(key), 1);
+    return values.len();
 }
 
 } // namespace samples

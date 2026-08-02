@@ -217,7 +217,7 @@ constructs with direct Rust equivalents:
 - other safe Rust library types under their real names, imported through the
   reserved `rust` namespace, including `rust::Option<T>`, `rust::Result<T>`,
   `rust::Vec<T>`, `rust::String`, `rust::List<T>`, `rust::Queue<T>`,
-  `rust::Map<K, V>`, and `rust::Set<T>`;
+  `rust::Map<K, V>`, `rust::MultiMap<K, V>`, and `rust::Set<T>`;
 - compiler-native `var`, `null`, and JSON literals backed by the compact
   runtime, with checked parsing/mutation and reference-counted object/array
   identity;
@@ -642,9 +642,10 @@ through a direct reference return already proven to originate from the range's
 owner; it cannot be stored or captured independently.
 
 Range iteration is implemented for `rust::Vec<T>`, `rust::List<T>`,
-`rust::Queue<T>`, and `rust::Set<T>`. Ordered-set iteration permits shared,
-copied, and consuming bindings but rejects mutable element references because
-changing an element could invalidate the set's order. Ordered maps use C++
+`rust::Queue<T>`, `rust::Set<T>`, `rust::Map<K, V>`, and
+`rust::MultiMap<K, V>`. Ordered-set iteration permits shared, copied, and
+consuming bindings but rejects mutable element references because changing an
+element could invalidate the set's order. Ordered maps and multimaps use C++
 structured bindings:
 
 ```cpp
@@ -654,10 +655,13 @@ for (const auto& [key, value] : values) {
 ```
 
 `auto& [key, value]` permits mutation through `value` while `key` remains a
-constant reference, preserving map order. Copied and explicitly consuming map
-bindings are also supported when both component types have the required value
-semantics. Rust `String` is not implicitly treated as a character range because
-it does not implement Rust's owned `IntoIterator` API. Index-aware range syntax
+constant reference, preserving key order. A multimap yields one flat pair per
+association, including repeated keys; it does not expose its private per-key
+storage. Copied and explicitly consuming map bindings are supported when both
+component types have the required value semantics. Consuming a multimap also
+requires a cloneable key because one owned key can produce multiple flat
+pairs. Rust `String` is not implicitly treated as a character range because it
+does not implement Rust's owned `IntoIterator` API. Index-aware range syntax
 and C++ forwarding references such as `auto&&` are deferred.
 
 ### Reserved implementation identifiers
@@ -2118,9 +2122,10 @@ metadata for the supported Rust toolchain's representable `core`, `alloc`, and
 validated; it can become machine-generated when the metadata format and
 generator are mature. This is type/trait/borrow metadata, not wrapper
 implementations or a second API. Its paths and names remain Rust's except for
-the explicit ownership mapping and the `List`/`Queue`/`Map`/`Set` collection
-aliases, its version is tied to the supported Rust toolchain, and generated
-calls are revalidated by that toolchain.
+the explicit ownership mapping and the
+`List`/`Queue`/`Map`/`MultiMap`/`Set` collection aliases, its version is tied to
+the supported Rust toolchain, and generated calls are revalidated by that
+toolchain.
 
 #### Implemented `Vec`, `String`, and collection subset
 
@@ -2148,10 +2153,20 @@ The compiler crate currently registers the following source-visible APIs:
   `clone`.
 - `rust::Map<K, V>`: an ordered map backed by Rust `BTreeMap<K, V>`, with
   `Map()`, `len`, `is_empty`, `clear`, `insert`, `remove`, `contains_key`,
-  `with`, `with_mut`, `append`, `clone`, and key/value structured-binding range
-  iteration. `with(key, callback)` and `with_mut(key, callback)` perform an
-  O(log n) lookup and confine the borrowed value to one non-escaping callback,
-  avoiding a storable `Option<&V>`.
+  `with`, `with_mut`, `with_last_in_range`, `retain`, `append`, `clone`, and
+  key/value structured-binding range iteration. `with(key, callback)` and
+  `with_mut(key, callback)` perform an O(log n) lookup and confine the borrowed
+  value to one non-escaping callback, avoiding a storable `Option<&V>`.
+  `with_last_in_range(lower, upper, callback)` similarly borrows the greatest
+  entry in an inclusive range without exposing a Rust iterator.
+- `rust::MultiMap<K, V>`: an ordered multimap backed by the compact runtime's
+  B-tree with private `List<V>` buckets. `MultiMap()`, `insert`, `len`,
+  `key_len`, `is_empty`, `clear`, `contains_key`, `remove`, `remove_all`,
+  `with`, `with_mut`, `retain`, `clone`, and flat key/value range iteration are
+  available. `remove(key, value)` removes the first matching association.
+  `len()` counts associations, while `key_len()` counts distinct keys.
+  `with(key, callback)` invokes the callback once for every matching value and
+  returns the number of matches; no nested collection escapes.
 - `rust::Set<T>`: an ordered set backed by Rust `BTreeSet<T>`, with `Set()`,
   `len`, `is_empty`, `clear`, `insert`, `replace`, `remove`, `take`,
   `contains`, `append`, and `clone`.
@@ -2408,12 +2423,15 @@ only through the last valid control record and truncates incomplete or
 uncommitted tail data.
 
 The index is held in RAM and rebuilt by replaying the append-only log at open.
-It is a Stainless `Map<Vec<u8>, List<IndexEntry>>`, lowering to Rust's ordered
-`BTreeMap`. `find()` uses the map's non-escaping `with()` callback for an
-O(log n) key lookup and calls `pread_exact()` under the same shared
-`rwlock<StoreState>` guard. It never copies the index or a key's history.
-Inserts use `with_mut()` and commits, reverts, and recovery take an exclusive
-write guard.
+It is a Stainless
+`Map<tuple<Vec<u8>, u32>, Versioned<ValueLocation>>`, lowering to Rust's
+ordered `BTreeMap`. The compound key orders every logical key by version, and
+inserting the same key again within one version replaces that version's
+location. `find()` uses the map's non-escaping `with_last_in_range()` callback
+to select the greatest entry between `(key, 0)` and `(key, current_version)` in
+O(log n), then calls `pread_exact()` under the same shared
+`rwlock<StoreState>` guard. It never copies or scans the index. Commits,
+reverts, and recovery take an exclusive write guard.
 
 The crate exposes `Table<K, V>` to Rust projects. `K` implements
 `OrderedKey`, whose persistent encoding must preserve `Ord`, and `V` implements
@@ -2699,8 +2717,8 @@ let result = transpile_with_bindings(stainless_source, &bindings);
 ```
 
 `load_package_bindings` starts with compiler-owned bindings such as
-`rust::String`, `rust::Vec`, `rust::List`, `rust::Queue`, `rust::Map`, and
-`rust::Set`, then merges an optional
+`rust::String`, `rust::Vec`, `rust::List`, `rust::Queue`, `rust::Map`,
+`rust::MultiMap`, and `rust::Set`, then merges an optional
 `stainless-bindings.toml` from the supplied package root. A missing file means
 there are no package-specific bindings. `load_bindings_manifest` loads only
 one manifest file, while `parse_bindings_manifest` accepts manifest text for

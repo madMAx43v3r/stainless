@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use stainless_compiler::interop::{
-    ArgumentAdaptation, BindingError, CallStyle, CallableBinding, NativeBindings,
+    ArgumentAdaptation, BindingError, CallStyle, CallableBinding, CallbackKind, NativeBindings,
     NativeErrorFormat, NativeTypeBinding, Receiver, RustLowering, TypeRef, WrapperTarget,
     parse_bindings_manifest, standard_bindings,
 };
@@ -19,6 +19,7 @@ fn standard_registry_contains_builtin_types_in_path_order() {
         [
             "rust::List",
             "rust::Map",
+            "rust::MultiMap",
             "rust::Queue",
             "rust::Set",
             "rust::String",
@@ -158,6 +159,11 @@ fn collection_bindings_use_ordered_and_sequence_rust_representations() {
     let expected = [
         ("rust::List", "::std::collections::LinkedList", vec!["T"]),
         ("rust::Map", "::std::collections::BTreeMap", vec!["K", "V"]),
+        (
+            "rust::MultiMap",
+            "::stainless_runtime::MultiMap",
+            vec!["K", "V"],
+        ),
         ("rust::Queue", "::std::collections::VecDeque", vec!["T"]),
         ("rust::Set", "::std::collections::BTreeSet", vec!["T"]),
     ];
@@ -181,20 +187,31 @@ fn collection_bindings_use_ordered_and_sequence_rust_representations() {
 fn ordered_collections_preserve_ord_requirements() {
     let bindings = standard_bindings().unwrap();
     let map = bindings.type_by_path("rust::Map").unwrap();
+    let multimap = bindings.type_by_path("rust::MultiMap").unwrap();
     let set = bindings.type_by_path("rust::Set").unwrap();
     let k = TypeRef::Parameter("K".to_owned());
     let v = TypeRef::Parameter("V".to_owned());
     let t = TypeRef::Parameter("T".to_owned());
 
     let map_insert = map
-        .find_callable(CallStyle::Method, "insert", &[k, v.clone()])
+        .find_callable(CallStyle::Method, "insert", &[k.clone(), v.clone()])
         .unwrap();
     assert_eq!(
         map_insert.return_type,
-        TypeRef::native("rust::Option", vec![v])
+        TypeRef::native("rust::Option", vec![v.clone()])
     );
     assert_eq!(map_insert.requirements[0].parameter, "K");
     assert_eq!(map_insert.requirements[0].rust_trait, "::core::cmp::Ord");
+
+    let multimap_insert = multimap
+        .find_callable(CallStyle::Method, "insert", &[k, v])
+        .unwrap();
+    assert_eq!(multimap_insert.return_type, TypeRef::Void);
+    assert_eq!(multimap_insert.requirements[0].parameter, "K");
+    assert_eq!(
+        multimap_insert.requirements[0].rust_trait,
+        "::core::cmp::Ord"
+    );
 
     let set_insert = set
         .find_callable(CallStyle::Method, "insert", std::slice::from_ref(&t))
@@ -202,6 +219,55 @@ fn ordered_collections_preserve_ord_requirements() {
     assert_eq!(set_insert.return_type, TypeRef::Bool);
     assert_eq!(set_insert.requirements[0].parameter, "T");
     assert_eq!(set_insert.requirements[0].rust_trait, "::core::cmp::Ord");
+}
+
+#[test]
+fn ordered_map_range_and_multimap_callbacks_are_non_escaping() {
+    let bindings = standard_bindings().unwrap();
+    let map = bindings.type_by_path("rust::Map").unwrap();
+    let multimap = bindings.type_by_path("rust::MultiMap").unwrap();
+    let k = TypeRef::Parameter("K".to_owned());
+    let v = TypeRef::Parameter("V".to_owned());
+
+    let last = map
+        .find_callable(
+            CallStyle::Method,
+            "with_last_in_range",
+            &[
+                TypeRef::shared_ref(k.clone()),
+                TypeRef::shared_ref(k.clone()),
+                TypeRef::callback(
+                    CallbackKind::FnOnce,
+                    stainless_compiler::interop::CallbackEscape::Call,
+                    vec![
+                        TypeRef::shared_ref(k.clone()),
+                        TypeRef::shared_ref(v.clone()),
+                    ],
+                    TypeRef::Void,
+                ),
+            ],
+        )
+        .unwrap();
+    assert_eq!(last.return_type, TypeRef::Bool);
+    assert!(matches!(
+        last.lowering,
+        RustLowering::FunctionWithReceiver { ref rust_path }
+            if rust_path == "::stainless_runtime::btree_map_with_last_in_range"
+    ));
+
+    let with = multimap
+        .callables
+        .iter()
+        .find(|callable| callable.source_name == "with")
+        .unwrap();
+    assert_eq!(with.return_type, TypeRef::Usize);
+    assert!(matches!(
+        &with.parameters[1].ty,
+        TypeRef::Callback(callback)
+            if callback.kind == CallbackKind::FnMut
+                && callback.escape == stainless_compiler::interop::CallbackEscape::Call
+                && callback.parameters == [TypeRef::shared_ref(v)]
+    ));
 }
 
 #[test]
@@ -597,7 +663,13 @@ fn unsupported_borrowing_and_iterator_methods_are_not_exposed() {
         assert!(!string_methods.contains(unsupported));
     }
 
-    for path in ["rust::List", "rust::Map", "rust::Queue", "rust::Set"] {
+    for path in [
+        "rust::List",
+        "rust::Map",
+        "rust::MultiMap",
+        "rust::Queue",
+        "rust::Set",
+    ] {
         let methods = method_names(bindings.type_by_path(path).unwrap());
         for unsupported in ["get", "get_mut", "iter", "iter_mut", "front", "back"] {
             assert!(
