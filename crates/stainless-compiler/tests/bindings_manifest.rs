@@ -209,6 +209,70 @@ return = "i32"
 }
 
 #[test]
+fn parses_async_callable_and_callback_metadata() {
+    let bindings = parse_bindings_manifest(include_str!(
+        "../../../docs/ref/18_external_callbacks.bindings.toml"
+    ))
+    .unwrap();
+    let processor = bindings
+        .type_by_path("rust::callback_fixture::Processor")
+        .unwrap();
+    let callable = processor
+        .callables
+        .iter()
+        .find(|callable| callable.source_name == "inspect_async")
+        .unwrap();
+
+    assert!(callable.is_async);
+    assert!(matches!(
+        &callable.parameters[1].ty,
+        TypeRef::Callback(callback)
+            if callback.is_async
+                && callback.kind == CallbackKind::Fn
+                && callback.return_type.as_ref() == &TypeRef::I32
+    ));
+}
+
+#[test]
+fn rejects_async_fn_mut_and_reference_callback_parameters() {
+    let manifest = |kind: &str, parameter: &str| {
+        format!(
+            r#"schema = 1
+
+[[type]]
+dependency = "example"
+rust_path = "example::Processor"
+stainless_path = "rust::example::Processor"
+representation = "opaque"
+
+[[method]]
+receiver_type = "rust::example::Processor"
+rust_name = "apply"
+stainless_name = "apply"
+receiver = "const"
+parameters = [{{ callback = {{
+    kind = "{kind}",
+    async = true,
+    parameters = ["{parameter}"],
+    return = "i32",
+    escape = "call"
+}} }}]
+return = "i32"
+"#
+        )
+    };
+
+    let mutable = parse_bindings_manifest(&manifest("fn_mut", "i32")).unwrap_err();
+    assert!(mutable.message_text().contains("only `fn` and `fn_once`"));
+    let borrowed = parse_bindings_manifest(&manifest("fn", "const i32&")).unwrap_err();
+    assert!(
+        borrowed
+            .message_text()
+            .contains("cannot currently be references")
+    );
+}
+
+#[test]
 fn accepts_thread_callbacks_but_rejects_general_static_and_reference_returns() {
     let manifest = |escape: &str, return_type: &str| {
         format!(

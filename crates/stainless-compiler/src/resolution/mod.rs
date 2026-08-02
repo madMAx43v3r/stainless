@@ -121,11 +121,14 @@ pub struct ParameterSymbol {
 
 /// A declared Stainless function after signature resolution.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct FunctionSymbol {
     /// Stable ID used by resolved call sites.
     pub id: FunctionId,
     /// Whether member invocation is permitted outside the declaring type.
     pub is_public: bool,
+    /// Whether invoking this function produces an awaitable Rust future.
+    pub is_async: bool,
     /// Fully qualified source path.
     pub path: Vec<String>,
     /// Resolved parameters.
@@ -249,6 +252,8 @@ pub struct NativeCall {
     pub parameter_types: Vec<TypeRef>,
     /// Rust-boundary argument adaptations.
     pub adaptations: Vec<ArgumentAdaptation>,
+    /// Whether the underlying Rust invocation returns a future.
+    pub is_async: bool,
     /// Concrete return type.
     pub return_type: TypeRef,
     /// Compiler-inserted checked conversion for a native Rust `Result`.

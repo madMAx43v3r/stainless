@@ -10,6 +10,10 @@ i32 double_value(i32 value) {
     return value * 2;
 }
 
+async i32 increment_async(i32 value) {
+    return value + 1;
+}
+
 i32 external_callbacks() {
     Processor processor = Processor::new(1);
 
@@ -50,6 +54,16 @@ i32 external_callbacks() {
     // `initial` remains valid because `[count = initial]` copied it.
     return (first * 100000 + second * 10000 + third * 1000
         + stateful * 100 + fourth * 10 + fifth + initial) * 10 + sixth;
+}
+
+async i32 external_async_callbacks() {
+    Processor processor = Processor::new(1);
+    i32 bias = 2;
+    i32 first = processor.inspect_async(3, [bias](i32 value) async {
+        return increment_async(value).await + bias;
+    }).await;
+    i32 second = processor.inspect_async(4, increment_async).await;
+    return first + second;
 }
 
 } // namespace samples

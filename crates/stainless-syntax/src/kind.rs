@@ -60,6 +60,8 @@ define_syntax_kinds! {
     ContinueKw,
     ModKw,
     AsKw,
+    AsyncKw,
+    AwaitKw,
 
     LParen,
     RParen,
@@ -140,6 +142,7 @@ define_syntax_kinds! {
     ParenthesizedExpression,
     PrefixExpression,
     PostfixExpression,
+    AwaitExpression,
     BinaryExpression,
     CallExpression,
     MacroCallExpression,

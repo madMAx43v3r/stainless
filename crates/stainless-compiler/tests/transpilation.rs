@@ -1519,8 +1519,17 @@ fn cargo_validates_generated_callback_wrappers_including_thread_escape() {
         .expect("external_callbacks symbol")
         .mangled_name
         .clone();
+    let external_async_callbacks = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "external_async_callbacks"])
+        .expect("external_async_callbacks symbol")
+        .mangled_name
+        .clone();
     let hir = result.hir.as_ref().expect("callback wrapper HIR");
-    assert_eq!(hir.native_wrappers.len(), 6);
+    assert_eq!(hir.native_wrappers.len(), 7);
     let mut rust = result.rust.expect("callback wrappers should emit Rust");
     write!(
         rust,
@@ -1530,6 +1539,28 @@ fn main() {{
         __stainless_namespace_samples::{external_callbacks}(),
         8465267,
     );
+    assert_eq!(
+        block_on(__stainless_namespace_samples::{external_async_callbacks}()),
+        13,
+    );
+}}
+
+fn block_on<F: ::core::future::Future>(future: F) -> F::Output {{
+    struct Noop;
+    impl ::std::task::Wake for Noop {{
+        fn wake(self: ::std::sync::Arc<Self>) {{}}
+    }}
+    let waker = ::std::task::Waker::from(::std::sync::Arc::new(Noop));
+    let mut context = ::std::task::Context::from_waker(&waker);
+    let mut future = ::std::pin::pin!(future);
+    loop {{
+        if let ::std::task::Poll::Ready(value) =
+            ::core::future::Future::poll(future.as_mut(), &mut context)
+        {{
+            return value;
+        }}
+        ::std::thread::yield_now();
+    }}
 }}
 "
     )
@@ -1964,6 +1995,15 @@ impl Processor {
         std::thread::spawn(move || callback(self.value))
             .join()
             .unwrap()
+    }
+
+
+    pub async fn inspect_async<F, Fut>(&self, input: i32, callback: F) -> i32
+    where
+        F: Fn(i32) -> Fut,
+        Fut: Future<Output = i32>,
+    {
+        self.value + callback(input).await
     }
 }
 ",

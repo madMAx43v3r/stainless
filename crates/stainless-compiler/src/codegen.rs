@@ -100,6 +100,7 @@ impl Emitter {
             let parameter_name = identifier(&format!("__stainless_argument_{index}"))?;
             let parameter_type = match &parameter.ty {
                 hir::Type::Callback {
+                    is_async,
                     kind,
                     escape,
                     parameters,
@@ -133,11 +134,33 @@ impl Emitter {
                         };
                         generic_parameters.push(quote!(#generic));
                         let thread_bounds = (*escape == crate::interop::CallbackEscape::Thread)
-                            .then(|| quote!(+ ::core::marker::Send + 'static));
-                        callback_bounds.push(quote!(
-                            #generic: #trait_path(#(#callback_parameters),*)
-                                -> #callback_return #thread_bounds
-                        ));
+                            .then(|| {
+                                if *is_async && *kind == crate::interop::CallbackKind::Fn {
+                                    quote!(+ ::core::marker::Send + ::core::marker::Sync + 'static)
+                                } else {
+                                    quote!(+ ::core::marker::Send + 'static)
+                                }
+                            });
+                        if *is_async {
+                            let future = identifier(&format!("__StainlessFuture{index}"))?;
+                            generic_parameters.push(quote!(#future));
+                            callback_bounds.push(quote!(
+                                #generic: #trait_path(#(#callback_parameters),*)
+                                    -> #future #thread_bounds
+                            ));
+                            let future_thread_bounds = (*escape
+                                == crate::interop::CallbackEscape::Thread)
+                                .then(|| quote!(+ ::core::marker::Send + 'static));
+                            callback_bounds.push(quote!(
+                                #future: ::core::future::Future<Output = #callback_return>
+                                    #future_thread_bounds
+                            ));
+                        } else {
+                            callback_bounds.push(quote!(
+                                #generic: #trait_path(#(#callback_parameters),*)
+                                    -> #callback_return #thread_bounds
+                            ));
+                        }
                         quote!(#generic)
                     }
                 }
@@ -169,12 +192,18 @@ impl Emitter {
                 quote!((#receiver_name).#method(#(#call_arguments),*))
             }
         };
+        let call = if wrapper.is_async {
+            quote!((#call).await)
+        } else {
+            call
+        };
         let generics = (!generic_parameters.is_empty()).then(|| quote!(<#(#generic_parameters),*>));
         let where_clause =
             (!callback_bounds.is_empty()).then(|| quote!(where #(#callback_bounds),*));
+        let asyncness = wrapper.is_async.then(|| quote!(async));
         Ok(quote! {
             #[allow(non_snake_case)]
-            pub(crate) fn #name #generics (
+            pub(crate) #asyncness fn #name #generics (
                 #(#parameter_declarations),*
             ) -> #return_type
             #where_clause
@@ -492,6 +521,7 @@ impl Emitter {
         };
         let body = self.block(&function.body)?;
         let generics = explicit_lifetime.then(|| quote!(<'__stainless_borrow>));
+        let asyncness = function.is_async.then(|| quote!(async));
         Ok(quote! {
             #[allow(
                 non_snake_case,
@@ -500,7 +530,7 @@ impl Emitter {
                 unused_parens,
                 unused_variables,
             )]
-            pub fn #name #generics (#(#parameters),*) #return_signature #body
+            pub #asyncness fn #name #generics (#(#parameters),*) #return_signature #body
         })
     }
 
@@ -1307,10 +1337,12 @@ impl Emitter {
             }
             hir::Expression::Lambda {
                 captures,
+                is_async,
+                repeatable,
                 parameters,
                 body,
             } => {
-                let captures = captures
+                let capture_initializers = captures
                     .iter()
                     .map(|capture| {
                         let name = identifier(&capture.rust_name)?;
@@ -1324,10 +1356,36 @@ impl Emitter {
                     .map(|parameter| parameter_tokens(parameter, None))
                     .collect::<Result<Vec<_>, _>>()?;
                 let body = self.block(body)?;
+                let async_capture_copies = (*is_async && *repeatable)
+                    .then(|| {
+                        captures
+                            .iter()
+                            .map(|capture| {
+                                let name = identifier(&capture.rust_name)?;
+                                Ok(quote!(
+                                    let #name = ::core::clone::Clone::clone(&#name);
+                                ))
+                            })
+                            .collect::<Result<Vec<_>, String>>()
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                let closure = if *is_async {
+                    quote!(move |#(#parameters),*| {
+                        #(#async_capture_copies)*
+                        async move #body
+                    })
+                } else {
+                    quote!(move |#(#parameters),*| #body)
+                };
                 Ok(quote!({
-                    #(#captures)*
-                    move |#(#parameters),*| #body
+                    #(#capture_initializers)*
+                    #closure
                 }))
+            }
+            hir::Expression::Await(expression) => {
+                let expression = self.expression(expression)?;
+                Ok(quote!((#expression).await))
             }
             hir::Expression::FunctionItem { modules, function } => {
                 let target = if modules.is_empty() {

@@ -108,6 +108,7 @@ ast_node!(JsonMember, JsonMember);
 ast_node!(FieldExpression, FieldExpression);
 ast_node!(IndexExpression, IndexExpression);
 ast_node!(LambdaExpression, LambdaExpression);
+ast_node!(AwaitExpression, AwaitExpression);
 ast_node!(CaptureList, CaptureList);
 ast_node!(LambdaCapture, LambdaCapture);
 ast_node!(ErrorNode, Error);
@@ -361,6 +362,7 @@ pub enum Expression {
     Field(FieldExpression),
     Index(IndexExpression),
     Lambda(LambdaExpression),
+    Await(AwaitExpression),
     Error(ErrorNode),
 }
 
@@ -382,6 +384,7 @@ impl AstNode for Expression {
                 | SyntaxKind::FieldExpression
                 | SyntaxKind::IndexExpression
                 | SyntaxKind::LambdaExpression
+                | SyntaxKind::AwaitExpression
                 | SyntaxKind::Error
         )
     }
@@ -412,6 +415,7 @@ impl AstNode for Expression {
             SyntaxKind::FieldExpression => FieldExpression::cast(syntax).map(Self::Field),
             SyntaxKind::IndexExpression => IndexExpression::cast(syntax).map(Self::Index),
             SyntaxKind::LambdaExpression => LambdaExpression::cast(syntax).map(Self::Lambda),
+            SyntaxKind::AwaitExpression => AwaitExpression::cast(syntax).map(Self::Await),
             SyntaxKind::Error => ErrorNode::cast(syntax).map(Self::Error),
             _ => None,
         }
@@ -433,6 +437,7 @@ impl AstNode for Expression {
             Self::Field(node) => node.syntax(),
             Self::Index(node) => node.syntax(),
             Self::Lambda(node) => node.syntax(),
+            Self::Await(node) => node.syntax(),
             Self::Error(node) => node.syntax(),
         }
     }
@@ -715,6 +720,11 @@ macro_rules! function_accessors {
             pub fn is_const(&self) -> bool {
                 token(self.syntax(), SyntaxKind::ConstKw).is_some()
             }
+
+            #[must_use]
+            pub fn is_async(&self) -> bool {
+                token(self.syntax(), SyntaxKind::AsyncKw).is_some()
+            }
         }
     };
 }
@@ -767,6 +777,14 @@ impl Function {
         match self {
             Self::Definition(node) => node.is_const(),
             Self::Declaration(node) => node.is_const(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_async(&self) -> bool {
+        match self {
+            Self::Definition(node) => node.is_async(),
+            Self::Declaration(node) => node.is_async(),
         }
     }
 
@@ -1230,8 +1248,20 @@ impl LambdaExpression {
     }
 
     #[must_use]
+    pub fn is_async(&self) -> bool {
+        token(self.syntax(), SyntaxKind::AsyncKw).is_some()
+    }
+
+    #[must_use]
     pub fn body(&self) -> Option<Block> {
         child(self.syntax())
+    }
+}
+
+impl AwaitExpression {
+    #[must_use]
+    pub fn operand(&self) -> Option<Expression> {
+        expression_children(self.syntax()).next()
     }
 }
 

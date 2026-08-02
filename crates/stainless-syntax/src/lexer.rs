@@ -122,6 +122,10 @@ enum RawToken {
     ModKw,
     #[token("as")]
     AsKw,
+    #[token("async")]
+    AsyncKw,
+    #[token("await")]
+    AwaitKw,
 
     #[token("::")]
     ColonColon,
@@ -256,6 +260,8 @@ impl From<RawToken> for SyntaxKind {
             RawToken::ContinueKw => Self::ContinueKw,
             RawToken::ModKw => Self::ModKw,
             RawToken::AsKw => Self::AsKw,
+            RawToken::AsyncKw => Self::AsyncKw,
+            RawToken::AwaitKw => Self::AwaitKw,
             RawToken::LParen => Self::LParen,
             RawToken::RParen => Self::RParen,
             RawToken::LBrace => Self::LBrace,

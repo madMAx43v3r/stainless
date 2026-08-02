@@ -90,3 +90,21 @@ parameters = [
     } },
 ]
 return = "i32"
+
+[[method]]
+receiver_type = "rust::callback_fixture::Processor"
+rust_name = "inspect_async"
+stainless_name = "inspect_async"
+receiver = "const"
+async = true
+parameters = [
+    "i32",
+    { callback = {
+        kind = "fn",
+        async = true,
+        parameters = ["i32"],
+        return = "i32",
+        escape = "call",
+    } },
+]
+return = "i32"

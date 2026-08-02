@@ -179,7 +179,7 @@
       "patterns": [
         {
           "name": "keyword.control.stainless",
-          "match": "\\b(?:return|if|else|for|while|break|continue|try|catch|throw)\\b"
+          "match": "\\b(?:return|if|else|for|while|break|continue|try|catch|throw|await)\\b"
         },
         {
           "name": "keyword.control.exception.stainless",
@@ -191,7 +191,7 @@
         },
         {
           "name": "storage.modifier.stainless",
-          "match": "\\b(?:const|mutable|public|private|sealed)\\b"
+          "match": "\\b(?:async|const|mutable|public|private|sealed)\\b"
         },
         {
           "name": "keyword.operator.word.stainless",

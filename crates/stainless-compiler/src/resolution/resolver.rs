@@ -112,6 +112,8 @@ struct FunctionContext {
     handled_throws: Vec<Vec<StructId>>,
     current_catch: Option<StructId>,
     is_lambda: bool,
+    is_async: bool,
+    awaiting_call: Option<Span>,
 }
 
 #[derive(Clone, Debug)]
@@ -1044,6 +1046,25 @@ impl Resolver<'_> {
             .collect::<Vec<_>>();
         let mut return_type = self.resolve_type(&function.return_type, &type_namespace, false);
         self.reject_bare_interface_type(&return_type, function.return_type.span, "return value");
+        if function.is_async && return_type.is_reference() {
+            self.push(
+                "RES123",
+                "async functions cannot currently return references".to_owned(),
+                function.return_type.span,
+            );
+        }
+        if function.is_async
+            && owner.is_some_and(|owner| {
+                self.model.structs[owner.0].kind == ast::UserTypeKind::Interface
+            })
+        {
+            self.push(
+                "RES123",
+                "async interface methods are deferred; use a Rust async callback boundary"
+                    .to_owned(),
+                function.span,
+            );
+        }
         let throws = self.resolve_exception_set(&function.throws, &type_namespace, function.span);
         if return_type == TypeRef::Void
             && let Some(receiver) = &receiver
@@ -1081,6 +1102,7 @@ impl Resolver<'_> {
             let duplicate_definition = existing.has_definition && function.body.is_some();
             let different_receiver = existing.receiver != receiver;
             let different_throws = existing.throws != throws;
+            let different_async = existing.is_async != function.is_async;
             if same_passing_modes {
                 if different_return_type {
                     self.push(
@@ -1119,6 +1141,16 @@ impl Resolver<'_> {
                         function.span,
                     );
                 }
+                if different_async {
+                    self.push(
+                        "RES123",
+                        format!(
+                            "declarations of `{}` disagree on `async`",
+                            display_path(&path)
+                        ),
+                        function.span,
+                    );
+                }
             } else {
                 self.push(
                     "RES003",
@@ -1152,6 +1184,7 @@ impl Resolver<'_> {
         self.model.functions.push(FunctionSymbol {
             id,
             is_public: function.is_public,
+            is_async: function.is_async,
             path: path.clone(),
             parameters,
             return_type,
@@ -1257,6 +1290,8 @@ impl Resolver<'_> {
             handled_throws: Vec::new(),
             current_catch: None,
             is_lambda: false,
+            is_async: false,
+            awaiting_call: None,
         };
         let slots = self.constructor_slots(symbol.structure);
         let mut explicit = BTreeMap::<usize, &ast::ConstructorInitializer>::new();
@@ -1333,6 +1368,8 @@ impl Resolver<'_> {
             handled_throws: Vec::new(),
             current_catch: None,
             is_lambda: false,
+            is_async: false,
+            awaiting_call: None,
         };
         if let Some(body) = &constructor.body {
             self.resolve_block(body, &mut context, false);
@@ -1359,6 +1396,8 @@ impl Resolver<'_> {
                 handled_throws: Vec::new(),
                 current_catch: None,
                 is_lambda: false,
+                is_async: false,
+                awaiting_call: None,
             };
             let mut initializations = Vec::new();
             for (rust_name, ty) in self.constructor_slots(symbol.structure) {
@@ -1742,6 +1781,8 @@ impl Resolver<'_> {
             handled_throws: Vec::new(),
             current_catch: None,
             is_lambda: false,
+            is_async: symbol.is_async,
+            awaiting_call: None,
         };
         if let Some(body) = &function.body {
             self.resolve_block(body, &mut context, false);
@@ -2640,6 +2681,15 @@ impl Resolver<'_> {
             ExpressionKind::Call { callee, arguments } => {
                 let (info, call) =
                     self.resolve_call(callee, arguments, expected, expression.span, context);
+                if call.as_ref().is_some_and(|call| self.call_is_async(call))
+                    && context.awaiting_call != Some(expression.span)
+                {
+                    self.push(
+                        "RES123",
+                        "an async call must be followed by `.await`".to_owned(),
+                        expression.span,
+                    );
+                }
                 (info, call, None)
             }
             ExpressionKind::MacroCall { callee, arguments } => (
@@ -2688,12 +2738,14 @@ impl Resolver<'_> {
                 captures,
                 parameters,
                 is_mutable,
+                is_async,
                 body,
             } => (
                 self.resolve_lambda(
                     captures,
                     parameters,
                     *is_mutable,
+                    *is_async,
                     body,
                     expected,
                     expression.span,
@@ -2702,6 +2754,36 @@ impl Resolver<'_> {
                 None,
                 None,
             ),
+            ExpressionKind::Await(operand) => {
+                if !context.is_async {
+                    self.push(
+                        "RES123",
+                        "`.await` is only allowed inside an async function or async lambda"
+                            .to_owned(),
+                        expression.span,
+                    );
+                }
+                let direct_span = awaited_call_span(operand);
+                let previous = std::mem::replace(&mut context.awaiting_call, direct_span);
+                let info = self.resolve_expression(operand, expected, context);
+                context.awaiting_call = previous;
+                let is_async_call = direct_span.is_some_and(|span| {
+                    self.model
+                        .calls
+                        .iter()
+                        .rev()
+                        .find(|call| call.span == span)
+                        .is_some_and(|call| self.call_is_async(call))
+                });
+                if !is_async_call {
+                    self.push(
+                        "RES123",
+                        "`.await` requires a direct async Stainless or Rust call".to_owned(),
+                        expression.span,
+                    );
+                }
+                (info, None, None)
+            }
             ExpressionKind::Error => (error_info(), None, None),
         };
         if let Some(call) = &call {
@@ -2826,12 +2908,14 @@ impl Resolver<'_> {
     ) -> ExpressionInfo {
         let (parameters, return_type) = callable_signature(expected)
             .expect("named function conversion is only requested for callable expectations");
+        let expected_async = matches!(expected, TypeRef::Callback(callback) if callback.is_async);
         let signature_candidates = self
             .function_candidates(path, &context.namespace)
             .into_iter()
             .filter(|id| {
                 let function = &self.model.functions[id.0];
                 function.receiver.is_none()
+                    && function.is_async == expected_async
                     && function
                         .parameters
                         .iter()
@@ -2893,6 +2977,7 @@ impl Resolver<'_> {
         captures: &[ast::LambdaCapture],
         parameters: &[ast::Parameter],
         is_mutable: bool,
+        is_async: bool,
         body: &ast::Block,
         expected: Option<&TypeRef>,
         span: Span,
@@ -2906,7 +2991,14 @@ impl Resolver<'_> {
             );
             return error_info();
         };
-        let (callback_parameters, callback_return, stored_kind, callback_escape) = match expected {
+        let (
+            callback_parameters,
+            callback_return,
+            stored_kind,
+            callback_escape,
+            callback_kind,
+            expected_async,
+        ) = match expected {
             TypeRef::Callback(callback) => {
                 if callback.escape == crate::interop::CallbackEscape::Static {
                     self.push(
@@ -2918,6 +3010,7 @@ impl Resolver<'_> {
                 }
                 if callback.escape == crate::interop::CallbackEscape::Thread
                     && callback.kind != CallbackKind::FnOnce
+                    && !callback.is_async
                 {
                     self.push(
                         "RES115",
@@ -2938,6 +3031,8 @@ impl Resolver<'_> {
                     callback.return_type.as_ref(),
                     None,
                     Some(callback.escape),
+                    Some(callback.kind),
+                    callback.is_async,
                 )
             }
             TypeRef::Function(function) => {
@@ -2954,6 +3049,8 @@ impl Resolver<'_> {
                     function.return_type.as_ref(),
                     Some(function.kind),
                     None,
+                    None,
+                    false,
                 )
             }
             _ => {
@@ -2965,6 +3062,25 @@ impl Resolver<'_> {
                 return error_info();
             }
         };
+        if is_async != expected_async {
+            self.push(
+                "RES123",
+                if expected_async {
+                    "this Rust callback parameter requires an `async` lambda".to_owned()
+                } else {
+                    "an async lambda requires an async Rust callback parameter".to_owned()
+                },
+                span,
+            );
+        }
+        if is_async && is_mutable {
+            self.push(
+                "RES123",
+                "async `mutable` callbacks are not supported; use an async `fn` or `fn_once` callback"
+                    .to_owned(),
+                span,
+            );
+        }
 
         let mut lambda_scope = BTreeMap::new();
         let mut resolved_captures = Vec::new();
@@ -3030,6 +3146,14 @@ impl Resolver<'_> {
                     ))
                 }
                 LambdaCaptureKind::Borrow => {
+                    if is_async && callback_kind == Some(CallbackKind::Fn) {
+                        self.push(
+                            "RES123",
+                            "a repeatable async callback must own its captures".to_owned(),
+                            capture.span,
+                        );
+                        continue;
+                    }
                     if callback_escape == Some(crate::interop::CallbackEscape::Thread) {
                         self.push(
                             "RES115",
@@ -3101,6 +3225,19 @@ impl Resolver<'_> {
                             capture.span,
                         );
                     }
+                    if is_async
+                        && callback_kind == Some(CallbackKind::Fn)
+                        && !is_copyable(&captured_ty)
+                    {
+                        self.push(
+                            "RES123",
+                            format!(
+                                "repeatable async capture `{}` must be copyable so each invocation can own its future state",
+                                capture.name
+                            ),
+                            capture.span,
+                        );
+                    }
                     self.validate_value_use(
                         &captured_ty,
                         &actual,
@@ -3129,6 +3266,21 @@ impl Resolver<'_> {
                     "RES115",
                     format!(
                         "thread capture `{}` has non-`Send` type `{}`",
+                        capture.name,
+                        display_type(&captured_ty)
+                    ),
+                    capture.span,
+                );
+            }
+            if is_async
+                && callback_kind == Some(CallbackKind::Fn)
+                && callback_escape == Some(crate::interop::CallbackEscape::Thread)
+                && !self.thread_sync(&captured_ty)
+            {
+                self.push(
+                    "RES115",
+                    format!(
+                        "repeatable threaded async capture `{}` has non-`Sync` type `{}`",
                         capture.name,
                         display_type(&captured_ty)
                     ),
@@ -3211,6 +3363,8 @@ impl Resolver<'_> {
             handled_throws: Vec::new(),
             current_catch: None,
             is_lambda: true,
+            is_async,
+            awaiting_call: None,
         };
         self.resolve_block(body, &mut context, false);
 
@@ -6089,6 +6243,7 @@ impl Resolver<'_> {
                 .iter()
                 .map(|parameter| parameter.adaptation)
                 .collect(),
+            is_async: candidate.callable.is_async,
             return_type: candidate.return_type.clone(),
             result_adaptation,
             lowering: candidate.callable.lowering,
@@ -7467,6 +7622,18 @@ impl Resolver<'_> {
         });
     }
 
+    fn call_is_async(&self, call: &ResolvedCall) -> bool {
+        match &call.target {
+            CallTarget::Stainless(id) | CallTarget::InterfaceMethod(id) => self
+                .model
+                .functions
+                .get(id.0)
+                .is_some_and(|function| function.is_async),
+            CallTarget::Native(native) => native.is_async,
+            CallTarget::Constructor(_) | CallTarget::Intrinsic(_) => false,
+        }
+    }
+
     fn rust_error_message(&self, ty: &TypeRef) -> RustErrorMessage {
         let display = match canonical_ref(ty) {
             TypeRef::Bool
@@ -7576,16 +7743,19 @@ fn substitute(ty: &TypeRef, substitutions: &BTreeMap<String, TypeRef>) -> TypeRe
                 .map(|argument| substitute(argument, substitutions))
                 .collect(),
         },
-        TypeRef::Callback(callback) => TypeRef::callback(
-            callback.kind,
-            callback.escape,
-            callback
+        TypeRef::Callback(callback) => {
+            let parameters = callback
                 .parameters
                 .iter()
                 .map(|parameter| substitute(parameter, substitutions))
-                .collect(),
-            substitute(&callback.return_type, substitutions),
-        ),
+                .collect();
+            let return_type = substitute(&callback.return_type, substitutions);
+            if callback.is_async {
+                TypeRef::async_callback(callback.kind, callback.escape, parameters, return_type)
+            } else {
+                TypeRef::callback(callback.kind, callback.escape, parameters, return_type)
+            }
+        }
         TypeRef::Function(function) => TypeRef::function(
             function.kind,
             function
@@ -8043,6 +8213,14 @@ fn callable_signature(ty: &TypeRef) -> Option<(&[TypeRef], &TypeRef)> {
     }
 }
 
+fn awaited_call_span(expression: &Expression) -> Option<Span> {
+    match &expression.kind {
+        ExpressionKind::Call { .. } => Some(expression.span),
+        ExpressionKind::Parenthesized(inner) => awaited_call_span(inner),
+        _ => None,
+    }
+}
+
 fn contains_move_only_storage(ty: &TypeRef) -> bool {
     match ty {
         TypeRef::Mutex(_)
@@ -8351,6 +8529,7 @@ fn source_uses_exceptions(source: &SourceFile) -> bool {
             | ExpressionKind::Literal(_)
             | ExpressionKind::Error => false,
             ExpressionKind::Parenthesized(inner)
+            | ExpressionKind::Await(inner)
             | ExpressionKind::Prefix { operand: inner, .. }
             | ExpressionKind::Postfix { operand: inner, .. } => expression_uses_exceptions(inner),
             ExpressionKind::Binary { left, right, .. } => {

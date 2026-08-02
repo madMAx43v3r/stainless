@@ -254,6 +254,7 @@ fn invalid_generated_wrapper_metadata_is_rejected_before_lowering() {
         style,
         receiver,
         parameters: vec![],
+        is_async: false,
         return_type: TypeRef::Bool,
         rust_result_error: None,
         return_borrow: None,

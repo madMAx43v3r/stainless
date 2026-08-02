@@ -701,6 +701,7 @@ impl Analyzer<'_> {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn expression(&mut self, expression: &ast::Expression, usage: Usage) -> Option<BindingId> {
         match &expression.kind {
             ExpressionKind::Name(path) => {
@@ -722,7 +723,9 @@ impl Analyzer<'_> {
                 }
                 None
             }
-            ExpressionKind::Parenthesized(inner) => self.expression(inner, usage),
+            ExpressionKind::Parenthesized(inner) | ExpressionKind::Await(inner) => {
+                self.expression(inner, usage)
+            }
             ExpressionKind::Prefix { operator, operand } => {
                 self.expression(
                     operand,
@@ -1753,6 +1756,7 @@ impl UseCollector {
             | ExpressionKind::Literal(_)
             | ExpressionKind::Error => {}
             ExpressionKind::Parenthesized(inner)
+            | ExpressionKind::Await(inner)
             | ExpressionKind::Prefix { operand: inner, .. }
             | ExpressionKind::Postfix { operand: inner, .. } => self.expression(inner),
             ExpressionKind::Binary { left, right, .. } => {

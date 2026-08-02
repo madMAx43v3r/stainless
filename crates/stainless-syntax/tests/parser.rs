@@ -246,6 +246,27 @@ fn parses_explicit_capture_lambdas_losslessly() {
 }
 
 #[test]
+fn parses_async_functions_lambdas_and_await_losslessly() {
+    let source = r"async i32 load(i32 value) {
+    return run([value](i32 input) async {
+        return fetch(input).await + value;
+    }).await;
+}
+";
+    let parsed = parse(source);
+    let root = parsed.syntax();
+    let lambda = root
+        .descendants()
+        .find_map(stainless_syntax::ast::LambdaExpression::cast)
+        .expect("async lambda");
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(root.to_string(), source);
+    assert!(lambda.is_async());
+    assert_eq!(count_kind(&root, SyntaxKind::AwaitExpression), 2);
+}
+
+#[test]
 fn rejects_borrowed_lambda_capture_initializers() {
     let source = "void invalid(i32 value) { apply([&value = move(value)]() {}); }";
     let parsed = parse(source);

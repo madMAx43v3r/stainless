@@ -4,8 +4,8 @@ use crate::Diagnostic;
 use crate::ast::{self, ExpressionKind, ForClause, Item, StatementKind};
 use crate::hir;
 use crate::interop::{
-    ArgumentAdaptation, PointerKind, Receiver, RustLowering, StoredFunctionKind, TypeRef,
-    VAR_TYPE_PATH,
+    ArgumentAdaptation, CallbackKind, PointerKind, Receiver, RustLowering, StoredFunctionKind,
+    TypeRef, VAR_TYPE_PATH,
 };
 use crate::resolution::{
     CallTarget, CallbackTarget, FunctionSymbol, Intrinsic, LambdaCaptureMode, NativeCall,
@@ -631,6 +631,7 @@ impl Lowerer<'_> {
             source_path,
             module_path: structure.path[..structure.path.len().saturating_sub(1)].to_vec(),
             rust_name: symbol.mangled_name.clone(),
+            is_async: false,
             parameters,
             return_type: lowered_type,
             throws: throwing,
@@ -740,6 +741,7 @@ impl Lowerer<'_> {
             source_path: symbol.path.clone(),
             module_path: function_module_path(symbol, self.semantics),
             rust_name: symbol.mangled_name.clone(),
+            is_async: symbol.is_async,
             parameters,
             return_type,
             throws: throwing,
@@ -1622,8 +1624,19 @@ impl Lowerer<'_> {
                 captures,
                 parameters,
                 is_mutable,
+                is_async,
                 body,
-            } => self.lower_lambda(expression.span, captures, parameters, *is_mutable, body)?,
+            } => self.lower_lambda(
+                expression.span,
+                captures,
+                parameters,
+                *is_mutable,
+                *is_async,
+                body,
+            )?,
+            ExpressionKind::Await(operand) => {
+                self.lower_expression(operand, ExpressionMode::Value)?
+            }
             ExpressionKind::Error => {
                 self.push(
                     "HIR003",
@@ -1651,6 +1664,7 @@ impl Lowerer<'_> {
         syntax_captures: &[ast::LambdaCapture],
         syntax_parameters: &[ast::Parameter],
         is_mutable: bool,
+        is_async: bool,
         body: &ast::Block,
     ) -> Option<hir::Expression> {
         let callback = self.semantics.callback(span)?;
@@ -1728,6 +1742,11 @@ impl Lowerer<'_> {
 
         let lambda = hir::Expression::Lambda {
             captures: lowered_captures,
+            is_async,
+            repeatable: matches!(
+                &callback.ty,
+                TypeRef::Callback(callback) if callback.kind == CallbackKind::Fn
+            ),
             parameters,
             body: lowered_body?,
         };
@@ -1887,13 +1906,18 @@ impl Lowerer<'_> {
                         )?,
                     );
                 }
-                Some(hir::Expression::FunctionCall {
+                let invocation = hir::Expression::FunctionCall {
                     modules: function_module_path(function, self.semantics)
                         .iter()
                         .map(|name| module_name(name))
                         .collect(),
                     function: function.mangled_name.clone(),
                     arguments: lowered_arguments,
+                };
+                Some(if function.is_async {
+                    hir::Expression::Await(Box::new(invocation))
+                } else {
+                    invocation
                 })
             }
             CallTarget::InterfaceMethod(id) => {
@@ -1932,10 +1956,15 @@ impl Lowerer<'_> {
                         self.lower_bound_expression(argument, &parameter.ty)
                     })
                     .collect::<Option<Vec<_>>>()?;
-                Some(hir::Expression::InterfaceCall {
+                let invocation = hir::Expression::InterfaceCall {
                     receiver: Box::new(lowered_receiver),
                     method: function.mangled_name.clone(),
                     arguments: lowered_arguments,
+                };
+                Some(if function.is_async {
+                    hir::Expression::Await(Box::new(invocation))
+                } else {
+                    invocation
                 })
             }
             CallTarget::Constructor(id) => {
@@ -1966,6 +1995,11 @@ impl Lowerer<'_> {
             }
             CallTarget::Native(native) => {
                 let native_call = self.lower_native_call(native, callee, arguments, call.span)?;
+                let native_call = if native.is_async {
+                    hir::Expression::Await(Box::new(native_call))
+                } else {
+                    native_call
+                };
                 if let Some(adaptation) = native.result_adaptation {
                     Some(hir::Expression::UnwrapRustResult {
                         expression: Box::new(native_call),
@@ -2539,6 +2573,7 @@ impl Lowerer<'_> {
             target: target.clone(),
             receiver,
             parameters,
+            is_async: native.is_async,
             return_type: self.lower_type(&native.return_type, span)?,
         };
         if let Some(previous) = self.native_wrappers.get(wrapper_name) {
@@ -2638,6 +2673,7 @@ impl Lowerer<'_> {
                 }
             }
             TypeRef::Callback(callback) => hir::Type::Callback {
+                is_async: callback.is_async,
                 kind: callback.kind,
                 escape: callback.escape,
                 parameters: callback

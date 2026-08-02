@@ -31,6 +31,8 @@ pub struct NativeWrapper {
     pub receiver: Option<NativeWrapperReceiver>,
     /// Concrete wrapper parameters.
     pub parameters: Vec<NativeWrapperParameter>,
+    /// Whether the wrapped Rust callable returns a future.
+    pub is_async: bool,
     /// Concrete wrapper return type.
     pub return_type: Type,
 }
@@ -179,6 +181,8 @@ pub struct Function {
     pub module_path: Vec<String>,
     /// Deterministically mangled Rust function name.
     pub rust_name: String,
+    /// Whether this emits as a Rust `async fn`.
+    pub is_async: bool,
     /// Function parameters.
     pub parameters: Vec<Parameter>,
     /// Resolved return type.
@@ -220,6 +224,8 @@ pub enum Type {
     },
     /// A contextual callback used only as a generated-wrapper parameter.
     Callback {
+        /// Whether invocation returns a future.
+        is_async: bool,
         /// Required Rust closure trait or function-pointer representation.
         kind: CallbackKind,
         /// Callback lifetime/thread retention contract.
@@ -717,11 +723,17 @@ pub enum Expression {
     Lambda {
         /// Capture bindings materialized in source order.
         captures: Vec<LambdaCapture>,
+        /// Whether this closure returns a Rust future.
+        is_async: bool,
+        /// Whether an async closure may be invoked more than once.
+        repeatable: bool,
         /// Explicitly typed closure parameters.
         parameters: Vec<Parameter>,
         /// Closure body.
         body: Block,
     },
+    /// Await the enclosed Rust future.
+    Await(Box<Expression>),
     /// A resolved Stainless function item used as a callback.
     FunctionItem {
         /// Namespace modules containing the target.

@@ -230,6 +230,7 @@ fn lower_function(function: &cst::Function) -> ast::Function {
     let function_span = span(function);
     ast::Function {
         is_public: true,
+        is_async: function.is_async(),
         name: path_from_tokens(function.name_tokens()),
         return_type: function
             .return_type()
@@ -629,9 +630,15 @@ fn lower_expression(expression: cst::Expression) -> Expression {
                 captures,
                 parameters,
                 is_mutable: lambda.is_mutable(),
+                is_async: lambda.is_async(),
                 body: lower_block(&body),
             }
         }
+        cst::Expression::Await(await_expression) => await_expression
+            .operand()
+            .map_or(ExpressionKind::Error, |operand| {
+                ExpressionKind::Await(Box::new(lower_expression(operand)))
+            }),
         cst::Expression::Error(_) => ExpressionKind::Error,
     };
 

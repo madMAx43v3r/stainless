@@ -167,6 +167,8 @@ pub struct Field {
 pub struct Function {
     /// Whether this member is publicly callable.
     pub is_public: bool,
+    /// Whether calling this function produces an awaitable Rust future.
+    pub is_async: bool,
     /// Possibly qualified source name.
     pub name: Path,
     /// Declared return type.
@@ -558,9 +560,13 @@ pub enum ExpressionKind {
         parameters: Vec<Parameter>,
         /// Whether by-value captures may be mutated by the body.
         is_mutable: bool,
+        /// Whether the lambda produces a Rust future when invoked.
+        is_async: bool,
         /// Lambda body.
         body: Block,
     },
+    /// Await an async Stainless or compiler-described Rust call.
+    Await(Box<Expression>),
     /// Malformed syntax retained after recovery.
     Error,
 }

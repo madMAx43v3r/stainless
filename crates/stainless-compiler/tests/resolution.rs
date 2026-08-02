@@ -772,7 +772,52 @@ fn resolves_external_callback_fixture_with_its_manifest() {
         "{:?}",
         analysis.diagnostics
     );
-    assert_eq!(analysis.semantics.callbacks.len(), 7);
+    assert_eq!(analysis.semantics.callbacks.len(), 9);
+}
+
+#[test]
+fn async_calls_require_matching_callbacks_async_bodies_and_await() {
+    let bindings = callback_bindings();
+    let analysis = analyze_with_bindings(
+        r"use rust::callback_fixture::Processor;
+
+i32 outside_async_body() {
+    Processor processor = Processor::new(1);
+    return processor.inspect_async(1, [](i32 value) async {
+        return value;
+    }).await;
+}
+
+async i32 missing_await() {
+    Processor processor = Processor::new(1);
+    return processor.inspect_async(1, [](i32 value) async {
+        return value;
+    });
+}
+
+async i32 await_sync_call() {
+    Processor processor = Processor::new(1);
+    return processor.inspect(1, [](i32 value) {
+        return value;
+    }).await;
+}
+
+async i32 mismatched_callback() {
+    Processor processor = Processor::new(1);
+    return processor.inspect_async(1, [](i32 value) {
+        return value;
+    }).await;
+}
+",
+        &bindings,
+    );
+
+    let async_diagnostics = analysis
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "RES123")
+        .count();
+    assert!(async_diagnostics >= 4, "{:?}", analysis.diagnostics);
 }
 
 #[test]

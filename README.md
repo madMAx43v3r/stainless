@@ -146,7 +146,7 @@ implemented:
   manifest.
 - [`18_external_callbacks.stl`](docs/ref/18_external_callbacks.stl) —
   explicit-copy, borrow, and move captures passed to Rust `Fn`, `FnMut`,
-  `FnOnce`, and function-pointer parameters selected by
+  `FnOnce`, function-pointer, and async callback parameters selected by
   [`18_external_callbacks.bindings.toml`](docs/ref/18_external_callbacks.bindings.toml).
 - [`19_stored_functions.stl`](docs/ref/19_stored_functions.stl) — non-null
   shared `function<R(A...)>` and unique move-only
@@ -245,7 +245,7 @@ because they have no direct, general safe-Rust translation:
 - unchecked exceptions, platform exception ABIs, and catching Rust panics;
 - C-style variadics, `goto`, and unrestricted unions.
 
-Destructors/`Drop`, operator traits, FFI, async code, and other less-direct
+Destructors/`Drop`, operator traits, FFI, general-purpose futures/tasks, and other less-direct
 mappings are deferred. Each needs a written source-level semantic model and
 lowering rule before it becomes part of the language.
 
@@ -278,6 +278,11 @@ The first compiler uses the following conservative grammar policy:
   call returns. A thread callback must be `FnOnce`, `Send`, and `'static`, so
   borrowed captures are rejected and every owned capture is checked for
   thread transfer.
+- Async is initially a Rust-interop boundary feature. `async` functions and
+  trailing-`async` lambdas may use postfix `.await`, but only on direct async
+  Stainless calls or Rust calls marked `async = true` in binding metadata.
+  Futures are not source-level types: they cannot be named, stored, or spawned
+  directly.
 - User-defined destructors and `Drop` implementations are not accepted.
   Generated Rust automatically drops locals and fields using Rust scope and
   field-declaration order. Resource-owning native Rust fields retain their
@@ -2446,6 +2451,56 @@ The `escape = "thread"` contract requires `fn_once` and generates
 `Send + 'static` Rust bounds after Stainless verifies the owned captures.
 General `escape = "static"` storage remains reserved and rejected.
 
+An async Rust callable uses `async = true` on its function or method entry. Its
+declared `return` is the future's output type, not a Stainless-visible future
+type. An async callback independently uses `async = true` inside its callback
+table:
+
+```toml
+[[method]]
+receiver_type = "rust::callback_fixture::Processor"
+rust_name = "inspect_async"
+stainless_name = "inspect_async"
+receiver = "const"
+async = true
+parameters = [
+    "i32",
+    { callback = {
+        kind = "fn",
+        async = true,
+        parameters = ["i32"],
+        return = "i32",
+        escape = "call",
+    } },
+]
+return = "i32"
+```
+
+The matching Stainless syntax keeps the C++ lambda shape while using Rust's
+postfix await spelling:
+
+```cpp
+async i32 increment_async(i32 value) {
+    return value + 1;
+}
+
+async i32 process_async(Processor& processor, i32 bias) {
+    return processor.inspect_async(3, [bias](i32 value) async {
+        return increment_async(value).await + bias;
+    }).await;
+}
+```
+
+`.await` is rejected outside an async function or async lambda, on a synchronous
+call, and when an async call is used without `.await`. Initial async callback
+metadata supports `kind = "fn"` and `kind = "fn_once"`; `fn_mut`, function
+pointers, reference parameters, stored future values, general task spawning,
+and async interfaces are deferred. A repeatable async `fn` callback must own
+copyable captures because every invocation needs independent owned future
+state. A one-shot async `fn_once` callback may move non-copy state. Generated
+wrappers express callbacks as `Fn(...) -> Fut`/`FnOnce(...) -> Fut` with a
+`Future<Output = R>` bound, so Cargo checks the real Rust API signature.
+
 The callback expression is contextually typed by that exact manifest
 signature. It may be a uniquely resolved exact, non-throwing Stainless
 free-function overload or a C++-style lambda with typed parameters and an
@@ -2771,6 +2826,8 @@ The initial `stainless_compiler::resolution` pass now provides:
   function targets, inferred initializer-capture types, mutable by-value
   captures, `Fn`/`FnMut`/`FnOnce`/`fn` invocation contracts, and
   `escape = "thread"` ownership bounds;
+- boundary-only async functions and callbacks, direct postfix `.await`, async
+  manifest callables, and generated `Future<Output = R>` callback bounds;
 - owning stored callables with exact signature checking, shared `function`
   copies, move-only `function_mut`, owned captures, mutable invocation, and
   non-throwing named-function conversion;
@@ -2847,6 +2904,9 @@ the accepted subset it now:
 - emits deterministic private wrappers for manifest-selected external
   associated functions and methods, with argument adaptations and generic
   callback trait bounds inside the Cargo-checked boundary;
+- emits Stainless async functions as Rust `async fn`, awaits only
+  compiler-proven async calls, and lowers repeatable async lambda captures to
+  per-invocation owned copies;
 - lowers stored `function` to `Arc<dyn Fn + 'static>` and `function_mut` to
   `Box<dyn FnMut + 'static>`, with explicit trait-object coercions and direct
   invocation;
@@ -2868,8 +2928,9 @@ namespace-scope storage, `require(...)`, dynamic interface erasure through weak
 and atomic pointer forms, ownership through fields, full path-sensitive
 loop-exit precision, general borrow
 lifetimes, member/native returned-reference provenance, and generalized native
-trait satisfaction remain unresolved. Thread-transferable, throwing,
-reference-returning, async, and FFI callback forms are also deferred.
+trait satisfaction remain unresolved. General retained async callbacks,
+async-`FnMut`, throwing/reference-returning async callbacks, source-level
+future values, task executors, and FFI callback forms are also deferred.
 Cargo metadata validation and source-mapped wrapper diagnostics are not
 implemented.
 Struct member functions and constructors currently lower to deterministically
@@ -3018,9 +3079,10 @@ recorded inline so implemented syntax is not confused with planned work:
    access labels, aggregates, typed
    local bindings, struct constructors and initializer lists, blocks, calls,
    arithmetic, `return`, `throw`, `try`/`catch`, `if`/`else`, and classic/range
-   `for` loops plus typed lambdas with explicit, initializer, and mutable
-   captures and stored callable signatures into a Rowan CST with recoverable
-   error nodes, plus compiler-native JSON arrays and objects.
+   `for` loops plus typed lambdas with explicit, initializer, mutable, and
+   async forms, direct postfix `.await`, and stored callable signatures into a
+   Rowan CST with recoverable error nodes, plus compiler-native JSON arrays and
+   objects.
 4. **In progress:** typed CST views, AST lowering, structural validation, the
    initial single-file name/type/call resolver, move/borrow analysis, and
    resolved HIR construction are implemented for the function/control-flow and
@@ -3038,7 +3100,8 @@ recorded inline so implemented syntax is not confused with planned work:
    `regex::Regex::new` and `Regex::is_match` entries and call/thread callback
    entries are generated. Cargo rejects a deliberately stale target and checks
    the emitted `Fn`, `FnMut`, `FnOnce`, function-pointer, and
-   `Send + 'static` signatures. Next, validate the selected dependency and
+   `Send + 'static` signatures, plus an async `Fn(...) -> Future` callback and
+   awaited Rust method. Next, validate the selected dependency and
    feature set through Cargo metadata.
 6. **In progress:** structured Rust emission, formatting, and representative
    generated-file compile/behavior tests are implemented, including a Cargo

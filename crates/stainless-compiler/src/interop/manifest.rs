@@ -105,6 +105,7 @@ pub fn parse_bindings_manifest(source: &str) -> Result<NativeBindings, ManifestE
                 },
             },
             &known_arity,
+            entry.is_async,
         )?;
         attach_callable(&mut types, &type_indices, &owner, callable)?;
     }
@@ -145,6 +146,7 @@ pub fn parse_bindings_manifest(source: &str) -> Result<NativeBindings, ManifestE
                 },
             },
             &known_arity,
+            entry.is_async,
         )?;
         attach_callable(&mut types, &type_indices, &entry.receiver_type, callable)?;
     }
@@ -231,6 +233,7 @@ fn manifest_read_error(path: &Path, error: &std::io::Error) -> ManifestError {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn callable(
     source_name: String,
     style: CallStyle,
@@ -239,6 +242,7 @@ fn callable(
     return_source: &str,
     lowering: RustLowering,
     known_arity: &BTreeMap<String, usize>,
+    is_async: bool,
 ) -> Result<CallableBinding, ManifestError> {
     let parameters = parameter_sources
         .iter()
@@ -274,11 +278,17 @@ fn callable(
         })
         .collect::<Result<Vec<_>, ManifestError>>()?;
     let return_type = parse_type(return_source, known_arity)?;
+    if is_async && (return_type.is_reference() || return_type.contains_reference()) {
+        return Err(ManifestError::message(
+            "async Rust callables cannot currently return references",
+        ));
+    }
     Ok(CallableBinding {
         source_name,
         style,
         receiver,
         parameters,
+        is_async,
         return_type,
         rust_result_error: None,
         return_borrow: None,
@@ -326,7 +336,26 @@ fn parse_callback_type(
             "callback return references are not supported",
         ));
     }
-    Ok(TypeRef::callback(kind, escape, parameters, return_type))
+    if callback.is_async {
+        if matches!(kind, CallbackKind::FnMut | CallbackKind::FunctionPointer) {
+            return Err(ManifestError::message(
+                "async callbacks currently support only `fn` and `fn_once`",
+            ));
+        }
+        if parameters.iter().any(TypeRef::is_reference) {
+            return Err(ManifestError::message(
+                "async callback parameters cannot currently be references",
+            ));
+        }
+        Ok(TypeRef::async_callback(
+            kind,
+            escape,
+            parameters,
+            return_type,
+        ))
+    } else {
+        Ok(TypeRef::callback(kind, escape, parameters, return_type))
+    }
 }
 
 fn parse_type(
@@ -703,6 +732,8 @@ struct ManifestFunction {
     rust_path: String,
     stainless_path: String,
     parameters: Vec<ManifestParameter>,
+    #[serde(default, rename = "async")]
+    is_async: bool,
     #[serde(rename = "return")]
     return_type: String,
 }
@@ -715,6 +746,8 @@ struct ManifestMethod {
     stainless_name: String,
     receiver: ManifestReceiver,
     parameters: Vec<ManifestParameter>,
+    #[serde(default, rename = "async")]
+    is_async: bool,
     #[serde(rename = "return")]
     return_type: String,
 }
@@ -742,6 +775,8 @@ struct ManifestCallback {
     #[serde(rename = "return")]
     return_type: String,
     escape: ManifestCallbackEscape,
+    #[serde(default, rename = "async")]
+    is_async: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]

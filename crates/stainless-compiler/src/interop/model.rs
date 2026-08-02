@@ -134,6 +134,24 @@ impl TypeRef {
         return_type: Self,
     ) -> Self {
         Self::Callback(Box::new(CallbackType {
+            is_async: false,
+            kind,
+            escape,
+            parameters,
+            return_type: Box::new(return_type),
+        }))
+    }
+
+    /// Creates a non-storable callback whose invocation returns a Rust future.
+    #[must_use]
+    pub fn async_callback(
+        kind: CallbackKind,
+        escape: CallbackEscape,
+        parameters: Vec<Self>,
+        return_type: Self,
+    ) -> Self {
+        Self::Callback(Box::new(CallbackType {
+            is_async: true,
             kind,
             escape,
             parameters,
@@ -263,6 +281,8 @@ pub enum CallbackEscape {
 /// Exact signature and ownership contract for one contextual callback.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CallbackType {
+    /// Whether invocation returns a Rust future with `return_type` as its output.
+    pub is_async: bool,
     /// Required Rust invocation trait or function-pointer representation.
     pub kind: CallbackKind,
     /// Callback retention policy.
@@ -403,6 +423,8 @@ pub struct CallableBinding {
     pub receiver: Option<Receiver>,
     /// Exact Stainless-visible parameters.
     pub parameters: Vec<Parameter>,
+    /// Whether the Rust callable returns a future which Stainless must await.
+    pub is_async: bool,
     /// Stainless-visible return type.
     pub return_type: TypeRef,
     /// Native error type when Rust returns `Result<return_type, E>` and the
@@ -597,16 +619,29 @@ impl NativeBindings {
 
 fn callback_resolution_type(ty: &TypeRef) -> TypeRef {
     match ty {
-        TypeRef::Callback(callback) => TypeRef::callback(
-            CallbackKind::Fn,
-            CallbackEscape::Call,
-            callback
+        TypeRef::Callback(callback) => {
+            let parameters = callback
                 .parameters
                 .iter()
                 .map(callback_resolution_type)
-                .collect(),
-            callback_resolution_type(&callback.return_type),
-        ),
+                .collect();
+            let return_type = callback_resolution_type(&callback.return_type);
+            if callback.is_async {
+                TypeRef::async_callback(
+                    CallbackKind::Fn,
+                    CallbackEscape::Call,
+                    parameters,
+                    return_type,
+                )
+            } else {
+                TypeRef::callback(
+                    CallbackKind::Fn,
+                    CallbackEscape::Call,
+                    parameters,
+                    return_type,
+                )
+            }
+        }
         TypeRef::Function(function) => TypeRef::function(
             function.kind,
             function

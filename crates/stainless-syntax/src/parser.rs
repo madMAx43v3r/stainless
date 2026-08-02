@@ -101,7 +101,9 @@ impl Parser<'_> {
                 Some(SyntaxKind::Identifier) if self.looks_like_constructor() => {
                     self.parse_constructor();
                 }
-                Some(SyntaxKind::Identifier | SyntaxKind::ConstKw) => self.parse_function(),
+                Some(SyntaxKind::Identifier | SyntaxKind::ConstKw | SyntaxKind::AsyncKw) => {
+                    self.parse_function();
+                }
                 Some(_) => {
                     self.recover_item("expected a namespace, use declaration, type, or function");
                 }
@@ -195,7 +197,11 @@ impl Parser<'_> {
                 self.bump();
                 self.expect(SyntaxKind::Colon, "expected `:` after access specifier");
                 self.finish();
-            } else if self.at_any(&[SyntaxKind::Identifier, SyntaxKind::ConstKw]) {
+            } else if self.at_any(&[
+                SyntaxKind::Identifier,
+                SyntaxKind::ConstKw,
+                SyntaxKind::AsyncKw,
+            ]) {
                 if interface {
                     self.parse_function();
                 } else if self.looks_like_constructor() {
@@ -339,6 +345,7 @@ impl Parser<'_> {
     fn parse_function(&mut self) {
         let node_kind = self.function_node_kind();
         self.start(node_kind);
+        self.eat(SyntaxKind::AsyncKw);
         self.parse_type(false);
         self.parse_qualified_name("expected a function name");
         self.parse_parameter_list();
@@ -783,6 +790,7 @@ impl Parser<'_> {
         self.parse_capture_list();
         self.parse_parameter_list();
         self.eat(SyntaxKind::MutableKw);
+        self.eat(SyntaxKind::AsyncKw);
         self.parse_block();
         self.finish();
     }
@@ -869,6 +877,14 @@ impl Parser<'_> {
                     self.finish();
                 }
                 Some(SyntaxKind::Dot) => {
+                    if self.nth(1) == Some(SyntaxKind::AwaitKw) {
+                        self.builder
+                            .start_node_at(checkpoint, SyntaxKind::AwaitExpression.into());
+                        self.bump();
+                        self.bump();
+                        self.finish();
+                        continue;
+                    }
                     self.builder
                         .start_node_at(checkpoint, SyntaxKind::FieldExpression.into());
                     self.bump();
