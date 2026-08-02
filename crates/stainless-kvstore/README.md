@@ -31,6 +31,13 @@ Built-in implementations cover booleans, fixed-width integers, `String`,
 for their own structs. Compound tuple keys use escaped, self-delimiting
 segments so their encoded order is lexicographic.
 
+The Stainless implementation itself now exercises user generics with
+`Versioned<T>`; the in-memory index stores
+`List<Versioned<ValueLocation>>`. Keys and application values still cross the
+persistence boundary as bytes because arbitrary Rust `Codec` implementations
+can fail. The Rust `Table<K, V>` facade performs that fallible conversion and
+keeps the Stainless WAL engine independent of application-specific codecs.
+
 ```rust
 use stainless_kvstore::Table;
 

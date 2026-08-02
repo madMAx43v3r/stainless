@@ -42,6 +42,8 @@ pub struct StructSymbol {
     pub id: StructId,
     /// Fully qualified source path.
     pub path: Vec<String>,
+    /// Invariant generic type parameters in declaration order.
+    pub type_parameters: Vec<String>,
     /// Struct, class, or interface source semantics.
     pub kind: crate::ast::UserTypeKind,
     /// Optional single data base.

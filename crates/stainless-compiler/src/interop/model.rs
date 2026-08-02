@@ -85,16 +85,22 @@ pub enum TypeRef {
     Struct {
         /// Fully qualified Stainless path.
         path: Vec<String>,
+        /// Invariant generic arguments.
+        arguments: Vec<TypeRef>,
     },
     /// A move-only Stainless class with a concrete Rust representation.
     Class {
         /// Fully qualified Stainless path.
         path: Vec<String>,
+        /// Invariant generic arguments.
+        arguments: Vec<TypeRef>,
     },
     /// A behavior-only Stainless interface represented dynamically as a Rust trait object.
     Interface {
         /// Fully qualified Stainless path.
         path: Vec<String>,
+        /// Invariant generic arguments.
+        arguments: Vec<TypeRef>,
     },
     /// A non-null borrow used as a parameter, local, or direct return.
     Reference {
@@ -202,9 +208,11 @@ impl TypeRef {
     #[must_use]
     pub fn contains_reference(&self) -> bool {
         match self {
-            Self::Native { arguments, .. } | Self::Tuple(arguments) => {
-                arguments.iter().any(Self::contains_reference)
-            }
+            Self::Native { arguments, .. }
+            | Self::Struct { arguments, .. }
+            | Self::Class { arguments, .. }
+            | Self::Interface { arguments, .. }
+            | Self::Tuple(arguments) => arguments.iter().any(Self::contains_reference),
             Self::Pointer { target, .. }
             | Self::Mutex(target)
             | Self::RwLock(target)
@@ -223,6 +231,17 @@ impl TypeRef {
     #[must_use]
     pub const fn is_callback(&self) -> bool {
         matches!(self, Self::Callback(_))
+    }
+
+    /// Returns generic arguments carried by a user-defined type instance.
+    #[must_use]
+    pub fn user_arguments(&self) -> Option<&[Self]> {
+        match self {
+            Self::Struct { arguments, .. }
+            | Self::Class { arguments, .. }
+            | Self::Interface { arguments, .. } => Some(arguments),
+            _ => None,
+        }
     }
 }
 

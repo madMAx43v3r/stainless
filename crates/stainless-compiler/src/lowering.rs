@@ -20,6 +20,7 @@ pub fn lower(source: &cst::SourceFile) -> ast::SourceFile {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn lower_item(item: cst::Item) -> Item {
     match item {
         cst::Item::Namespace(namespace) => Item::Namespace(ast::Namespace {
@@ -36,6 +37,10 @@ fn lower_item(item: cst::Item) -> Item {
         cst::Item::Struct(definition) => lower_struct_like_definition(
             ast::UserTypeKind::Struct,
             definition.name_token(),
+            definition
+                .generic_parameters()
+                .map(|token| token.text().to_owned())
+                .collect(),
             definition.is_sealed(),
             definition.has_access_specifier(),
             definition.bases().collect(),
@@ -65,6 +70,10 @@ fn lower_item(item: cst::Item) -> Item {
         cst::Item::Class(definition) => lower_struct_like_definition(
             ast::UserTypeKind::Class,
             definition.name_token(),
+            definition
+                .generic_parameters()
+                .map(|token| token.text().to_owned())
+                .collect(),
             definition.is_sealed(),
             definition.has_access_specifier(),
             definition.bases().collect(),
@@ -94,6 +103,10 @@ fn lower_item(item: cst::Item) -> Item {
         cst::Item::Interface(definition) => lower_struct_like_definition(
             ast::UserTypeKind::Interface,
             definition.name_token(),
+            definition
+                .generic_parameters()
+                .map(|token| token.text().to_owned())
+                .collect(),
             definition.is_sealed(),
             definition.has_access_specifier(),
             definition.bases().collect(),
@@ -127,6 +140,7 @@ fn lower_item(item: cst::Item) -> Item {
 fn lower_struct_like_definition(
     kind: ast::UserTypeKind,
     name: Option<stainless_syntax::SyntaxToken>,
+    type_parameters: Vec<String>,
     is_sealed: bool,
     has_access_specifier: bool,
     bases: Vec<cst::TypeReference>,
@@ -138,6 +152,7 @@ fn lower_struct_like_definition(
     Item::Struct(ast::Struct {
         kind,
         name: name.map_or_else(missing_name, |token| token.text().to_owned()),
+        type_parameters,
         bases: bases.iter().map(lower_type).collect(),
         is_sealed,
         has_access_specifier,
@@ -182,6 +197,10 @@ fn lower_constructor(constructor: &cst::Constructor) -> ast::Constructor {
     ast::Constructor {
         is_public: true,
         name: path_from_tokens(constructor.name_tokens()),
+        owner_arguments: constructor
+            .owner_generic_arguments()
+            .map(|argument| lower_type(&argument))
+            .collect(),
         parameters: constructor
             .parameter_list()
             .into_iter()
@@ -232,6 +251,10 @@ fn lower_function(function: &cst::Function) -> ast::Function {
         is_public: true,
         is_async: function.is_async(),
         name: path_from_tokens(function.name_tokens()),
+        owner_arguments: function
+            .owner_generic_arguments()
+            .map(|argument| lower_type(&argument))
+            .collect(),
         return_type: function
             .return_type()
             .map_or_else(|| error_type(function_span), |ty| lower_type(&ty)),

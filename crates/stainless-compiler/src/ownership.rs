@@ -254,8 +254,11 @@ impl Analyzer<'_> {
                 self.loop_depth,
             ));
         }
-        self.return_borrow =
-            return_borrow_parameter(&symbol).and_then(|index| parameter_ids.get(index).copied());
+        self.return_borrow = if symbol.return_type.is_reference() && symbol.receiver.is_some() {
+            self.receiver_binding
+        } else {
+            return_borrow_parameter(&symbol).and_then(|index| parameter_ids.get(index).copied())
+        };
         self.returns_reference = symbol.return_type.is_reference();
         self.exceptions.clear();
         if let Some(body) = &function.body {
@@ -279,12 +282,30 @@ impl Analyzer<'_> {
             .map_or(TypeRef::Error, |symbol| match symbol.kind {
                 ast::UserTypeKind::Struct => TypeRef::Struct {
                     path: symbol.path.clone(),
+                    arguments: symbol
+                        .type_parameters
+                        .iter()
+                        .cloned()
+                        .map(TypeRef::Parameter)
+                        .collect(),
                 },
                 ast::UserTypeKind::Class => TypeRef::Class {
                     path: symbol.path.clone(),
+                    arguments: symbol
+                        .type_parameters
+                        .iter()
+                        .cloned()
+                        .map(TypeRef::Parameter)
+                        .collect(),
                 },
                 ast::UserTypeKind::Interface => TypeRef::Interface {
                     path: symbol.path.clone(),
+                    arguments: symbol
+                        .type_parameters
+                        .iter()
+                        .cloned()
+                        .map(TypeRef::Parameter)
+                        .collect(),
                 },
             });
         self.state.declare(

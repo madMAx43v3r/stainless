@@ -99,6 +99,43 @@ Derived::Derived(i32 value) : Base(value) {
 }
 
 #[test]
+fn parses_generic_structs_classes_and_qualified_definitions() {
+    let source = r"struct Box<T> {
+    Box(T value);
+    const T& get() const;
+    T value;
+};
+
+Box<T>::Box(T value) : value(move(value)) {
+}
+
+const T& Box<T>::get() const {
+    return value;
+}
+
+class Holder<T, U> {
+public:
+    Holder(T first, U second);
+private:
+    T first;
+    U second;
+};
+";
+    let parsed = parse(source);
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(parsed.syntax().to_string(), source);
+    assert_eq!(
+        count_kind(&parsed.syntax(), SyntaxKind::GenericParameterList),
+        2
+    );
+    assert_eq!(
+        count_kind(&parsed.syntax(), SyntaxKind::GenericArgumentList),
+        2
+    );
+}
+
+#[test]
 fn deleted_constructor_requires_the_contextual_delete_spelling() {
     let parsed = parse("struct Value { Value() = unavailable; };\n");
 

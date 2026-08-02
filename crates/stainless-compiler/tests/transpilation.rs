@@ -237,6 +237,10 @@ fn transpiles_and_compiles_resolved_reference_programs() {
             include_str!("../../../docs/ref/25_collections.stl"),
         ),
         ("tuples", include_str!("../../../docs/ref/27_tuples.stl")),
+        (
+            "generic-types",
+            include_str!("../../../docs/ref/28_generic_types.stl"),
+        ),
     ] {
         let result = transpile(source);
         assert!(
@@ -1053,6 +1057,84 @@ i32 constructor_result() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn generic_structs_and_classes_transpile_with_concrete_substitution() {
+    let source = r"namespace samples {
+
+struct Box<T> {
+    T value;
+    Box(T value);
+    const T& get() const;
+};
+
+Box<T>::Box(T value) : value(move(value)) {
+}
+
+const T& Box<T>::get() const {
+    return value;
+}
+
+class Holder<T> {
+public:
+    Holder(T value);
+    const T& get() const;
+private:
+    T value;
+};
+
+Holder<T>::Holder(T value) : value(move(value)) {
+}
+
+const T& Holder<T>::get() const {
+    return value;
+}
+
+i32 generic_result() {
+    Box<i32> boxed = Box<i32>(20);
+    Box<i32> copied = boxed;
+    Holder<i32> holder = Holder<i32>(22);
+    return copied.get() + holder.get();
+}
+
+}
+";
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let function = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "generic_result"])
+        .expect("generic_result symbol")
+        .mangled_name
+        .clone();
+    let mut rust = result.rust.expect("generics should emit Rust");
+    assert!(rust.contains("pub struct Box<T>"), "{rust}");
+    assert!(rust.contains("pub struct Holder<T>"), "{rust}");
+    write!(
+        rust,
+        "\nfn main() {{ assert_eq!(__stainless_namespace_samples::{function}(), 42); }}\n"
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("user-generics", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .expect("generated generic program should run");
+    assert!(
+        output.status.success(),
+        "status: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    remove_temporary_parent(&binary);
 }
 
 #[test]

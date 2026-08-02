@@ -257,12 +257,24 @@ The first compiler uses the following conservative grammar policy:
 
 - Source identifiers are ASCII and match `[A-Za-z_][A-Za-z0-9_]*`. Unicode
   identifiers may be added later without affecting type semantics.
-- User generic type declarations use `struct Name<T>`, `class Name<T>`, or
-  `interface Name<T>`. Parameters are invariant, type arguments are explicit,
-  and only type parameters are supported. Default arguments, non-type
-  parameters, specialization, generic free functions, and user-written trait
-  bounds are deferred. Compiler metadata may still expose supported generic
-  Rust types and methods such as `Vec<T>`.
+- User generic type declarations currently use `struct Name<T>` or
+  `class Name<T>`. Parameters are invariant, type arguments are explicit, and
+  only type parameters are supported. Generic fields, constructors, member
+  signatures, out-of-body definitions, nested type instances, references, and
+  concrete construction are implemented. An out-of-body member repeats the
+  owner parameters in C++ position, for example
+  `const T& Box<T>::get() const`. The repeated arguments must exactly name the
+  declared parameters in order.
+- Generic arguments must be storable value types; `void`, references, and
+  reference-bearing types are rejected. A generic struct receives Rust's
+  conditional derived `Clone` implementation, so a concrete instance has
+  Stainless struct-copy semantics only when all of its stored concrete values
+  can be cloned. Classes remain move-only for every instantiation.
+- Generic interfaces, inheritance or interface implementation by a generic
+  type, default type arguments, non-type parameters, specialization, generic
+  free functions, and user-written trait bounds are deferred. Compiler
+  metadata may still expose supported generic Rust types and methods such as
+  `Vec<T>`.
 - `sealed` is valid after `interface` and prevents inheritance or
   implementation outside the module. It is also valid after `struct` and
   prevents use as a data base outside the module. Every class already forbids
@@ -310,8 +322,8 @@ An `interface` is behavior-only:
 - Interface inheritance lowers directly to Rust supertraits.
 - An interface may inherit only from other interfaces.
 - A struct or class may implement one or more interfaces.
-- Interface calls on a concrete struct, or through a generic constrained by an
-  interface, always use static dispatch. A struct cannot be converted to an
+- Interface calls on a concrete struct always use static dispatch. Generic
+  interface constraints are deferred. A struct cannot be converted to an
   interface reference or owning interface pointer.
 - Interface calls may use static dispatch when the concrete class is known or
   Rust trait-object dispatch when a class is converted to a dynamic interface

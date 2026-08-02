@@ -248,6 +248,12 @@ impl Emitter {
 
     fn structure(structure: &hir::Struct) -> Result<TokenStream, String> {
         let name = identifier(&structure.rust_name)?;
+        let type_parameters = structure
+            .type_parameters
+            .iter()
+            .map(|parameter| identifier(parameter))
+            .collect::<Result<Vec<_>, _>>()?;
+        let generics = (!type_parameters.is_empty()).then(|| quote!(<#(#type_parameters),*>));
         let fields = structure
             .fields
             .iter()
@@ -335,7 +341,7 @@ impl Emitter {
         Ok(quote! {
             #derive
             #[allow(non_snake_case)]
-            pub struct #name {
+            pub struct #name #generics {
                 #(#fields),*
             }
             #json_conversion
@@ -520,7 +526,17 @@ impl Emitter {
             quote!(-> #return_type)
         };
         let body = self.block(&function.body)?;
-        let generics = explicit_lifetime.then(|| quote!(<'__stainless_borrow>));
+        let type_parameters = function
+            .type_parameters
+            .iter()
+            .map(|parameter| identifier(parameter))
+            .collect::<Result<Vec<_>, _>>()?;
+        let generics = match (explicit_lifetime, type_parameters.is_empty()) {
+            (false, true) => None,
+            (true, true) => Some(quote!(<'__stainless_borrow>)),
+            (false, false) => Some(quote!(<#(#type_parameters),*>)),
+            (true, false) => Some(quote!(<'__stainless_borrow, #(#type_parameters),*>)),
+        };
         let asyncness = function.is_async.then(|| quote!(async));
         Ok(quote! {
             #[allow(
@@ -1351,7 +1367,20 @@ impl Emitter {
                 Ok(receiver)
             }
             hir::Expression::Aggregate { ty, fields } => {
-                let ty = type_tokens(ty, None)?;
+                let ty = match ty {
+                    hir::Type::User {
+                        rust_path,
+                        arguments,
+                    } if !arguments.is_empty() => {
+                        let path = path(rust_path)?;
+                        let arguments = arguments
+                            .iter()
+                            .map(|argument| type_tokens(argument, None))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        quote!(#path::<#(#arguments),*>)
+                    }
+                    _ => type_tokens(ty, None)?,
+                };
                 let fields = fields
                     .iter()
                     .map(|(name, value)| {
@@ -1713,13 +1742,39 @@ fn type_tokens(ty: &hir::Type, lifetime: Option<&syn::Lifetime>) -> Result<Token
             let target = type_tokens(target, None)?;
             Ok(quote!(::std::thread::ScopedJoinHandle<'_, #target>))
         }
-        hir::Type::User { rust_path } => {
+        hir::Type::User {
+            rust_path,
+            arguments,
+        } => {
             let path = path(rust_path)?;
-            Ok(quote!(#path))
+            let arguments = arguments
+                .iter()
+                .map(|argument| type_tokens(argument, None))
+                .collect::<Result<Vec<_>, _>>()?;
+            if arguments.is_empty() {
+                Ok(quote!(#path))
+            } else {
+                Ok(quote!(#path<#(#arguments),*>))
+            }
         }
-        hir::Type::Interface { rust_path } => {
+        hir::Type::Interface {
+            rust_path,
+            arguments,
+        } => {
             let path = path(rust_path)?;
-            Ok(quote!(dyn #path + ::core::marker::Send + ::core::marker::Sync))
+            let arguments = arguments
+                .iter()
+                .map(|argument| type_tokens(argument, None))
+                .collect::<Result<Vec<_>, _>>()?;
+            if arguments.is_empty() {
+                Ok(quote!(dyn #path + ::core::marker::Send + ::core::marker::Sync))
+            } else {
+                Ok(quote!(dyn #path<#(#arguments),*> + ::core::marker::Send + ::core::marker::Sync))
+            }
+        }
+        hir::Type::Parameter(name) => {
+            let name = identifier(name)?;
+            Ok(quote!(#name))
         }
         hir::Type::Reference { mutable, target } => {
             let interface = matches!(target.as_ref(), hir::Type::Interface { .. });

@@ -243,6 +243,7 @@ impl Lowerer<'_> {
                 ty: self.lower_type(
                     &TypeRef::Struct {
                         path: base_symbol.path.clone(),
+                        arguments: Vec::new(),
                     },
                     span,
                 )?,
@@ -297,9 +298,14 @@ impl Lowerer<'_> {
         Some(hir::Struct {
             source_path: symbol.path.clone(),
             rust_name: rust_name.to_owned(),
+            type_parameters: symbol.type_parameters.clone(),
             copyable: symbol.kind == ast::UserTypeKind::Struct,
             fields,
-            json_fields: self.lower_json_struct_fields(symbol),
+            json_fields: symbol
+                .type_parameters
+                .is_empty()
+                .then(|| self.lower_json_struct_fields(symbol))
+                .flatten(),
             is_exception,
             exception_base_field,
             interface_implementations,
@@ -374,7 +380,7 @@ impl Lowerer<'_> {
                 }
                 _ => false,
             },
-            TypeRef::Struct { path } => self
+            TypeRef::Struct { path, .. } => self
                 .semantics
                 .structs
                 .iter()
@@ -521,12 +527,9 @@ impl Lowerer<'_> {
             None => Vec::new(),
         };
         let struct_type = match structure.kind {
-            ast::UserTypeKind::Struct => TypeRef::Struct {
-                path: structure.path.clone(),
-            },
-            ast::UserTypeKind::Class => TypeRef::Class {
-                path: structure.path.clone(),
-            },
+            ast::UserTypeKind::Struct | ast::UserTypeKind::Class => {
+                resolved_structure_type(&structure)
+            }
             ast::UserTypeKind::Interface => {
                 self.push(
                     "HIR016",
@@ -631,6 +634,7 @@ impl Lowerer<'_> {
             source_path,
             module_path: structure.path[..structure.path.len().saturating_sub(1)].to_vec(),
             rust_name: symbol.mangled_name.clone(),
+            type_parameters: structure.type_parameters.clone(),
             is_async: false,
             parameters,
             return_type: lowered_type,
@@ -682,20 +686,9 @@ impl Lowerer<'_> {
                     rust_name: "__stainless_self".to_owned(),
                     ty: hir::Type::Reference {
                         mutable: receiver.mutable,
-                        target: Box::new(self.lower_type(
-                            &match structure.kind {
-                                ast::UserTypeKind::Struct => TypeRef::Struct {
-                                    path: structure.path.clone(),
-                                },
-                                ast::UserTypeKind::Class => TypeRef::Class {
-                                    path: structure.path.clone(),
-                                },
-                                ast::UserTypeKind::Interface => TypeRef::Interface {
-                                    path: structure.path.clone(),
-                                },
-                            },
-                            function.span,
-                        )?),
+                        target: Box::new(
+                            self.lower_type(&resolved_structure_type(structure), function.span)?,
+                        ),
                     },
                     mutable: false,
                 },
@@ -741,6 +734,11 @@ impl Lowerer<'_> {
             source_path: symbol.path.clone(),
             module_path: function_module_path(symbol, self.semantics),
             rust_name: symbol.mangled_name.clone(),
+            type_parameters: symbol
+                .receiver
+                .as_ref()
+                .and_then(|receiver| self.semantics.structure(receiver.structure))
+                .map_or_else(Vec::new, |structure| structure.type_parameters.clone()),
             is_async: symbol.is_async,
             parameters,
             return_type,
@@ -1149,9 +1147,10 @@ impl Lowerer<'_> {
             }
             let projection_target = actual_target.map(automatic_pointee_type);
             let projection = match (projection_target, canonical_ref(expected_target)) {
-                (Some(TypeRef::Struct { path: derived }), TypeRef::Struct { path: base }) => {
-                    self.struct_projection(derived, base).unwrap_or_default()
-                }
+                (
+                    Some(TypeRef::Struct { path: derived, .. }),
+                    TypeRef::Struct { path: base, .. },
+                ) => self.struct_projection(derived, base).unwrap_or_default(),
                 _ => Vec::new(),
             };
             let projected = !projection.is_empty();
@@ -1891,11 +1890,33 @@ impl Lowerer<'_> {
                     );
                     return None;
                 };
+                let substitutions = function
+                    .receiver
+                    .as_ref()
+                    .and_then(|receiver| {
+                        let structure = self.semantics.structure(receiver.structure)?;
+                        let syntax_receiver = match callee {
+                            Some(ast::Expression {
+                                kind: ExpressionKind::Field { receiver, .. },
+                                ..
+                            }) => receiver.as_ref(),
+                            _ => return None,
+                        };
+                        let actual = self.semantics.expression(syntax_receiver.span)?;
+                        Some(user_type_substitutions(
+                            structure,
+                            automatic_pointee_type(canonical_ref(&actual.ty)),
+                        ))
+                    })
+                    .unwrap_or_default();
                 let mut lowered_arguments = arguments
                     .iter()
                     .zip(&function.parameters)
                     .map(|(argument, parameter)| {
-                        self.lower_bound_expression(argument, &parameter.ty)
+                        self.lower_bound_expression(
+                            argument,
+                            &substitute_user_type(&parameter.ty, &substitutions),
+                        )
                     })
                     .collect::<Option<Vec<_>>>()?;
                 if let Some(receiver) = &function.receiver {
@@ -1923,15 +1944,11 @@ impl Lowerer<'_> {
                             &TypeRef::Reference {
                                 mutable: receiver.mutable,
                                 target: Box::new(match structure.kind {
-                                    ast::UserTypeKind::Struct => TypeRef::Struct {
-                                        path: structure.path.clone(),
-                                    },
-                                    ast::UserTypeKind::Class => TypeRef::Class {
-                                        path: structure.path.clone(),
-                                    },
-                                    ast::UserTypeKind::Interface => TypeRef::Interface {
-                                        path: structure.path.clone(),
-                                    },
+                                    ast::UserTypeKind::Struct
+                                    | ast::UserTypeKind::Class
+                                    | ast::UserTypeKind::Interface => {
+                                        resolved_structure_type(structure)
+                                    }
                                 }),
                             },
                         )?,
@@ -1977,6 +1994,7 @@ impl Lowerer<'_> {
                         mutable: receiver.mutable,
                         target: Box::new(TypeRef::Interface {
                             path: interface.path.clone(),
+                            arguments: Vec::new(),
                         }),
                     },
                 )?;
@@ -2008,11 +2026,15 @@ impl Lowerer<'_> {
                     return None;
                 };
                 let structure = self.semantics.structure(constructor.structure)?;
+                let substitutions = user_type_substitutions(structure, &call.return_type);
                 let lowered_arguments = arguments
                     .iter()
                     .zip(&constructor.parameters)
                     .map(|(argument, parameter)| {
-                        self.lower_bound_expression(argument, &parameter.ty)
+                        self.lower_bound_expression(
+                            argument,
+                            &substitute_user_type(&parameter.ty, &substitutions),
+                        )
                     })
                     .collect::<Option<Vec<_>>>()?;
                 Some(hir::Expression::FunctionCall {
@@ -2412,6 +2434,7 @@ impl Lowerer<'_> {
                     ty: self.lower_type(
                         &TypeRef::Struct {
                             path: symbol.path.clone(),
+                            arguments: Vec::new(),
                         },
                         call.span,
                     )?,
@@ -2423,16 +2446,23 @@ impl Lowerer<'_> {
             }
             CallTarget::Intrinsic(Intrinsic::StructAggregate { structure }) => {
                 let symbol = self.semantics.structure(*structure)?;
+                let substitutions = user_type_substitutions(symbol, &call.return_type);
                 let mut expected = Vec::new();
                 let mut names = Vec::new();
                 if let Some(base) = symbol.base {
                     let base = self.semantics.structure(base)?;
                     expected.push(TypeRef::Struct {
                         path: base.path.clone(),
+                        arguments: Vec::new(),
                     });
                     names.push(base_field_name(base));
                 }
-                expected.extend(symbol.fields.iter().map(|field| field.ty.clone()));
+                expected.extend(
+                    symbol
+                        .fields
+                        .iter()
+                        .map(|field| substitute_user_type(&field.ty, &substitutions)),
+                );
                 names.extend(symbol.fields.iter().map(|field| field.name.clone()));
                 let fields = names
                     .into_iter()
@@ -2443,12 +2473,7 @@ impl Lowerer<'_> {
                     })
                     .collect::<Option<Vec<_>>>()?;
                 Some(hir::Expression::Aggregate {
-                    ty: self.lower_type(
-                        &TypeRef::Struct {
-                            path: symbol.path.clone(),
-                        },
-                        call.span,
-                    )?,
+                    ty: self.lower_type(&call.return_type, call.span)?,
                     fields,
                 })
             }
@@ -2739,9 +2764,10 @@ impl Lowerer<'_> {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     fn lower_type(&mut self, ty: &TypeRef, span: ast::Span) -> Option<hir::Type> {
         let lowered = match ty {
-            TypeRef::Error | TypeRef::Parameter(_) => {
+            TypeRef::Error => {
                 self.push(
                     "HIR013",
                     "unresolved type reached HIR lowering".to_owned(),
@@ -2826,12 +2852,23 @@ impl Lowerer<'_> {
             TypeRef::ScopedThreadHandle(target) => {
                 hir::Type::ScopedThreadHandle(Box::new(self.lower_type(target, span)?))
             }
-            TypeRef::Struct { path } | TypeRef::Class { path } => hir::Type::User {
+            TypeRef::Struct { path, arguments } | TypeRef::Class { path, arguments } => {
+                hir::Type::User {
+                    rust_path: user_type_path(path),
+                    arguments: arguments
+                        .iter()
+                        .map(|argument| self.lower_type(argument, span))
+                        .collect::<Option<Vec<_>>>()?,
+                }
+            }
+            TypeRef::Interface { path, arguments } => hir::Type::Interface {
                 rust_path: user_type_path(path),
+                arguments: arguments
+                    .iter()
+                    .map(|argument| self.lower_type(argument, span))
+                    .collect::<Option<Vec<_>>>()?,
             },
-            TypeRef::Interface { path } => hir::Type::Interface {
-                rust_path: user_type_path(path),
-            },
+            TypeRef::Parameter(name) => hir::Type::Parameter(name.clone()),
             TypeRef::Reference { mutable, target } => hir::Type::Reference {
                 mutable: *mutable,
                 target: Box::new(self.lower_type(target, span)?),
@@ -3207,6 +3244,141 @@ fn automatic_pointee_type(ty: &TypeRef) -> &TypeRef {
         | TypeRef::RwLockReadGuard(target)
         | TypeRef::RwLockWriteGuard(target) => canonical_ref(target),
         ty => ty,
+    }
+}
+
+fn resolved_structure_type(structure: &StructSymbol) -> TypeRef {
+    let arguments = structure
+        .type_parameters
+        .iter()
+        .cloned()
+        .map(TypeRef::Parameter)
+        .collect();
+    match structure.kind {
+        ast::UserTypeKind::Struct => TypeRef::Struct {
+            path: structure.path.clone(),
+            arguments,
+        },
+        ast::UserTypeKind::Class => TypeRef::Class {
+            path: structure.path.clone(),
+            arguments,
+        },
+        ast::UserTypeKind::Interface => TypeRef::Interface {
+            path: structure.path.clone(),
+            arguments,
+        },
+    }
+}
+
+fn user_type_substitutions(
+    structure: &StructSymbol,
+    instance: &TypeRef,
+) -> BTreeMap<String, TypeRef> {
+    structure
+        .type_parameters
+        .iter()
+        .cloned()
+        .zip(
+            instance
+                .user_arguments()
+                .unwrap_or_default()
+                .iter()
+                .cloned(),
+        )
+        .collect()
+}
+
+fn substitute_user_type(ty: &TypeRef, substitutions: &BTreeMap<String, TypeRef>) -> TypeRef {
+    match ty {
+        TypeRef::Parameter(name) => substitutions
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| ty.clone()),
+        TypeRef::Tuple(elements) => TypeRef::Tuple(
+            elements
+                .iter()
+                .map(|element| substitute_user_type(element, substitutions))
+                .collect(),
+        ),
+        TypeRef::Native { path, arguments } => TypeRef::Native {
+            path: path.clone(),
+            arguments: arguments
+                .iter()
+                .map(|argument| substitute_user_type(argument, substitutions))
+                .collect(),
+        },
+        TypeRef::Callback(callback) => {
+            let parameters = callback
+                .parameters
+                .iter()
+                .map(|parameter| substitute_user_type(parameter, substitutions))
+                .collect();
+            let return_type = substitute_user_type(&callback.return_type, substitutions);
+            if callback.is_async {
+                TypeRef::async_callback(callback.kind, callback.escape, parameters, return_type)
+            } else {
+                TypeRef::callback(callback.kind, callback.escape, parameters, return_type)
+            }
+        }
+        TypeRef::Function(function) => TypeRef::function(
+            function.kind,
+            function
+                .parameters
+                .iter()
+                .map(|parameter| substitute_user_type(parameter, substitutions))
+                .collect(),
+            substitute_user_type(&function.return_type, substitutions),
+        ),
+        TypeRef::Pointer { kind, target } => {
+            TypeRef::pointer(*kind, substitute_user_type(target, substitutions))
+        }
+        TypeRef::Mutex(target) => {
+            TypeRef::Mutex(Box::new(substitute_user_type(target, substitutions)))
+        }
+        TypeRef::MutexGuard(target) => {
+            TypeRef::MutexGuard(Box::new(substitute_user_type(target, substitutions)))
+        }
+        TypeRef::RwLock(target) => {
+            TypeRef::RwLock(Box::new(substitute_user_type(target, substitutions)))
+        }
+        TypeRef::RwLockReadGuard(target) => {
+            TypeRef::RwLockReadGuard(Box::new(substitute_user_type(target, substitutions)))
+        }
+        TypeRef::RwLockWriteGuard(target) => {
+            TypeRef::RwLockWriteGuard(Box::new(substitute_user_type(target, substitutions)))
+        }
+        TypeRef::ThreadHandle(target) => {
+            TypeRef::ThreadHandle(Box::new(substitute_user_type(target, substitutions)))
+        }
+        TypeRef::ScopedThreadHandle(target) => {
+            TypeRef::ScopedThreadHandle(Box::new(substitute_user_type(target, substitutions)))
+        }
+        TypeRef::Struct { path, arguments } => TypeRef::Struct {
+            path: path.clone(),
+            arguments: arguments
+                .iter()
+                .map(|argument| substitute_user_type(argument, substitutions))
+                .collect(),
+        },
+        TypeRef::Class { path, arguments } => TypeRef::Class {
+            path: path.clone(),
+            arguments: arguments
+                .iter()
+                .map(|argument| substitute_user_type(argument, substitutions))
+                .collect(),
+        },
+        TypeRef::Interface { path, arguments } => TypeRef::Interface {
+            path: path.clone(),
+            arguments: arguments
+                .iter()
+                .map(|argument| substitute_user_type(argument, substitutions))
+                .collect(),
+        },
+        TypeRef::Reference { mutable, target } => TypeRef::Reference {
+            mutable: *mutable,
+            target: Box::new(substitute_user_type(target, substitutions)),
+        },
+        concrete => concrete.clone(),
     }
 }
 

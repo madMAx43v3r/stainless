@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 
 use rowan::SyntaxNodeChildren;
 
-use crate::{StainlessLanguage, SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
+use crate::{StainlessLanguage, SyntaxKind, SyntaxNode, SyntaxToken};
 
 /// A typed wrapper around one concrete-syntax node.
 pub trait AstNode: Clone {
@@ -73,6 +73,7 @@ ast_node!(FunctionDeclaration, FunctionDeclaration);
 ast_node!(ParameterList, ParameterList);
 ast_node!(Parameter, Parameter);
 ast_node!(TypeReference, TypeReference);
+ast_node!(GenericParameterList, GenericParameterList);
 ast_node!(GenericArgumentList, GenericArgumentList);
 ast_node!(FunctionTypeSignature, FunctionTypeSignature);
 ast_node!(ThrowsClause, ThrowsClause);
@@ -482,6 +483,16 @@ macro_rules! type_definition_accessors {
                 children(self.syntax())
             }
 
+            pub fn generic_parameters(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+                child::<GenericParameterList>(self.syntax())
+                    .into_iter()
+                    .flat_map(|parameters| {
+                        direct_tokens(parameters.syntax())
+                            .filter(|token| token.kind() == SyntaxKind::Identifier)
+                            .collect::<Vec<_>>()
+                    })
+            }
+
             #[must_use]
             pub fn fields(&self) -> AstChildren<FieldDeclaration> {
                 children(self.syntax())
@@ -571,16 +582,18 @@ macro_rules! constructor_accessors {
     ($name:ident) => {
         impl $name {
             pub fn name_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
-                self.syntax()
-                    .descendants_with_tokens()
-                    .filter_map(SyntaxElement::into_token)
-                    .take_while(|token| token.kind() != SyntaxKind::LParen)
-                    .filter(|token| {
-                        matches!(
-                            token.kind(),
-                            SyntaxKind::Identifier | SyntaxKind::ColonColon
-                        )
-                    })
+                direct_tokens(self.syntax()).filter(|token| {
+                    matches!(
+                        token.kind(),
+                        SyntaxKind::Identifier | SyntaxKind::ColonColon
+                    ) && token.text() != "delete"
+                })
+            }
+
+            pub fn owner_generic_arguments(&self) -> impl Iterator<Item = TypeReference> + '_ {
+                child::<GenericArgumentList>(self.syntax())
+                    .into_iter()
+                    .flat_map(|arguments| arguments.types().collect::<Vec<_>>())
             }
 
             #[must_use]
@@ -625,6 +638,14 @@ impl Constructor {
         match self {
             Self::Definition(node) => Box::new(node.name_tokens()),
             Self::Declaration(node) => Box::new(node.name_tokens()),
+        }
+    }
+
+    #[must_use]
+    pub fn owner_generic_arguments(&self) -> Box<dyn Iterator<Item = TypeReference> + '_> {
+        match self {
+            Self::Definition(node) => Box::new(node.owner_generic_arguments()),
+            Self::Declaration(node) => Box::new(node.owner_generic_arguments()),
         }
     }
 
@@ -706,6 +727,12 @@ macro_rules! function_accessors {
                 })
             }
 
+            pub fn owner_generic_arguments(&self) -> impl Iterator<Item = TypeReference> + '_ {
+                child::<GenericArgumentList>(self.syntax())
+                    .into_iter()
+                    .flat_map(|arguments| arguments.types().collect::<Vec<_>>())
+            }
+
             #[must_use]
             pub fn parameter_list(&self) -> Option<ParameterList> {
                 child(self.syntax())
@@ -753,6 +780,14 @@ impl Function {
         match self {
             Self::Definition(node) => Box::new(node.name_tokens()),
             Self::Declaration(node) => Box::new(node.name_tokens()),
+        }
+    }
+
+    #[must_use]
+    pub fn owner_generic_arguments(&self) -> Box<dyn Iterator<Item = TypeReference> + '_> {
+        match self {
+            Self::Definition(node) => Box::new(node.owner_generic_arguments()),
+            Self::Declaration(node) => Box::new(node.owner_generic_arguments()),
         }
     }
 

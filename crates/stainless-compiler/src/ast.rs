@@ -101,6 +101,8 @@ pub struct Struct {
     pub kind: UserTypeKind,
     /// Unqualified source name.
     pub name: String,
+    /// Invariant generic type parameters in declaration order.
+    pub type_parameters: Vec<String>,
     /// Direct data-base or interface declarations in source order.
     pub bases: Vec<Type>,
     /// Whether inheritance/implementation is restricted to this module.
@@ -124,6 +126,8 @@ pub struct Constructor {
     pub is_public: bool,
     /// Unqualified declaration name or qualified definition path.
     pub name: Path,
+    /// Type arguments repeated on a qualified out-of-body owner.
+    pub owner_arguments: Vec<Type>,
     /// Parameters in declaration order.
     pub parameters: Vec<Parameter>,
     /// Checked exception types.
@@ -171,6 +175,8 @@ pub struct Function {
     pub is_async: bool,
     /// Possibly qualified source name.
     pub name: Path,
+    /// Type arguments repeated on a qualified out-of-body owner.
+    pub owner_arguments: Vec<Type>,
     /// Declared return type.
     pub return_type: Type,
     /// Parameters in declaration order.

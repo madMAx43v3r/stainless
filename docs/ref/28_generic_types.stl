@@ -1,0 +1,44 @@
+// Generic structs and classes use explicit, invariant type arguments.
+// Member declarations stay inside the type; implementations repeat the
+// owner's type parameters in C++ qualified-name position.
+
+namespace samples {
+
+struct Box<T> {
+    T value;
+
+    Box(T value);
+    const T& get() const;
+};
+
+Box<T>::Box(T value) : value(move(value)) {
+}
+
+const T& Box<T>::get() const {
+    return value;
+}
+
+class Holder<T> {
+public:
+    Holder(T value);
+    const T& get() const;
+
+private:
+    T value;
+};
+
+Holder<T>::Holder(T value) : value(move(value)) {
+}
+
+const T& Holder<T>::get() const {
+    return value;
+}
+
+i32 generic_values() {
+    Box<i32> boxed = Box<i32>(20);
+    Box<i32> copied = boxed;
+    Holder<i32> holder = Holder<i32>(22);
+    return copied.get() + holder.get();
+}
+
+} // namespace samples

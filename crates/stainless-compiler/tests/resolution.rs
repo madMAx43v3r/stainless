@@ -26,6 +26,7 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
         include_str!("../../../docs/ref/25_collections.stl"),
         include_str!("../../../docs/ref/26_file_io.stl"),
         include_str!("../../../docs/ref/27_tuples.stl"),
+        include_str!("../../../docs/ref/28_generic_types.stl"),
     ] {
         let analysis = analyze(source);
 
@@ -56,6 +57,67 @@ fn resolves_compiler_known_tuples_as_ordered_map_keys() {
         CallTarget::Intrinsic(Intrinsic::TupleNew { constructions })
             if constructions.len() == 2
     )));
+}
+
+#[test]
+fn resolves_user_generic_structs_classes_and_concrete_member_results() {
+    let analysis = analyze(include_str!("../../../docs/ref/28_generic_types.stl"));
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+
+    let boxed = analysis
+        .semantics
+        .structs
+        .iter()
+        .find(|structure| structure.path == ["samples", "Box"])
+        .expect("Box symbol");
+    assert_eq!(boxed.type_parameters, ["T"]);
+    assert_eq!(boxed.fields[0].ty, TypeRef::Parameter("T".to_owned()));
+
+    assert!(analysis.semantics.calls.iter().any(|call| {
+        matches!(
+            &call.return_type,
+            TypeRef::Struct { path, arguments }
+                if path == &["samples", "Box"] && arguments == &[TypeRef::I32]
+        )
+    }));
+    assert!(analysis.semantics.calls.iter().any(|call| {
+        matches!(
+            &call.return_type,
+            TypeRef::Reference { mutable: false, target }
+                if target.as_ref() == &TypeRef::I32
+        )
+    }));
+}
+
+#[test]
+fn diagnoses_generic_arity_and_mismatched_qualified_owner_arguments() {
+    let analysis = analyze(
+        r"struct Box<T> {
+    T value;
+    const T& get() const;
+};
+
+const T& Box<i32>::get() const {
+    return value;
+}
+
+i32 invalid() {
+    Box value = Box<i32>{1};
+    return value.get();
+}
+",
+    );
+
+    assert!(analysis.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "RES124" && diagnostic.message.contains("owner argument must be `T`")
+    }));
+    assert!(analysis.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "RES050" && diagnostic.message.contains("expects 1 type argument")
+    }));
 }
 
 #[test]
@@ -297,21 +359,21 @@ fn resolves_mutex_guards_condition_waits_and_notifications() {
         matches!(
             &binding.ty,
             TypeRef::MutexGuard(target)
-                if matches!(target.as_ref(), TypeRef::Struct { path } if path == &["SharedState"])
+                if matches!(target.as_ref(), TypeRef::Struct { path, .. } if path == &["SharedState"])
         )
     }));
     assert!(analysis.semantics.bindings.iter().any(|binding| {
         matches!(
             &binding.ty,
             TypeRef::RwLockReadGuard(target)
-                if matches!(target.as_ref(), TypeRef::Struct { path } if path == &["SharedState"])
+                if matches!(target.as_ref(), TypeRef::Struct { path, .. } if path == &["SharedState"])
         )
     }));
     assert!(analysis.semantics.bindings.iter().any(|binding| {
         matches!(
             &binding.ty,
             TypeRef::RwLockWriteGuard(target)
-                if matches!(target.as_ref(), TypeRef::Struct { path } if path == &["SharedState"])
+                if matches!(target.as_ref(), TypeRef::Struct { path, .. } if path == &["SharedState"])
         )
     }));
     for expected in ["lock", "wait", "notify"] {
@@ -524,7 +586,7 @@ i32 use_unique() {
             TypeRef::Pointer {
                 kind: stainless_compiler::interop::PointerKind::Unique,
                 target,
-            } if matches!(target.as_ref(), TypeRef::Struct { path } if path == &["Config"])
+            } if matches!(target.as_ref(), TypeRef::Struct { path, .. } if path == &["Config"])
         )
     }));
     assert!(analysis.semantics.calls.iter().any(|call| {

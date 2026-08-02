@@ -90,6 +90,8 @@ pub struct Struct {
     pub source_path: Vec<String>,
     /// Rust type identifier.
     pub rust_name: String,
+    /// Rust generic type parameters in declaration order.
+    pub type_parameters: Vec<String>,
     /// Whether generated Rust may derive `Clone` for Stainless copy semantics.
     pub copyable: bool,
     /// Direct representation fields, including an optional base subobject.
@@ -181,6 +183,8 @@ pub struct Function {
     pub module_path: Vec<String>,
     /// Deterministically mangled Rust function name.
     pub rust_name: String,
+    /// Rust generic type parameters in declaration order.
+    pub type_parameters: Vec<String>,
     /// Whether this emits as a Rust `async fn`.
     pub is_async: bool,
     /// Function parameters.
@@ -275,12 +279,18 @@ pub enum Type {
     User {
         /// Fully qualified generated Rust path.
         rust_path: String,
+        /// Concrete or generic Rust type arguments.
+        arguments: Vec<Type>,
     },
     /// A dynamically dispatched Stainless interface trait object.
     Interface {
         /// Fully qualified generated Rust trait path.
         rust_path: String,
+        /// Concrete or generic Rust type arguments.
+        arguments: Vec<Type>,
     },
+    /// A Rust generic type parameter.
+    Parameter(String),
     /// A borrowed value.
     Reference {
         /// Whether the borrow permits mutation.

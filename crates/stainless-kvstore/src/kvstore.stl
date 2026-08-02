@@ -17,15 +17,19 @@ struct Value {
     Vec<u8> bytes;
 };
 
-struct IndexEntry {
+struct ValueLocation {
+    u64 offset;
+    usize length;
+};
+
+struct Versioned<T> {
     u32 version;
     u64 sequence;
-    u64 value_offset;
-    usize value_length;
+    T value;
 };
 
 struct StoreState {
-    Map<Vec<u8>, List<IndexEntry>> index;
+    Map<Vec<u8>, List<Versioned<ValueLocation>>> index;
     u32 current_version;
     u64 next_sequence;
     u64 log_end;
@@ -114,22 +118,22 @@ Vec<u8> empty_bytes() {
 }
 
 StoreState initial_state() {
-    Map<Vec<u8>, List<IndexEntry>> index;
+    Map<Vec<u8>, List<Versioned<ValueLocation>>> index;
     StoreState state = StoreState{move(index), 0u32, 0u64, 0u64};
     return state;
 }
 
 void add_index_entry(
-    Map<Vec<u8>, List<IndexEntry>>& index,
+    Map<Vec<u8>, List<Versioned<ValueLocation>>>& index,
     Vec<u8> key,
-    IndexEntry entry) {
+    Versioned<ValueLocation> entry) {
     bool indexed = index.with_mut(
         key,
-        [entry](List<IndexEntry>& history) {
+        [entry](List<Versioned<ValueLocation>>& history) {
             history.push_back(entry);
         });
     if (!indexed) {
-        List<IndexEntry> history;
+        List<Versioned<ValueLocation>> history;
         history.push_back(entry);
         index.insert(move(key), move(history));
     }
@@ -176,11 +180,10 @@ void Table::insert(Vec<u8> key, Vec<u8> value) const throws stainless::IoError {
     log.pwrite_all(guard.log_end, record);
     guard.log_end += u64(record.len());
     guard.next_sequence += 1u64;
-    IndexEntry entry = IndexEntry{
+    Versioned<ValueLocation> entry = Versioned<ValueLocation>{
         version,
         sequence,
-        value_offset,
-        value.len()
+        ValueLocation{value_offset, value.len()}
     };
     add_index_entry(guard.index, move(key), entry);
 }
@@ -219,7 +222,7 @@ bool Table::revert(u32 version) const throws stainless::IoError {
     log.sync_data();
 
     for (auto& [key, history] : guard.index) {
-        List<IndexEntry> retained;
+        List<Versioned<ValueLocation>> retained;
         for (auto entry : history) {
             if (entry.version < version) {
                 retained.push_back(entry);
@@ -252,7 +255,7 @@ shared_nullptr<Value> Table::find(const Vec<u8>& key) const throws stainless::Io
          &best_version,
          &best_sequence,
          &best_offset,
-         &best_length](const List<IndexEntry>& history) {
+         &best_length](const List<Versioned<ValueLocation>>& history) {
             for (const auto& entry : history) {
                 if (entry.version <= current_version &&
                     (!found || entry.version > best_version ||
@@ -261,8 +264,8 @@ shared_nullptr<Value> Table::find(const Vec<u8>& key) const throws stainless::Io
                     found = true;
                     best_version = entry.version;
                     best_sequence = entry.sequence;
-                    best_offset = entry.value_offset;
-                    best_length = entry.value_length;
+                    best_offset = entry.value.offset;
+                    best_length = entry.value.length;
                 }
             }
         });
@@ -287,8 +290,8 @@ void Table::recover() const throws stainless::IoError {
     u32 committed_version = 0u32;
     u64 working_next_sequence = 0u64;
     u64 committed_next_sequence = 0u64;
-    Map<Vec<u8>, List<IndexEntry>> working;
-    Map<Vec<u8>, List<IndexEntry>> committed;
+    Map<Vec<u8>, List<Versioned<ValueLocation>>> working;
+    Map<Vec<u8>, List<Versioned<ValueLocation>>> committed;
 
     for (; offset + 41u64 <= file_size;) {
         u64 record_size = decode_u64(log.pread_exact(offset, 8usize));
@@ -314,11 +317,13 @@ void Table::recover() const throws stainless::IoError {
 
         if (kind == 0u8) {
             Vec<u8> key = log.pread_exact(offset + 37u64, usize(key_length));
-            add_index_entry(working, move(key), IndexEntry{
+            add_index_entry(working, move(key), Versioned<ValueLocation>{
                 version,
                 sequence,
-                offset + 37u64 + key_length,
-                usize(value_length)
+                ValueLocation{
+                    offset + 37u64 + key_length,
+                    usize(value_length)
+                }
             });
             if (sequence >= working_next_sequence) {
                 working_next_sequence = sequence + 1u64;
@@ -330,7 +335,7 @@ void Table::recover() const throws stainless::IoError {
             committed_end = offset + record_size;
         } else if (kind == 2u8) {
             for (auto& [key, history] : working) {
-                List<IndexEntry> retained;
+                List<Versioned<ValueLocation>> retained;
                 for (auto entry : history) {
                     if (entry.version < version) {
                         retained.push_back(entry);

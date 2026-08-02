@@ -66,7 +66,7 @@ fn records_interface_conformance_and_dynamic_calls() {
                 TypeRef::Pointer {
                     kind: PointerKind::Unique,
                     target,
-                } if matches!(target.as_ref(), TypeRef::Interface { path } if path == &["samples", "NamedAnswer"])
+                } if matches!(target.as_ref(), TypeRef::Interface { path, .. } if path == &["samples", "NamedAnswer"])
             )
     }));
 }

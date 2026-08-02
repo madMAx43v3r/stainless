@@ -24,17 +24,20 @@ fn encode_type(ty: &TypeRef, output: &mut String) {
         return;
     }
     match ty {
-        TypeRef::Struct { path } => {
+        TypeRef::Struct { path, arguments } => {
             output.push_str("s_");
             encode_segments(path, output);
+            encode_arguments(arguments, output);
         }
-        TypeRef::Class { path } => {
+        TypeRef::Class { path, arguments } => {
             output.push_str("c_");
             encode_segments(path, output);
+            encode_arguments(arguments, output);
         }
-        TypeRef::Interface { path } => {
+        TypeRef::Interface { path, arguments } => {
             output.push_str("i_");
             encode_segments(path, output);
+            encode_arguments(arguments, output);
         }
         TypeRef::Native { path, arguments } if arguments.is_empty() => {
             output.push_str("n_");
@@ -122,6 +125,18 @@ fn encode_type(ty: &TypeRef, output: &mut String) {
         }
         TypeRef::Error => output.push_str("error"),
         _ => output.push_str("unknown"),
+    }
+}
+
+fn encode_arguments(arguments: &[TypeRef], output: &mut String) {
+    if arguments.is_empty() {
+        return;
+    }
+    output.push_str("_a_");
+    output.push_str(&arguments.len().to_string());
+    for argument in arguments {
+        output.push('_');
+        encode_type(canonical(argument), output);
     }
 }
 

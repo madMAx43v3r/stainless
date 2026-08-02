@@ -36,6 +36,7 @@ fn resolves_struct_layout_members_fields_and_data_inheritance() {
         expression.ty
             == TypeRef::Struct {
                 path: vec!["samples".to_owned(), "Point3".to_owned()],
+                arguments: Vec::new(),
             }
     }));
     assert!(analysis.semantics.expressions.iter().any(|expression| {

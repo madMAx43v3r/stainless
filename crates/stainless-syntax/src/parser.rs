@@ -178,6 +178,9 @@ impl Parser<'_> {
             SyntaxKind::Identifier,
             &format!("expected a {declaration_kind} name"),
         );
+        if self.at(SyntaxKind::Less) {
+            self.parse_generic_parameters();
+        }
         if self.eat(SyntaxKind::Colon) {
             loop {
                 self.parse_type(false);
@@ -334,10 +337,27 @@ impl Parser<'_> {
             return false;
         }
         let mut offset = 1;
-        while self.nth(offset) == Some(SyntaxKind::ColonColon)
-            && self.nth(offset + 1) == Some(SyntaxKind::Identifier)
-        {
-            offset += 2;
+        loop {
+            if self.nth(offset) == Some(SyntaxKind::Less) {
+                let mut depth = 1_u32;
+                offset += 1;
+                while depth > 0 {
+                    match self.nth(offset) {
+                        Some(SyntaxKind::Less) => depth += 1,
+                        Some(SyntaxKind::Greater) => depth -= 1,
+                        None => return false,
+                        _ => {}
+                    }
+                    offset += 1;
+                }
+            }
+            if self.nth(offset) == Some(SyntaxKind::ColonColon)
+                && self.nth(offset + 1) == Some(SyntaxKind::Identifier)
+            {
+                offset += 2;
+                continue;
+            }
+            break;
         }
         self.nth(offset) == Some(SyntaxKind::LParen)
     }
@@ -466,6 +486,22 @@ impl Parser<'_> {
         self.finish();
     }
 
+    fn parse_generic_parameters(&mut self) {
+        self.start(SyntaxKind::GenericParameterList);
+        self.bump();
+        if self.at(SyntaxKind::Greater) {
+            self.error("a generic parameter list cannot be empty");
+        }
+        while !self.at_end() && !self.at(SyntaxKind::Greater) {
+            self.expect(SyntaxKind::Identifier, "expected a generic type parameter");
+            if !self.eat(SyntaxKind::Comma) {
+                break;
+            }
+        }
+        self.expect(SyntaxKind::Greater, "expected `>` after generic parameters");
+        self.finish();
+    }
+
     fn parse_function_type_arguments(&mut self) {
         self.start(SyntaxKind::GenericArgumentList);
         self.bump();
@@ -495,8 +531,14 @@ impl Parser<'_> {
 
     fn parse_qualified_name(&mut self, message: &str) {
         self.expect(SyntaxKind::Identifier, message);
+        if self.at(SyntaxKind::Less) {
+            self.parse_generic_arguments();
+        }
         while self.eat(SyntaxKind::ColonColon) {
             self.expect(SyntaxKind::Identifier, "expected a name after `::`");
+            if self.at(SyntaxKind::Less) {
+                self.parse_generic_arguments();
+            }
         }
     }
 

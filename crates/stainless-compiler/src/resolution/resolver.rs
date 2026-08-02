@@ -105,6 +105,7 @@ enum ConstructionSyntax {
 
 struct FunctionContext {
     namespace: Vec<String>,
+    type_parameters: Vec<String>,
     return_type: TypeRef,
     scopes: Vec<BTreeMap<String, Variable>>,
     receiver: Option<StructReceiver>,
@@ -158,6 +159,7 @@ impl Resolver<'_> {
         self.model.structs.push(StructSymbol {
             id: root,
             path: root_path.clone(),
+            type_parameters: Vec::new(),
             kind: ast::UserTypeKind::Struct,
             base: None,
             interfaces: Vec::new(),
@@ -180,6 +182,7 @@ impl Resolver<'_> {
         self.model.structs.push(StructSymbol {
             id: rust_error,
             path: rust_error_path.clone(),
+            type_parameters: Vec::new(),
             kind: ast::UserTypeKind::Struct,
             base: Some(root),
             interfaces: Vec::new(),
@@ -194,6 +197,7 @@ impl Resolver<'_> {
         self.model.structs.push(StructSymbol {
             id: io_error,
             path: io_error_path.clone(),
+            type_parameters: Vec::new(),
             kind: ast::UserTypeKind::Struct,
             base: Some(root),
             interfaces: Vec::new(),
@@ -208,6 +212,7 @@ impl Resolver<'_> {
         self.model.structs.push(StructSymbol {
             id: format_error,
             path: format_error_path.clone(),
+            type_parameters: Vec::new(),
             kind: ast::UserTypeKind::Struct,
             base: Some(root),
             interfaces: Vec::new(),
@@ -222,6 +227,7 @@ impl Resolver<'_> {
         self.model.structs.push(StructSymbol {
             id: json_error,
             path: json_error_path.clone(),
+            type_parameters: Vec::new(),
             kind: ast::UserTypeKind::Struct,
             base: Some(root),
             interfaces: Vec::new(),
@@ -236,6 +242,7 @@ impl Resolver<'_> {
         self.model.structs.push(StructSymbol {
             id: thread_error,
             path: thread_error_path.clone(),
+            type_parameters: Vec::new(),
             kind: ast::UserTypeKind::Struct,
             base: Some(root),
             interfaces: Vec::new(),
@@ -265,10 +272,40 @@ impl Resolver<'_> {
                         );
                         continue;
                     }
+                    let mut parameters = BTreeSet::new();
+                    for parameter in &structure.type_parameters {
+                        if parameter.starts_with("__") {
+                            self.push(
+                                "RES124",
+                                format!(
+                                    "generic parameter `{parameter}` uses the reserved `__` prefix"
+                                ),
+                                structure.span,
+                            );
+                        }
+                        if !parameters.insert(parameter.clone()) {
+                            self.push(
+                                "RES124",
+                                format!("duplicate generic parameter `{parameter}`"),
+                                structure.span,
+                            );
+                        }
+                    }
+                    if structure.kind == ast::UserTypeKind::Interface
+                        && !structure.type_parameters.is_empty()
+                    {
+                        self.push(
+                            "RES124",
+                            "generic interfaces are not implemented yet; generic structs and classes are supported"
+                                .to_owned(),
+                            structure.span,
+                        );
+                    }
                     let id = StructId(self.model.structs.len());
                     self.model.structs.push(StructSymbol {
                         id,
                         path: path.clone(),
+                        type_parameters: structure.type_parameters.clone(),
                         kind: structure.kind,
                         base: None,
                         interfaces: Vec::new(),
@@ -299,7 +336,18 @@ impl Resolver<'_> {
                     };
                     let mut base = None;
                     let mut interfaces = Vec::new();
+                    if !structure.type_parameters.is_empty() && !structure.bases.is_empty() {
+                        self.push(
+                            "RES124",
+                            "inheritance and interface implementation on generic types are deferred"
+                                .to_owned(),
+                            structure.span,
+                        );
+                    }
                     for base_syntax in &structure.bases {
+                        if !structure.type_parameters.is_empty() {
+                            continue;
+                        }
                         let TypeKind::Named(named) = &base_syntax.kind else {
                             self.push(
                                 "RES040",
@@ -412,7 +460,12 @@ impl Resolver<'_> {
                                     field.span,
                                 );
                             }
-                            let ty = self.resolve_type(&field.ty, namespace, false);
+                            let ty = self.resolve_type(
+                                &field.ty,
+                                namespace,
+                                &structure.type_parameters,
+                                false,
+                            );
                             self.reject_bare_interface_type(
                                 &ty,
                                 field.ty.span,
@@ -704,6 +757,13 @@ impl Resolver<'_> {
             );
             return;
         };
+        self.validate_qualified_owner_arguments(
+            &constructor.owner_arguments,
+            owner,
+            namespace,
+            declared_owner.is_some(),
+            constructor.span,
+        );
         if self.model.structs[owner.0].kind == ast::UserTypeKind::Interface {
             self.push(
                 "RES118",
@@ -730,7 +790,12 @@ impl Resolver<'_> {
             .parameters
             .iter()
             .map(|parameter| {
-                let ty = self.resolve_type(&parameter.ty, type_namespace, false);
+                let ty = self.resolve_type(
+                    &parameter.ty,
+                    type_namespace,
+                    &self.model.structs[owner.0].type_parameters.clone(),
+                    false,
+                );
                 self.reject_bare_interface_type(&ty, parameter.ty.span, "parameter");
                 ParameterSymbol {
                     name: parameter.name.clone(),
@@ -968,7 +1033,7 @@ impl Resolver<'_> {
                     })
                 })
             }
-            TypeRef::Struct { path } | TypeRef::Class { path } => self
+            TypeRef::Struct { path, .. } | TypeRef::Class { path, .. } => self
                 .struct_by_path
                 .get(path)
                 .is_some_and(|id| self.struct_has_default_constructor(*id, visiting)),
@@ -1026,6 +1091,15 @@ impl Resolver<'_> {
                 .then(|| self.struct_by_path.get(&path[..path.len() - 1]).copied())
                 .flatten()
         });
+        if let Some(owner) = owner {
+            self.validate_qualified_owner_arguments(
+                &function.owner_arguments,
+                owner,
+                namespace,
+                declared_owner.is_some(),
+                function.span,
+            );
+        }
         let receiver = owner.map(|structure| StructReceiver {
             structure,
             mutable: !function.is_const,
@@ -1037,11 +1111,19 @@ impl Resolver<'_> {
                 path[..path.len().saturating_sub(1)].to_vec()
             },
         );
+        let owner_type_parameters = owner.map_or_else(Vec::new, |owner| {
+            self.model.structs[owner.0].type_parameters.clone()
+        });
         let parameters = function
             .parameters
             .iter()
             .map(|parameter| {
-                let ty = self.resolve_type(&parameter.ty, &type_namespace, false);
+                let ty = self.resolve_type(
+                    &parameter.ty,
+                    &type_namespace,
+                    &owner_type_parameters,
+                    false,
+                );
                 self.reject_bare_interface_type(&ty, parameter.ty.span, "parameter");
                 ParameterSymbol {
                     name: parameter.name.clone(),
@@ -1050,7 +1132,12 @@ impl Resolver<'_> {
                 }
             })
             .collect::<Vec<_>>();
-        let mut return_type = self.resolve_type(&function.return_type, &type_namespace, false);
+        let mut return_type = self.resolve_type(
+            &function.return_type,
+            &type_namespace,
+            &owner_type_parameters,
+            false,
+        );
         self.reject_bare_interface_type(&return_type, function.return_type.span, "return value");
         if function.is_async && return_type.is_reference() {
             self.push(
@@ -1205,6 +1292,52 @@ impl Resolver<'_> {
         self.function_by_span.insert(function.span, id);
     }
 
+    fn validate_qualified_owner_arguments(
+        &mut self,
+        arguments: &[ast::Type],
+        owner: StructId,
+        namespace: &[String],
+        is_member_declaration: bool,
+        span: Span,
+    ) {
+        let parameters = self.model.structs[owner.0].type_parameters.clone();
+        if is_member_declaration {
+            if !arguments.is_empty() {
+                self.push(
+                    "RES124",
+                    "an in-body member declaration must not repeat owner type arguments".to_owned(),
+                    span,
+                );
+            }
+            return;
+        }
+        if arguments.len() != parameters.len() {
+            self.push(
+                "RES124",
+                format!(
+                    "qualified definition of `{}` must repeat owner arguments `<{}>`",
+                    display_path(&self.model.structs[owner.0].path),
+                    parameters.join(", ")
+                ),
+                span,
+            );
+            return;
+        }
+        for (argument, parameter) in arguments.iter().zip(&parameters) {
+            let resolved = self.resolve_type(argument, namespace, &parameters, false);
+            if resolved != TypeRef::Parameter(parameter.clone()) {
+                self.push(
+                    "RES124",
+                    format!(
+                        "qualified definition owner argument must be `{parameter}`, found `{}`",
+                        display_type(&resolved)
+                    ),
+                    argument.span,
+                );
+            }
+        }
+    }
+
     fn resolve_bodies(&mut self, items: &[Item], namespace: &mut Vec<String>) {
         for item in items {
             match item {
@@ -1289,6 +1422,7 @@ impl Resolver<'_> {
         }
         let mut initialization_context = FunctionContext {
             namespace: constructor_namespace.clone(),
+            type_parameters: structure.type_parameters.clone(),
             return_type: TypeRef::Void,
             scopes: vec![scope.clone()],
             receiver: None,
@@ -1364,6 +1498,7 @@ impl Resolver<'_> {
 
         let mut context = FunctionContext {
             namespace: constructor_namespace,
+            type_parameters: structure.type_parameters.clone(),
             return_type: TypeRef::Void,
             scopes: vec![scope],
             receiver: Some(StructReceiver {
@@ -1395,6 +1530,7 @@ impl Resolver<'_> {
             let structure = self.model.structs[symbol.structure.0].clone();
             let mut context = FunctionContext {
                 namespace: structure.path[..structure.path.len().saturating_sub(1)].to_vec(),
+                type_parameters: structure.type_parameters.clone(),
                 return_type: TypeRef::Void,
                 scopes: vec![BTreeMap::new()],
                 receiver: None,
@@ -1430,6 +1566,7 @@ impl Resolver<'_> {
                 base_field_name(base),
                 TypeRef::Struct {
                     path: base.path.clone(),
+                    arguments: Vec::new(),
                 },
             ));
         }
@@ -1507,7 +1644,7 @@ impl Resolver<'_> {
                 );
                 None
             }
-            TypeRef::Struct { path } | TypeRef::Class { path } => {
+            TypeRef::Struct { path, .. } | TypeRef::Class { path, .. } => {
                 let structure = self.struct_by_path.get(path).copied()?;
                 let has_arity = self
                     .constructor_sets
@@ -1523,8 +1660,14 @@ impl Resolver<'_> {
                         context,
                     );
                 }
-                self.resolve_user_constructor(structure, arguments, span, context)
-                    .1
+                self.resolve_user_constructor(
+                    structure,
+                    canonical_ref(target).clone(),
+                    arguments,
+                    span,
+                    context,
+                )
+                .1
             }
             TypeRef::Native {
                 path,
@@ -1544,6 +1687,9 @@ impl Resolver<'_> {
                     context,
                 );
                 call
+            }
+            TypeRef::Parameter(_) if arguments.len() == 1 => {
+                self.resolve_direct_initialization(target, &arguments[0], span, context)
             }
             TypeRef::Reference { .. } | TypeRef::Void | TypeRef::Error | TypeRef::Parameter(_) => {
                 for argument in arguments {
@@ -1805,12 +1951,18 @@ impl Resolver<'_> {
                 );
                 None
             }
-            TypeRef::Struct { path } | TypeRef::Class { path } => {
+            TypeRef::Struct { path, .. } | TypeRef::Class { path, .. } => {
                 let structure = self.struct_by_path.get(path).copied()?;
-                self.resolve_user_constructor(structure, &[], span, context)
-                    .1
+                self.resolve_user_constructor(
+                    structure,
+                    canonical_ref(target).clone(),
+                    &[],
+                    span,
+                    context,
+                )
+                .1
             }
-            TypeRef::Interface { path } => {
+            TypeRef::Interface { path, .. } => {
                 self.push(
                     "RES118",
                     format!(
@@ -1882,6 +2034,11 @@ impl Resolver<'_> {
         }
         let mut context = FunctionContext {
             namespace: function_namespace,
+            type_parameters: symbol.receiver.as_ref().map_or_else(Vec::new, |receiver| {
+                self.model.structs[receiver.structure.0]
+                    .type_parameters
+                    .clone()
+            }),
             return_type: symbol.return_type,
             scopes: vec![initial_scope],
             receiver: symbol.receiver,
@@ -2048,7 +2205,7 @@ impl Resolver<'_> {
     ) {
         let thrown = if let Some(value) = value {
             let actual = self.resolve_expression(value, None, context);
-            let TypeRef::Struct { path } = canonical(&actual.ty) else {
+            let TypeRef::Struct { path, .. } = canonical(&actual.ty) else {
                 if actual.ty != TypeRef::Error {
                     self.push(
                         "RES074",
@@ -2085,6 +2242,7 @@ impl Resolver<'_> {
         self.validate_checked_effect(thrown, span, context);
     }
 
+    #[allow(clippy::too_many_lines)]
     fn resolve_try_statement(
         &mut self,
         try_statement: &ast::TryStatement,
@@ -2096,8 +2254,13 @@ impl Resolver<'_> {
         let mut resolved_catches = Vec::new();
         for catch in &try_statement.catches {
             let caught = if let Some(binding) = &catch.binding {
-                let resolved = self.resolve_type(&binding.ty, &context.namespace, false);
-                if let TypeRef::Struct { path } = canonical(&resolved) {
+                let resolved = self.resolve_type(
+                    &binding.ty,
+                    &context.namespace,
+                    &context.type_parameters,
+                    false,
+                );
+                if let TypeRef::Struct { path, .. } = canonical(&resolved) {
                     self.struct_by_path.get(&path).copied().and_then(|id| {
                         if self.is_exception_struct(id) {
                             Some(id)
@@ -2163,7 +2326,10 @@ impl Resolver<'_> {
                 let path = self.model.structs[caught.0].path.clone();
                 let ty = TypeRef::Reference {
                     mutable: false,
-                    target: Box::new(TypeRef::Struct { path }),
+                    target: Box::new(TypeRef::Struct {
+                        path,
+                        arguments: Vec::new(),
+                    }),
                 };
                 let variable = Variable {
                     ty: ty.clone(),
@@ -2298,7 +2464,12 @@ impl Resolver<'_> {
         let declared = if local.ty.is_inferred() {
             None
         } else {
-            let ty = self.resolve_type(&local.ty, &context.namespace, false);
+            let ty = self.resolve_type(
+                &local.ty,
+                &context.namespace,
+                &context.type_parameters,
+                false,
+            );
             self.reject_bare_interface_type(&ty, local.ty.span, "local variable");
             Some(ty)
         };
@@ -2588,7 +2759,12 @@ impl Resolver<'_> {
                     element.clone()
                 }
             } else {
-                self.resolve_type(&range.ty, &context.namespace, false)
+                self.resolve_type(
+                    &range.ty,
+                    &context.namespace,
+                    &context.type_parameters,
+                    false,
+                )
             }]
         };
 
@@ -2632,7 +2808,7 @@ impl Resolver<'_> {
             && iterable.category != ValueCategory::Temporary
         {
             for (syntax, element) in range.bindings.iter().zip(&elements) {
-                if !is_copyable(element) {
+                if !self.is_copyable_type(element) {
                     self.push(
                         "RES009",
                         format!(
@@ -2920,7 +3096,7 @@ impl Resolver<'_> {
                     ),
                     value.span,
                 );
-            } else if !is_copyable(&ty) && actual.category != ValueCategory::Temporary {
+            } else if !self.is_copyable_type(&ty) && actual.category != ValueCategory::Temporary {
                 self.push(
                     "RES027",
                     format!(
@@ -2960,7 +3136,16 @@ impl Resolver<'_> {
                 }
             }
             if let Some(receiver) = &context.receiver
-                && let Some(field) = self.lookup_struct_field(receiver.structure, path)
+                && let Some(field) = self.lookup_struct_field(
+                    receiver.structure,
+                    &self.model.structs[receiver.structure.0]
+                        .type_parameters
+                        .iter()
+                        .cloned()
+                        .map(TypeRef::Parameter)
+                        .collect::<Vec<_>>(),
+                    path,
+                )
             {
                 if !Self::member_is_accessible(field.owner, field.is_public, context) {
                     self.push(
@@ -3003,7 +3188,17 @@ impl Resolver<'_> {
             .rev()
             .any(|scope| scope.contains_key(name))
             || context.receiver.as_ref().is_some_and(|receiver| {
-                self.lookup_struct_field(receiver.structure, path).is_some()
+                self.lookup_struct_field(
+                    receiver.structure,
+                    &self.model.structs[receiver.structure.0]
+                        .type_parameters
+                        .iter()
+                        .cloned()
+                        .map(TypeRef::Parameter)
+                        .collect::<Vec<_>>(),
+                    path,
+                )
+                .is_some()
             })
     }
 
@@ -3233,7 +3428,9 @@ impl Resolver<'_> {
                         );
                         continue;
                     }
-                    if !scoped_shared_reference && !is_copyable(&canonical(&outer_variable.ty)) {
+                    if !scoped_shared_reference
+                        && !self.is_copyable_type(&canonical(&outer_variable.ty))
+                    {
                         self.push(
                             "RES089",
                             format!(
@@ -3335,7 +3532,7 @@ impl Resolver<'_> {
                     }
                     if is_async
                         && callback_kind == Some(CallbackKind::Fn)
-                        && !is_copyable(&captured_ty)
+                        && !self.is_copyable_type(&captured_ty)
                     {
                         self.push(
                             "RES123",
@@ -3437,7 +3634,12 @@ impl Resolver<'_> {
             );
         }
         for (index, parameter) in parameters.iter().enumerate() {
-            let resolved = self.resolve_type(&parameter.ty, &outer.namespace, false);
+            let resolved = self.resolve_type(
+                &parameter.ty,
+                &outer.namespace,
+                &outer.type_parameters,
+                false,
+            );
             self.reject_bare_interface_type(&resolved, parameter.ty.span, "lambda parameter");
             if let Some(expected) = callback_parameters.get(index)
                 && *expected != resolved
@@ -3464,6 +3666,7 @@ impl Resolver<'_> {
 
         let mut context = FunctionContext {
             namespace: outer.namespace.clone(),
+            type_parameters: outer.type_parameters.clone(),
             return_type: callback_return.clone(),
             scopes: vec![lambda_scope],
             receiver: None,
@@ -3489,22 +3692,12 @@ impl Resolver<'_> {
 
     fn resolve_struct_aggregate(
         &mut self,
-        path: &ast::Path,
+        id: StructId,
+        structure_type: TypeRef,
         initializers: &[Expression],
         span: Span,
         context: &mut FunctionContext,
     ) -> (ExpressionInfo, Option<ResolvedCall>) {
-        let Some(id) = self.lookup_struct_path(&path.segments, &context.namespace) else {
-            for initializer in initializers {
-                self.resolve_expression(initializer, None, context);
-            }
-            self.push(
-                "RES046",
-                format!("unresolved aggregate type `{}`", path.display()),
-                span,
-            );
-            return (error_info(), None);
-        };
         let structure = self.model.structs[id.0].clone();
         if structure.kind != ast::UserTypeKind::Struct {
             for initializer in initializers {
@@ -3520,13 +3713,20 @@ impl Resolver<'_> {
             );
             return (error_info(), None);
         }
+        let substitutions = user_type_substitutions(&structure, &structure_type);
         let mut expected = Vec::new();
         if let Some(base) = structure.base {
             expected.push(TypeRef::Struct {
                 path: self.model.structs[base.0].path.clone(),
+                arguments: Vec::new(),
             });
         }
-        expected.extend(structure.fields.iter().map(|field| field.ty.clone()));
+        expected.extend(
+            structure
+                .fields
+                .iter()
+                .map(|field| substitute_type(&field.ty, &substitutions)),
+        );
         if initializers.len() != expected.len() {
             self.push(
                 "RES047",
@@ -3548,9 +3748,7 @@ impl Resolver<'_> {
                 self.validate_binding(expected_type, &actual, initializer.span, "initializer");
             }
         }
-        let return_type = TypeRef::Struct {
-            path: structure.path,
-        };
+        let return_type = structure_type;
         let call = ResolvedCall {
             span,
             target: CallTarget::Intrinsic(Intrinsic::StructAggregate { structure: id }),
@@ -3609,42 +3807,40 @@ impl Resolver<'_> {
                 context,
             );
         }
-        if named.arguments.is_empty() {
-            if let Some(id) = self.lookup_struct_path(&named.path.segments, &context.namespace) {
-                return match self.model.structs[id.0].kind {
-                    ast::UserTypeKind::Struct => {
-                        self.resolve_struct_aggregate(&named.path, initializers, span, context)
-                    }
-                    ast::UserTypeKind::Class => {
-                        self.resolve_user_constructor(id, initializers, span, context)
-                    }
-                    ast::UserTypeKind::Interface => {
-                        for initializer in initializers {
-                            self.resolve_expression(initializer, None, context);
-                        }
-                        self.push(
-                            "RES118",
-                            format!("interface `{}` cannot be constructed", named.path.display()),
-                            span,
-                        );
-                        (error_info(), None)
-                    }
-                };
+        let resolved = self.resolve_type(ty, &context.namespace, &context.type_parameters, false);
+        let (path, kind) = match &resolved {
+            TypeRef::Struct { path, .. } => (path, ast::UserTypeKind::Struct),
+            TypeRef::Class { path, .. } => (path, ast::UserTypeKind::Class),
+            TypeRef::Interface { path, .. } => (path, ast::UserTypeKind::Interface),
+            _ => {
+                for initializer in initializers {
+                    self.resolve_expression(initializer, None, context);
+                }
+                return (error_info(), None);
             }
-            return self.resolve_struct_aggregate(&named.path, initializers, span, context);
+        };
+        let Some(id) = self.struct_by_path.get(path).copied() else {
+            return (error_info(), None);
+        };
+        match kind {
+            ast::UserTypeKind::Struct => {
+                self.resolve_struct_aggregate(id, resolved, initializers, span, context)
+            }
+            ast::UserTypeKind::Class => {
+                self.resolve_user_constructor(id, resolved, initializers, span, context)
+            }
+            ast::UserTypeKind::Interface => {
+                for initializer in initializers {
+                    self.resolve_expression(initializer, None, context);
+                }
+                self.push(
+                    "RES118",
+                    format!("interface `{}` cannot be constructed", named.path.display()),
+                    span,
+                );
+                (error_info(), None)
+            }
         }
-        for initializer in initializers {
-            self.resolve_expression(initializer, None, context);
-        }
-        self.push(
-            "RES046",
-            format!(
-                "unsupported generic brace-construction target `{}`",
-                named.path.display()
-            ),
-            span,
-        );
-        (error_info(), None)
     }
 
     fn resolve_struct_field(
@@ -3673,7 +3869,8 @@ impl Resolver<'_> {
             );
         }
         let pointee = self.refined_automatic_pointee(receiver, &receiver_info, context, span);
-        let (TypeRef::Struct { path } | TypeRef::Class { path }) = &pointee else {
+        let (TypeRef::Struct { path, arguments } | TypeRef::Class { path, arguments }) = &pointee
+        else {
             if pointee != TypeRef::Error {
                 self.push(
                     "RES010",
@@ -3690,7 +3887,7 @@ impl Resolver<'_> {
         let Some(structure) = self.struct_by_path.get(path).copied() else {
             return (error_info(), None);
         };
-        let Some(field) = self.lookup_struct_field(structure, name) else {
+        let Some(field) = self.lookup_struct_field(structure, arguments, name) else {
             self.push(
                 "RES010",
                 format!(
@@ -3946,6 +4143,71 @@ impl Resolver<'_> {
             } if matches!(path.segments.as_slice(), [name] if name == "rwlock") => {
                 self.resolve_rwlock_constructor(type_arguments, arguments, span, context)
             }
+            ExpressionKind::GenericName {
+                path,
+                arguments: type_arguments,
+            } if self
+                .lookup_struct_path(&path.segments, &context.namespace)
+                .is_some() =>
+            {
+                let Some(structure) = self.lookup_struct_path(&path.segments, &context.namespace)
+                else {
+                    unreachable!("generic user type lookup was checked")
+                };
+                let resolved_arguments = type_arguments
+                    .iter()
+                    .map(|argument| {
+                        self.resolve_type(
+                            argument,
+                            &context.namespace,
+                            &context.type_parameters,
+                            false,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let symbol = self.model.structs[structure.0].clone();
+                if resolved_arguments.len() != symbol.type_parameters.len() {
+                    for argument in arguments {
+                        self.resolve_expression(argument, None, context);
+                    }
+                    self.push(
+                        "RES050",
+                        format!(
+                            "type `{}` expects {} type argument(s), found {}",
+                            path.display(),
+                            symbol.type_parameters.len(),
+                            resolved_arguments.len()
+                        ),
+                        span,
+                    );
+                    (error_info(), None)
+                } else if resolved_arguments.iter().any(|argument| {
+                    matches!(argument, TypeRef::Void | TypeRef::Reference { .. })
+                        || argument.contains_reference()
+                }) {
+                    for argument in arguments {
+                        self.resolve_expression(argument, None, context);
+                    }
+                    self.push(
+                        "RES124",
+                        format!(
+                            "type `{}` requires storable value type arguments",
+                            path.display()
+                        ),
+                        span,
+                    );
+                    (error_info(), None)
+                } else {
+                    let structure_type = user_type(&symbol, resolved_arguments);
+                    self.resolve_user_constructor(
+                        structure,
+                        structure_type,
+                        arguments,
+                        span,
+                        context,
+                    )
+                }
+            }
             ExpressionKind::GenericName { path, .. } => {
                 for argument in arguments {
                     self.resolve_expression(argument, None, context);
@@ -4017,14 +4279,21 @@ impl Resolver<'_> {
                 let receiver_info = self.resolve_expression(receiver, None, context);
                 let pointee =
                     self.refined_automatic_pointee(receiver, &receiver_info, context, span);
-                if let TypeRef::Struct { path } | TypeRef::Class { path } = pointee
+                if let TypeRef::Struct {
+                    path,
+                    arguments: type_arguments,
+                }
+                | TypeRef::Class {
+                    path,
+                    arguments: type_arguments,
+                } = pointee
                     && let Some(structure) = self.struct_by_path.get(&path).copied()
                     && let Some(
                         field @ StructFieldLookup {
                             ty: TypeRef::Function(_),
                             ..
                         },
-                    ) = self.lookup_struct_field(structure, name)
+                    ) = self.lookup_struct_field(structure, &type_arguments, name)
                 {
                     if !Self::member_is_accessible(field.owner, field.is_public, context) {
                         self.push(
@@ -4074,7 +4343,28 @@ impl Resolver<'_> {
                             structure, arguments, span, context,
                         );
                     }
-                    return self.resolve_user_constructor(structure, arguments, span, context);
+                    if !self.model.structs[structure.0].type_parameters.is_empty() {
+                        for argument in arguments {
+                            self.resolve_expression(argument, None, context);
+                        }
+                        self.push(
+                            "RES050",
+                            format!(
+                                "generic type `{}` requires explicit type arguments",
+                                path.display()
+                            ),
+                            span,
+                        );
+                        return (error_info(), None);
+                    }
+                    let structure_type = resolved_structure_type(&self.model.structs[structure.0]);
+                    return self.resolve_user_constructor(
+                        structure,
+                        structure_type,
+                        arguments,
+                        span,
+                        context,
+                    );
                 }
                 match self.lookup_native_instance(path, expected, context, span) {
                     NativeInstanceLookup::Resolved(instance) => {
@@ -4311,8 +4601,10 @@ impl Resolver<'_> {
             );
         }
         match self.refined_automatic_pointee(receiver, receiver_info, context, span) {
-            TypeRef::Struct { path } | TypeRef::Class { path } | TypeRef::Interface { path } => {
-                let Some(structure) = self.struct_by_path.get(&path).copied() else {
+            ref structure_type @ (TypeRef::Struct { ref path, .. }
+            | TypeRef::Class { ref path, .. }
+            | TypeRef::Interface { ref path, .. }) => {
+                let Some(structure) = self.struct_by_path.get(path).copied() else {
                     return (error_info(), None);
                 };
                 let mut pointee_receiver = receiver_info.clone();
@@ -4320,6 +4612,7 @@ impl Resolver<'_> {
                     pointee_category(&receiver_info.ty, receiver_info.category);
                 self.resolve_struct_method(
                     structure,
+                    structure_type,
                     &pointee_receiver,
                     receiver.span,
                     name,
@@ -5084,6 +5377,7 @@ impl Resolver<'_> {
     fn resolve_struct_method(
         &mut self,
         structure: StructId,
+        structure_type: &TypeRef,
         receiver: &ExpressionInfo,
         receiver_span: Span,
         name: &ast::Path,
@@ -5107,6 +5401,8 @@ impl Resolver<'_> {
         }
         let owner_is_interface =
             self.model.structs[structure.0].kind == ast::UserTypeKind::Interface;
+        let substitutions =
+            user_type_substitutions(&self.model.structs[structure.0], structure_type);
         let mut path = self.model.structs[structure.0].path.clone();
         path.push(name.segments[0].clone());
         let candidates = if owner_is_interface {
@@ -5145,7 +5441,7 @@ impl Resolver<'_> {
             self.model.functions[candidates[0].0]
                 .parameters
                 .iter()
-                .map(|parameter| canonical(&parameter.ty))
+                .map(|parameter| canonical(&substitute_type(&parameter.ty, &substitutions)))
                 .collect::<Vec<_>>()
         });
         let actual = self.resolve_arguments(arguments, contextual.as_deref(), context);
@@ -5156,7 +5452,7 @@ impl Resolver<'_> {
                 self.model.functions[id.0]
                     .parameters
                     .iter()
-                    .map(|parameter| canonical(&parameter.ty))
+                    .map(|parameter| canonical(&substitute_type(&parameter.ty, &substitutions)))
                     .eq(actual.iter().map(|argument| canonical(&argument.ty)))
             })
             .collect::<Vec<_>>();
@@ -5171,15 +5467,16 @@ impl Resolver<'_> {
                         .zip(&actual)
                         .zip(arguments)
                         .all(|((parameter, argument), syntax)| {
+                            let parameter_ty = substitute_type(&parameter.ty, &substitutions);
                             let adjusted = self.adjusted_binding_actual(
-                                &parameter.ty,
+                                &parameter_ty,
                                 argument,
                                 syntax,
                                 context,
                             );
-                            self.is_derived_reference_binding(&parameter.ty, &adjusted.ty)
-                                || self.is_interface_owner_binding(&parameter.ty, &adjusted.ty)
-                                || Self::is_shared_to_weak_binding(&parameter.ty, &adjusted.ty)
+                            self.is_derived_reference_binding(&parameter_ty, &adjusted.ty)
+                                || self.is_interface_owner_binding(&parameter_ty, &adjusted.ty)
+                                || Self::is_shared_to_weak_binding(&parameter_ty, &adjusted.ty)
                         })
                 })
                 .collect::<Vec<_>>()
@@ -5236,10 +5533,11 @@ impl Resolver<'_> {
         }
         for ((parameter, argument), syntax) in symbol.parameters.iter().zip(&actual).zip(arguments)
         {
-            let argument = self.adjusted_binding_actual(&parameter.ty, argument, syntax, context);
-            self.validate_binding(&parameter.ty, &argument, syntax.span, "argument");
+            let parameter_ty = substitute_type(&parameter.ty, &substitutions);
+            let argument = self.adjusted_binding_actual(&parameter_ty, argument, syntax, context);
+            self.validate_binding(&parameter_ty, &argument, syntax.span, "argument");
         }
-        let return_type = symbol.return_type;
+        let return_type = substitute_type(&symbol.return_type, &substitutions);
         let call = ResolvedCall {
             span,
             target: if owner_is_interface {
@@ -5349,7 +5647,12 @@ impl Resolver<'_> {
             );
             return (error_info(), None);
         }
-        let target = self.resolve_type(&type_arguments[0], &context.namespace, false);
+        let target = self.resolve_type(
+            &type_arguments[0],
+            &context.namespace,
+            &context.type_parameters,
+            false,
+        );
         if target == TypeRef::Error {
             for argument in arguments {
                 self.resolve_expression(argument, None, context);
@@ -5399,7 +5702,9 @@ impl Resolver<'_> {
     ) -> (ExpressionInfo, Option<ResolvedCall>) {
         let elements = type_arguments
             .iter()
-            .map(|element| self.resolve_type(element, &context.namespace, false))
+            .map(|element| {
+                self.resolve_type(element, &context.namespace, &context.type_parameters, false)
+            })
             .collect::<Vec<_>>();
         if !(2..=12).contains(&elements.len()) {
             for argument in arguments {
@@ -5462,7 +5767,12 @@ impl Resolver<'_> {
             );
             return (error_info(), None);
         }
-        let target = self.resolve_type(&type_arguments[0], &context.namespace, false);
+        let target = self.resolve_type(
+            &type_arguments[0],
+            &context.namespace,
+            &context.type_parameters,
+            false,
+        );
         if target == TypeRef::Error {
             for argument in arguments {
                 self.resolve_expression(argument, None, context);
@@ -5531,7 +5841,12 @@ impl Resolver<'_> {
             );
             return (error_info(), None);
         }
-        let target = self.resolve_type(&type_arguments[0], &context.namespace, false);
+        let target = self.resolve_type(
+            &type_arguments[0],
+            &context.namespace,
+            &context.type_parameters,
+            false,
+        );
         if matches!(target, TypeRef::Void | TypeRef::Reference { .. }) {
             for argument in arguments {
                 self.resolve_expression(argument, None, context);
@@ -5614,23 +5929,29 @@ impl Resolver<'_> {
                     throws,
                 })
             }
-            TypeRef::Struct { path } => {
+            TypeRef::Struct { path, .. } => {
+                let structure = self.struct_by_path.get(path).copied()?;
                 self.resolve_struct_aggregate(
-                    &ast::Path {
-                        segments: path.clone(),
-                    },
+                    structure,
+                    canonical_ref(target).clone(),
                     initializers,
                     span,
                     context,
                 )
                 .1
             }
-            TypeRef::Class { path } => {
+            TypeRef::Class { path, .. } => {
                 let structure = self.struct_by_path.get(path).copied()?;
-                self.resolve_user_constructor(structure, initializers, span, context)
-                    .1
+                self.resolve_user_constructor(
+                    structure,
+                    canonical_ref(target).clone(),
+                    initializers,
+                    span,
+                    context,
+                )
+                .1
             }
-            TypeRef::Interface { path } => {
+            TypeRef::Interface { path, .. } => {
                 for initializer in initializers {
                     self.resolve_expression(initializer, None, context);
                 }
@@ -5669,7 +5990,12 @@ impl Resolver<'_> {
             );
             return (error_info(), None);
         }
-        let target = self.resolve_type(&type_arguments[0], &context.namespace, false);
+        let target = self.resolve_type(
+            &type_arguments[0],
+            &context.namespace,
+            &context.type_parameters,
+            false,
+        );
         if target == TypeRef::Error {
             for argument in arguments {
                 self.resolve_expression(argument, None, context);
@@ -6022,6 +6348,7 @@ impl Resolver<'_> {
         self.validate_binding(&expected, &actual, arguments[0].span, "exception message");
         let return_type = TypeRef::Struct {
             path: self.model.structs[structure.0].path.clone(),
+            arguments: Vec::new(),
         };
         let call = ResolvedCall {
             span,
@@ -6036,6 +6363,7 @@ impl Resolver<'_> {
     fn resolve_user_constructor(
         &mut self,
         structure: StructId,
+        structure_type: TypeRef,
         arguments: &[Expression],
         span: Span,
         context: &mut FunctionContext,
@@ -6055,7 +6383,7 @@ impl Resolver<'_> {
             );
             return (error_info(), None);
         }
-        let structure_type = resolved_structure_type(&structure_symbol);
+        let substitutions = user_type_substitutions(&structure_symbol, &structure_type);
         let candidates = self
             .constructor_sets
             .get(&structure)
@@ -6094,7 +6422,7 @@ impl Resolver<'_> {
             self.model.constructors[arity_candidates[0].0]
                 .parameters
                 .iter()
-                .map(|parameter| canonical(&parameter.ty))
+                .map(|parameter| canonical(&substitute_type(&parameter.ty, &substitutions)))
                 .collect::<Vec<_>>()
         });
         let actual = self.resolve_arguments(arguments, contextual_parameters.as_deref(), context);
@@ -6105,7 +6433,7 @@ impl Resolver<'_> {
                 self.model.constructors[id.0]
                     .parameters
                     .iter()
-                    .map(|parameter| canonical(&parameter.ty))
+                    .map(|parameter| canonical(&substitute_type(&parameter.ty, &substitutions)))
                     .eq(actual.iter().map(|argument| canonical(&argument.ty)))
             })
             .collect::<Vec<_>>();
@@ -6120,15 +6448,16 @@ impl Resolver<'_> {
                         .zip(&actual)
                         .zip(arguments)
                         .all(|((parameter, argument), syntax)| {
+                            let parameter_ty = substitute_type(&parameter.ty, &substitutions);
                             let adjusted = self.adjusted_binding_actual(
-                                &parameter.ty,
+                                &parameter_ty,
                                 argument,
                                 syntax,
                                 context,
                             );
-                            self.is_derived_reference_binding(&parameter.ty, &adjusted.ty)
-                                || self.is_interface_owner_binding(&parameter.ty, &adjusted.ty)
-                                || Self::is_shared_to_weak_binding(&parameter.ty, &adjusted.ty)
+                            self.is_derived_reference_binding(&parameter_ty, &adjusted.ty)
+                                || self.is_interface_owner_binding(&parameter_ty, &adjusted.ty)
+                                || Self::is_shared_to_weak_binding(&parameter_ty, &adjusted.ty)
                         })
                 })
                 .collect::<Vec<_>>()
@@ -6213,10 +6542,11 @@ impl Resolver<'_> {
         for ((parameter, argument), expression) in
             symbol.parameters.iter().zip(&actual).zip(arguments)
         {
+            let parameter_ty = substitute_type(&parameter.ty, &substitutions);
             let argument =
-                self.adjusted_binding_actual(&parameter.ty, argument, expression, context);
+                self.adjusted_binding_actual(&parameter_ty, argument, expression, context);
             self.validate_binding(
-                &parameter.ty,
+                &parameter_ty,
                 &argument,
                 expression.span,
                 "constructor argument",
@@ -6723,10 +7053,13 @@ impl Resolver<'_> {
         };
         if let TypeRef::Interface {
             path: expected_path,
+            ..
         } = canonical_ref(expected_target)
         {
             return match automatic_pointee(actual) {
-                TypeRef::Class { path: actual_path } => self
+                TypeRef::Class {
+                    path: actual_path, ..
+                } => self
                     .struct_by_path
                     .get(actual_path)
                     .zip(self.struct_by_path.get(expected_path))
@@ -6734,7 +7067,9 @@ impl Resolver<'_> {
                         self.class_implements_interface(*class, *interface)
                             && self.class_supports_interface_object(*class)
                     }),
-                TypeRef::Interface { path: actual_path } => {
+                TypeRef::Interface {
+                    path: actual_path, ..
+                } => {
                     actual_path == expected_path
                         || self.struct_by_path.get(actual_path).is_some_and(|actual| {
                             self.interface_inherits_path(*actual, expected_path)
@@ -6745,11 +7080,15 @@ impl Resolver<'_> {
         }
         let TypeRef::Struct {
             path: expected_path,
+            ..
         } = canonical_ref(expected_target)
         else {
             return false;
         };
-        let TypeRef::Struct { path: actual_path } = automatic_pointee(actual) else {
+        let TypeRef::Struct {
+            path: actual_path, ..
+        } = automatic_pointee(actual)
+        else {
             return false;
         };
         if expected_path == actual_path {
@@ -6792,10 +7131,13 @@ impl Resolver<'_> {
         {
             return false;
         }
-        let TypeRef::Interface { path: interface } = canonical_ref(expected_target) else {
+        let TypeRef::Interface {
+            path: interface, ..
+        } = canonical_ref(expected_target)
+        else {
             return false;
         };
-        let TypeRef::Class { path: class } = canonical_ref(actual_target) else {
+        let TypeRef::Class { path: class, .. } = canonical_ref(actual_target) else {
             return false;
         };
         self.struct_by_path
@@ -6868,7 +7210,7 @@ impl Resolver<'_> {
     ) {
         if canonical(expected) == canonical(&actual.ty)
             && actual.category != ValueCategory::Temporary
-            && !is_copyable(&canonical(expected))
+            && !self.is_copyable_type(&canonical(expected))
         {
             self.push(
                 "RES027",
@@ -6952,7 +7294,7 @@ impl Resolver<'_> {
     ) -> Vec<StructId> {
         let mut exceptions = Vec::new();
         for ty in syntax {
-            let resolved = self.resolve_type(ty, namespace, false);
+            let resolved = self.resolve_type(ty, namespace, &[], false);
             if resolved.is_reference() {
                 self.push(
                     "RES070",
@@ -6961,7 +7303,7 @@ impl Resolver<'_> {
                 );
                 continue;
             }
-            let TypeRef::Struct { path } = canonical(&resolved) else {
+            let TypeRef::Struct { path, .. } = canonical(&resolved) else {
                 if resolved != TypeRef::Error {
                     self.push(
                         "RES070",
@@ -7090,7 +7432,13 @@ impl Resolver<'_> {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn resolve_type(&mut self, ty: &ast::Type, namespace: &[String], allow_auto: bool) -> TypeRef {
+    fn resolve_type(
+        &mut self,
+        ty: &ast::Type,
+        namespace: &[String],
+        type_parameters: &[String],
+        allow_auto: bool,
+    ) -> TypeRef {
         let value = match &ty.kind {
             TypeKind::Inferred if allow_auto => TypeRef::Error,
             TypeKind::Inferred => {
@@ -7109,7 +7457,9 @@ impl Resolver<'_> {
             } => {
                 let resolved_parameters = parameters
                     .iter()
-                    .map(|parameter| self.resolve_type(parameter, namespace, false))
+                    .map(|parameter| {
+                        self.resolve_type(parameter, namespace, type_parameters, false)
+                    })
                     .collect::<Vec<_>>();
                 for (parameter, resolved) in parameters.iter().zip(&resolved_parameters) {
                     if canonical(resolved) == TypeRef::Void {
@@ -7120,7 +7470,7 @@ impl Resolver<'_> {
                         );
                     }
                 }
-                let return_type = self.resolve_type(return_type, namespace, false);
+                let return_type = self.resolve_type(return_type, namespace, type_parameters, false);
                 if return_type.is_reference() || return_type.contains_reference() {
                     self.push(
                         "RES092",
@@ -7140,7 +7490,18 @@ impl Resolver<'_> {
             }
             TypeKind::Named(named) => {
                 let segments = &named.path.segments;
-                if self.is_reserved_rust_path(
+                if let [name] = segments.as_slice()
+                    && type_parameters.contains(name)
+                {
+                    if !named.arguments.is_empty() {
+                        self.push(
+                            "RES050",
+                            format!("generic parameter `{name}` cannot have type arguments"),
+                            ty.span,
+                        );
+                    }
+                    TypeRef::Parameter(name.clone())
+                } else if self.is_reserved_rust_path(
                     segments,
                     namespace,
                     &["rust", "std", "thread", "JoinHandle"],
@@ -7148,7 +7509,9 @@ impl Resolver<'_> {
                     let arguments = named
                         .arguments
                         .iter()
-                        .map(|argument| self.resolve_type(argument, namespace, false))
+                        .map(|argument| {
+                            self.resolve_type(argument, namespace, type_parameters, false)
+                        })
                         .collect::<Vec<_>>();
                     if arguments.len() != 1 {
                         self.push(
@@ -7192,7 +7555,9 @@ impl Resolver<'_> {
                     let arguments = named
                         .arguments
                         .iter()
-                        .map(|argument| self.resolve_type(argument, namespace, false))
+                        .map(|argument| {
+                            self.resolve_type(argument, namespace, type_parameters, false)
+                        })
                         .collect::<Vec<_>>();
                     if arguments.len() != 1 {
                         self.push(
@@ -7218,7 +7583,9 @@ impl Resolver<'_> {
                     let arguments = named
                         .arguments
                         .iter()
-                        .map(|argument| self.resolve_type(argument, namespace, false))
+                        .map(|argument| {
+                            self.resolve_type(argument, namespace, type_parameters, false)
+                        })
                         .collect::<Vec<_>>();
                     if !(2..=12).contains(&arguments.len()) {
                         self.push(
@@ -7247,7 +7614,9 @@ impl Resolver<'_> {
                     let arguments = named
                         .arguments
                         .iter()
-                        .map(|argument| self.resolve_type(argument, namespace, false))
+                        .map(|argument| {
+                            self.resolve_type(argument, namespace, type_parameters, false)
+                        })
                         .collect::<Vec<_>>();
                     if arguments.len() != 1 {
                         self.push(
@@ -7278,7 +7647,9 @@ impl Resolver<'_> {
                     let arguments = named
                         .arguments
                         .iter()
-                        .map(|argument| self.resolve_type(argument, namespace, false))
+                        .map(|argument| {
+                            self.resolve_type(argument, namespace, type_parameters, false)
+                        })
                         .collect::<Vec<_>>();
                     if arguments.len() != 1 {
                         self.push(
@@ -7309,7 +7680,9 @@ impl Resolver<'_> {
                     let arguments = named
                         .arguments
                         .iter()
-                        .map(|argument| self.resolve_type(argument, namespace, false))
+                        .map(|argument| {
+                            self.resolve_type(argument, namespace, type_parameters, false)
+                        })
                         .collect::<Vec<_>>();
                     if arguments.len() != 1 {
                         self.push(
@@ -7370,29 +7743,51 @@ impl Resolver<'_> {
                     let arguments = named
                         .arguments
                         .iter()
-                        .map(|argument| self.resolve_type(argument, namespace, false))
+                        .map(|argument| {
+                            self.resolve_type(argument, namespace, type_parameters, false)
+                        })
                         .collect::<Vec<_>>();
                     if let Some(id) = self.lookup_struct_path(segments, namespace) {
-                        if !arguments.is_empty() {
+                        let symbol = self.model.structs[id.0].clone();
+                        if arguments.len() != symbol.type_parameters.len() {
                             self.push(
                                 "RES050",
                                 format!(
-                                    "struct `{}` cannot have type arguments",
+                                    "type `{}` expects {} type argument(s), found {}",
+                                    named.path.display(),
+                                    symbol.type_parameters.len(),
+                                    arguments.len()
+                                ),
+                                ty.span,
+                            );
+                            return TypeRef::Error;
+                        }
+                        if arguments.iter().any(|argument| {
+                            matches!(argument, TypeRef::Void | TypeRef::Reference { .. })
+                                || argument.contains_reference()
+                        }) {
+                            self.push(
+                                "RES124",
+                                format!(
+                                    "type `{}` requires storable value type arguments",
                                     named.path.display()
                                 ),
                                 ty.span,
                             );
+                            return TypeRef::Error;
                         }
-                        let symbol = &self.model.structs[id.0];
                         match symbol.kind {
                             ast::UserTypeKind::Struct => TypeRef::Struct {
-                                path: symbol.path.clone(),
+                                path: symbol.path,
+                                arguments,
                             },
                             ast::UserTypeKind::Class => TypeRef::Class {
-                                path: symbol.path.clone(),
+                                path: symbol.path,
+                                arguments,
                             },
                             ast::UserTypeKind::Interface => TypeRef::Interface {
-                                path: symbol.path.clone(),
+                                path: symbol.path,
+                                arguments,
                             },
                         }
                     } else {
@@ -7515,7 +7910,7 @@ impl Resolver<'_> {
     }
 
     fn reject_bare_interface_type(&mut self, ty: &TypeRef, span: Span, role: &str) {
-        if let TypeRef::Interface { path } = ty {
+        if let TypeRef::Interface { path, .. } = ty {
             self.push(
                 "RES122",
                 format!(
@@ -7609,13 +8004,19 @@ impl Resolver<'_> {
                 )),
             };
         }
-        if let TypeRef::Struct { path } = ty {
+        if let TypeRef::Struct { path, arguments } = ty {
             let Some(structure) = self.struct_by_path.get(path).copied() else {
                 return Some(format!("struct `{}` is unresolved", display_path(path)));
             };
+            if !arguments.is_empty() {
+                return Some(format!(
+                    "generic struct `{}` automatic JSON conversion is deferred",
+                    display_user_type(path, arguments)
+                ));
+            }
             return self.json_struct_conversion_error(structure, visiting);
         }
-        if let TypeRef::Class { path } = ty {
+        if let TypeRef::Class { path, .. } = ty {
             return Some(format!(
                 "`{}` is a class; only data structs have automatic JSON conversion",
                 display_path(path)
@@ -7703,7 +8104,7 @@ impl Resolver<'_> {
                 }
                 _ => {}
             },
-            TypeRef::Struct { path } => {
+            TypeRef::Struct { path, .. } => {
                 let Some(structure) = self.struct_by_path.get(path).copied() else {
                     return;
                 };
@@ -7717,6 +8118,7 @@ impl Resolver<'_> {
                     self.collect_json_conversion_structs(
                         &TypeRef::Struct {
                             path: base.path.clone(),
+                            arguments: Vec::new(),
                         },
                         visiting,
                         output,
@@ -7735,10 +8137,123 @@ impl Resolver<'_> {
         self.thread_auto_trait(ty, false, &mut BTreeSet::new())
     }
 
+    fn is_copyable_type(&self, ty: &TypeRef) -> bool {
+        match canonical_ref(ty) {
+            TypeRef::Struct { path, arguments } => {
+                self.struct_by_path.get(path).is_some_and(|structure| {
+                    self.structure_is_cloneable(*structure, arguments, &mut BTreeSet::new())
+                })
+            }
+            concrete => is_copyable(concrete),
+        }
+    }
+
+    fn structure_is_cloneable(
+        &self,
+        structure: StructId,
+        arguments: &[TypeRef],
+        visiting: &mut BTreeSet<(StructId, Vec<TypeRef>)>,
+    ) -> bool {
+        let key = (structure, arguments.to_vec());
+        if !visiting.insert(key.clone()) {
+            return true;
+        }
+        let symbol = &self.model.structs[structure.0];
+        if symbol.kind != ast::UserTypeKind::Struct {
+            visiting.remove(&key);
+            return false;
+        }
+        let substitutions = symbol
+            .type_parameters
+            .iter()
+            .cloned()
+            .zip(arguments.iter().cloned())
+            .collect::<BTreeMap<_, _>>();
+        let cloneable = symbol
+            .base
+            .is_none_or(|base| self.structure_is_cloneable(base, &[], visiting))
+            && symbol.fields.iter().all(|field| {
+                self.type_is_cloneable(&substitute_type(&field.ty, &substitutions), visiting)
+            });
+        visiting.remove(&key);
+        cloneable
+    }
+
+    fn type_is_cloneable(
+        &self,
+        ty: &TypeRef,
+        visiting: &mut BTreeSet<(StructId, Vec<TypeRef>)>,
+    ) -> bool {
+        match canonical_ref(ty) {
+            TypeRef::Bool
+            | TypeRef::Char
+            | TypeRef::I8
+            | TypeRef::I16
+            | TypeRef::I32
+            | TypeRef::I64
+            | TypeRef::I128
+            | TypeRef::Isize
+            | TypeRef::U8
+            | TypeRef::U16
+            | TypeRef::U32
+            | TypeRef::U64
+            | TypeRef::U128
+            | TypeRef::Usize
+            | TypeRef::F32
+            | TypeRef::F64
+            | TypeRef::Reference { .. } => true,
+            TypeRef::Tuple(elements) => elements
+                .iter()
+                .all(|element| self.type_is_cloneable(element, visiting)),
+            TypeRef::Native { path, arguments } => {
+                matches!(
+                    path.as_str(),
+                    "rust::String"
+                        | "rust::Vec"
+                        | "rust::List"
+                        | "rust::Map"
+                        | "rust::Queue"
+                        | "rust::Set"
+                        | "rust::Option"
+                        | "rust::Result"
+                        | "rust::stainless_runtime::Var"
+                ) && arguments
+                    .iter()
+                    .all(|argument| self.type_is_cloneable(argument, visiting))
+            }
+            TypeRef::Struct { path, arguments } => {
+                self.struct_by_path.get(path).is_some_and(|structure| {
+                    self.structure_is_cloneable(*structure, arguments, visiting)
+                })
+            }
+            TypeRef::Pointer { kind, .. } => matches!(
+                kind,
+                PointerKind::Shared | PointerKind::SharedNullable | PointerKind::Weak
+            ),
+            TypeRef::Function(function) => function.kind == StoredFunctionKind::Shared,
+            TypeRef::Void
+            | TypeRef::Parameter(_)
+            | TypeRef::Callback(_)
+            | TypeRef::Mutex(_)
+            | TypeRef::MutexGuard(_)
+            | TypeRef::RwLock(_)
+            | TypeRef::RwLockReadGuard(_)
+            | TypeRef::RwLockWriteGuard(_)
+            | TypeRef::Condition
+            | TypeRef::ThreadHandle(_)
+            | TypeRef::ThreadScope
+            | TypeRef::ScopedThreadHandle(_)
+            | TypeRef::Class { .. }
+            | TypeRef::Interface { .. }
+            | TypeRef::Error => false,
+        }
+    }
+
     fn thread_sync(&self, ty: &TypeRef) -> bool {
         self.thread_auto_trait(ty, true, &mut BTreeSet::new())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn thread_auto_trait(
         &self,
         ty: &TypeRef,
@@ -7773,19 +8288,28 @@ impl Resolver<'_> {
             TypeRef::Tuple(elements) => elements
                 .iter()
                 .all(|element| self.thread_auto_trait(element, sync, visiting)),
-            TypeRef::Struct { path } | TypeRef::Class { path } => {
+            TypeRef::Struct { path, arguments } | TypeRef::Class { path, arguments } => {
                 self.struct_by_path.get(path).is_some_and(|id| {
                     let structure = &self.model.structs[id.0];
+                    let substitutions = structure
+                        .type_parameters
+                        .iter()
+                        .cloned()
+                        .zip(arguments.iter().cloned())
+                        .collect::<BTreeMap<_, _>>();
                     structure.base.is_none_or(|base| {
                         self.thread_auto_trait(
                             &resolved_structure_type(&self.model.structs[base.0]),
                             sync,
                             visiting,
                         )
-                    }) && structure
-                        .fields
-                        .iter()
-                        .all(|field| self.thread_auto_trait(&field.ty, sync, visiting))
+                    }) && structure.fields.iter().all(|field| {
+                        self.thread_auto_trait(
+                            &substitute_type(&field.ty, &substitutions),
+                            sync,
+                            visiting,
+                        )
+                    })
                 })
             }
             TypeRef::Native { path, arguments } => {
@@ -7873,8 +8397,15 @@ impl Resolver<'_> {
     fn lookup_struct_field(
         &self,
         structure: StructId,
+        arguments: &[TypeRef],
         requested: &ast::Path,
     ) -> Option<StructFieldLookup> {
+        let substitutions = self.model.structs[structure.0]
+            .type_parameters
+            .iter()
+            .cloned()
+            .zip(arguments.iter().cloned())
+            .collect::<BTreeMap<_, _>>();
         let (field_name, qualification) = requested.segments.split_last()?;
         if qualification.is_empty() {
             let mut matches = Vec::new();
@@ -7886,7 +8417,7 @@ impl Resolver<'_> {
                     let mut field_path = access_path.clone();
                     field_path.push(field.name.clone());
                     matches.push(StructFieldLookup {
-                        ty: field.ty.clone(),
+                        ty: substitute_type(&field.ty, &substitutions),
                         access_path: field_path,
                         owner: id,
                         is_public: field.is_public,
@@ -7908,7 +8439,7 @@ impl Resolver<'_> {
             if let Some(field) = symbol.fields.iter().find(|field| field.name == *field_name) {
                 access_path.push(field.name.clone());
                 return Some(StructFieldLookup {
-                    ty: field.ty.clone(),
+                    ty: substitute_type(&field.ty, &substitutions),
                     access_path,
                     owner: id,
                     is_public: field.is_public,
@@ -8194,13 +8725,72 @@ fn substitute(ty: &TypeRef, substitutions: &BTreeMap<String, TypeRef>) -> TypeRe
         TypeRef::ScopedThreadHandle(target) => {
             TypeRef::ScopedThreadHandle(Box::new(substitute(target, substitutions)))
         }
-        TypeRef::Struct { .. } | TypeRef::Class { .. } | TypeRef::Interface { .. } => ty.clone(),
+        TypeRef::Struct { path, arguments } => TypeRef::Struct {
+            path: path.clone(),
+            arguments: arguments
+                .iter()
+                .map(|argument| substitute(argument, substitutions))
+                .collect(),
+        },
+        TypeRef::Class { path, arguments } => TypeRef::Class {
+            path: path.clone(),
+            arguments: arguments
+                .iter()
+                .map(|argument| substitute(argument, substitutions))
+                .collect(),
+        },
+        TypeRef::Interface { path, arguments } => TypeRef::Interface {
+            path: path.clone(),
+            arguments: arguments
+                .iter()
+                .map(|argument| substitute(argument, substitutions))
+                .collect(),
+        },
         TypeRef::Reference { mutable, target } => TypeRef::Reference {
             mutable: *mutable,
             target: Box::new(substitute(target, substitutions)),
         },
         concrete => concrete.clone(),
     }
+}
+
+fn substitute_type(ty: &TypeRef, substitutions: &BTreeMap<String, TypeRef>) -> TypeRef {
+    substitute(ty, substitutions)
+}
+
+fn user_type(structure: &StructSymbol, arguments: Vec<TypeRef>) -> TypeRef {
+    match structure.kind {
+        ast::UserTypeKind::Struct => TypeRef::Struct {
+            path: structure.path.clone(),
+            arguments,
+        },
+        ast::UserTypeKind::Class => TypeRef::Class {
+            path: structure.path.clone(),
+            arguments,
+        },
+        ast::UserTypeKind::Interface => TypeRef::Interface {
+            path: structure.path.clone(),
+            arguments,
+        },
+    }
+}
+
+fn user_type_substitutions(
+    structure: &StructSymbol,
+    instance: &TypeRef,
+) -> BTreeMap<String, TypeRef> {
+    structure
+        .type_parameters
+        .iter()
+        .cloned()
+        .zip(
+            instance
+                .user_arguments()
+                .unwrap_or_default()
+                .iter()
+                .cloned(),
+        )
+        .collect()
 }
 
 fn qualify_declaration_path(namespace: &[String], name: &[String]) -> Vec<String> {
@@ -8846,9 +9436,9 @@ fn display_type(ty: &TypeRef) -> String {
             "rust::std::thread::ScopedJoinHandle<{}>",
             display_type(target)
         ),
-        TypeRef::Struct { path } | TypeRef::Class { path } | TypeRef::Interface { path } => {
-            display_path(path)
-        }
+        TypeRef::Struct { path, arguments }
+        | TypeRef::Class { path, arguments }
+        | TypeRef::Interface { path, arguments } => display_user_type(path, arguments),
         TypeRef::Reference { mutable, target } => {
             if *mutable {
                 format!("{}&", display_type(target))
@@ -8860,15 +9450,24 @@ fn display_type(ty: &TypeRef) -> String {
 }
 
 fn resolved_structure_type(structure: &StructSymbol) -> TypeRef {
+    let arguments = structure
+        .type_parameters
+        .iter()
+        .cloned()
+        .map(TypeRef::Parameter)
+        .collect();
     match structure.kind {
         ast::UserTypeKind::Struct => TypeRef::Struct {
             path: structure.path.clone(),
+            arguments,
         },
         ast::UserTypeKind::Class => TypeRef::Class {
             path: structure.path.clone(),
+            arguments,
         },
         ast::UserTypeKind::Interface => TypeRef::Interface {
             path: structure.path.clone(),
+            arguments,
         },
     }
 }
@@ -8894,6 +9493,22 @@ fn base_field_name(structure: &StructSymbol) -> String {
 
 fn display_path(path: &[String]) -> String {
     path.join("::")
+}
+
+fn display_user_type(path: &[String], arguments: &[TypeRef]) -> String {
+    let path = display_path(path);
+    if arguments.is_empty() {
+        path
+    } else {
+        format!(
+            "{path}<{}>",
+            arguments
+                .iter()
+                .map(display_type)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
 }
 
 fn display_argument_types(arguments: &[ExpressionInfo]) -> String {
