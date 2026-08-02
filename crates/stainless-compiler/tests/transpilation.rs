@@ -829,6 +829,9 @@ fn mutex_and_condition_lower_to_thread_safe_rust_and_wake_waiters() {
         .expect("mutex reference sample should emit Rust");
     assert!(rust.contains("::std::sync::Mutex<"), "{rust}");
     assert!(rust.contains("::std::sync::MutexGuard<'_"), "{rust}");
+    assert!(rust.contains("::std::sync::RwLock<"), "{rust}");
+    assert!(rust.contains("::std::sync::RwLockReadGuard<"), "{rust}");
+    assert!(rust.contains("::std::sync::RwLockWriteGuard<"), "{rust}");
     assert!(rust.contains("::std::sync::Condvar"), "{rust}");
     assert!(rust.contains("into_inner()"), "{rust}");
 
@@ -853,6 +856,9 @@ fn mutex_and_condition_lower_to_thread_safe_rust_and_wake_waiters() {
     let new_condition = function(&["new_condition"]);
     let wait = function(&["wait_for_value"]);
     let publish = function(&["publish_value"]);
+    let new_rw_state = function(&["new_rw_state"]);
+    let read_value = function(&["read_value"]);
+    let write_value = function(&["write_value"]);
     write!(
         rust,
         r#"
@@ -865,6 +871,10 @@ fn main() {{
     ::std::thread::sleep(::std::time::Duration::from_millis(10));
     {publish}(state, changed, 42);
     assert_eq!(waiter.join().expect("waiter panicked"), 42);
+    let rw_state = {new_rw_state}();
+    assert_eq!({read_value}(::std::sync::Arc::clone(&rw_state)), 7);
+    {write_value}(::std::sync::Arc::clone(&rw_state), 9);
+    assert_eq!({read_value}(rw_state), 9);
 }}
 "#
     )
@@ -1675,6 +1685,11 @@ fn cargo_executes_checked_standard_file_io() {
     assert!(rust.contains("::stainless_runtime::Fs::read_to_string"));
     assert!(rust.contains("::stainless_runtime::Fs::write_text"));
     assert!(rust.contains("::stainless_runtime::Fs::write_bytes"));
+    assert!(rust.contains("::stainless_runtime::PositionedFile::open"));
+    assert!(rust.contains(".pread("));
+    assert!(rust.contains("::stainless_runtime::PositionedOpenOptions::new"));
+    assert!(rust.contains(".pwrite("));
+    assert!(rust.contains(".sync_data("));
     assert!(rust.contains("__stainless_namespace_stainless::IoError"));
     write!(
         rust,

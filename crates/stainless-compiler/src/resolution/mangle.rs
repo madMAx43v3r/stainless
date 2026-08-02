@@ -82,6 +82,18 @@ fn encode_type(ty: &TypeRef, output: &mut String) {
             output.push_str("mutex_guard_");
             encode_type(target, output);
         }
+        TypeRef::RwLock(target) => {
+            output.push_str("rwlock_");
+            encode_type(target, output);
+        }
+        TypeRef::RwLockReadGuard(target) => {
+            output.push_str("rwlock_read_guard_");
+            encode_type(target, output);
+        }
+        TypeRef::RwLockWriteGuard(target) => {
+            output.push_str("rwlock_write_guard_");
+            encode_type(target, output);
+        }
         TypeRef::Condition => output.push_str("condition"),
         TypeRef::ThreadHandle(target) => {
             output.push_str("thread_handle_");

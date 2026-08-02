@@ -9,7 +9,7 @@ Stainless is a new C++-like language that transpiles to Rust.
 > structured Rust emission for the supported function/control-flow,
 > struct/class/interface, constructor, checked-exception, standard collections,
 > `Vec`/`String`, native
-> JSON, the local/function ownership-pointer family, mutex/condition
+> JSON, the local/function ownership-pointer family, mutex/RW-lock/condition
 > synchronization, owned/scoped threads, and first external-wrapper subset. The
 > workspace now includes the compact
 > `stainless-runtime` used by generated JSON code. An initial move/borrow
@@ -164,7 +164,7 @@ implemented:
   unique/nullable/shared/weak/atomic ownership-pointer subset, including
   nullable guards and synchronized slots.
 - [`23_mutex_and_condition.stl`](docs/ref/23_mutex_and_condition.stl) —
-  mutex-protected mutable state, scoped inferred guards, condition waits, and
+  mutex/RW-lock-protected state, scoped inferred guards, condition waits, and
   one/all waiter notification.
 - [`24_threads.stl`](docs/ref/24_threads.stl) — owned and scoped Rust threads,
   `Send` capture validation, move-only join handles, typed results, and checked
@@ -182,7 +182,7 @@ currently parsed, resolved, lowered to HIR, emitted as Rust, and compiled by
 `15_checked_exception_subset.stl` sample, the native-Result
 `16_native_result_unwrap.stl` sample, and the formatting-macro
 `20_formatting_macros.stl` sample, and the ownership-pointer
-`22_pointer_family.stl` sample and the mutex/condition
+`22_pointer_family.stl` sample and the mutex/RW-lock/condition
 `23_mutex_and_condition.stl` sample, the owned/scoped thread
 `24_threads.stl` sample, and the standard-collection `25_collections.stl`
 sample. The JSON
@@ -1836,7 +1836,7 @@ allocation after a store or swap. The `__` operation names are reserved
 compiler API, and a more specialized lowering may replace `RwLock` later
 without changing Stainless semantics.
 
-#### Mutexes and conditions
+#### Mutexes, reader/writer locks, and conditions
 
 Stainless calls the C++ `std::condition_variable` concept simply `condition`.
 It is a compiler-known synchronization type, not a native Rust name that must
@@ -1846,6 +1846,9 @@ be imported. The initial synchronization vocabulary maps directly to safe Rust:
 | --- | --- | --- |
 | `mutex<T>` | `std::sync::Mutex<T>` | Exclusive mutable access to one `T` |
 | inferred lock guard | `std::sync::MutexGuard<'_, T>` | Scoped, move-only lock ownership |
+| `rwlock<T>` | `std::sync::RwLock<T>` | Concurrent readers or one exclusive writer |
+| inferred read guard | `std::sync::RwLockReadGuard<'_, T>` | Scoped, shared access to one `T` |
+| inferred write guard | `std::sync::RwLockWriteGuard<'_, T>` | Scoped, mutable access to one `T` |
 | `condition` | `std::sync::Condvar` | Wait and one/all waiter notification |
 
 Construction and the core API use C++-like syntax with Rust-like method names:
@@ -1857,6 +1860,10 @@ condition changed;
 auto guard = local.lock();
 guard.ready = true;
 changed.notify_one();
+
+rwlock<State> indexed = rwlock<State>(State{true, 7});
+auto view = indexed.read();
+i32 value = view.value;
 ```
 
 `lock()` produces an internal guard type that source code cannot spell. The
@@ -1886,25 +1893,36 @@ lowered to. The current compiler verifies the guard type and lifetime but does
 not yet prove that instance identity, so violating this rule can produce the
 underlying Rust panic.
 
-`mutex<T>` and `condition` are non-copyable. Because Stainless structs are
-implicitly copyable data, neither may be stored directly in a struct in the
-current language subset. Shared synchronized state instead uses
-`shared_ptr<mutex<T>>` and a condition can likewise use
-`shared_ptr<condition>`:
+`rwlock<T>.read()` allows any number of concurrent readers and exposes only
+const access to `T`. `rwlock<T>.write()` excludes both readers and other
+writers and exposes mutable access. Both guard types are inferred and obey the
+same lexical, non-copyable, non-returnable restrictions as a mutex guard.
+Condition waits accept only mutex guards; Rust condition variables do not wait
+on reader/writer locks. Generated code recovers poisoned Rust locks by taking
+their inner value, consistently with `mutex<T>`.
+
+`mutex<T>`, `rwlock<T>`, and `condition` are non-copyable. Because Stainless
+structs are implicitly copyable data, none may be stored directly in a struct
+in the current language subset. Shared synchronized state instead uses
+`shared_ptr<mutex<T>>` / `shared_ptr<rwlock<T>>`, and a condition can likewise
+use `shared_ptr<condition>`:
 
 ```cpp
 shared_ptr<mutex<State>> state =
     make_shared<mutex<State>>{false, 0};
 shared_ptr<condition> changed = make_shared<condition>();
+shared_ptr<rwlock<State>> index =
+    make_shared<rwlock<State>>{false, 0};
 ```
 
-These two pointee types are deliberate exceptions to the otherwise immutable
-`shared_ptr<T>` rule. A shared handle still cannot mutate the protected `T`
-directly; mutation is possible only through a live lock guard. Rust's type
-system remains the final thread-boundary check: `Arc<Mutex<T>>` is shareable
-when `T: Send`, and `Arc<Condvar>` is shareable. Mutex poisoning caused by a
-Rust panic is recovered with `PoisonError::into_inner()` by generated code,
-rather than adding an undeclared Stainless checked exception.
+These synchronized pointee types are deliberate exceptions to the otherwise
+immutable `shared_ptr<T>` rule. A shared handle still cannot mutate the
+protected `T` directly; mutation is possible only through a live lock guard.
+Rust's type system remains the final thread-boundary check: `Arc<Mutex<T>>` is
+shareable when `T: Send`, `Arc<RwLock<T>>` when `T: Send + Sync`, and
+`Arc<Condvar>` is shareable. Lock poisoning caused by a Rust panic is recovered
+with `PoisonError::into_inner()` by generated code, rather than adding an
+undeclared Stainless checked exception.
 
 Thread entry uses Rust's `std::thread::spawn`, reached in Stainless through
 `rust::std::thread::spawn` or an import such as
@@ -2314,9 +2332,49 @@ The same checked API exposes `exists(path) -> bool`, `copy(from, to) -> u64`,
 `create_dir_all(path)`, `remove_dir(path)`, and `remove_dir_all(path)`. Every
 operation maps `std::io::Error` to `stainless::IoError`, retaining its display
 message, and therefore must be caught or declared in `throws`. Paths are UTF-8
-`String` values in this first surface. Open file handles, seeking, buffered or
-incremental streams, metadata, permissions, and symlink operations remain for
-the next file-I/O layer.
+`String` values in this first surface.
+
+`rust::std::fs::File` is a move-only open file handle. `File::open(path)` opens
+the path once, and `file.pread(offset, length)` reads at most `length` bytes at
+the absolute `u64` byte offset without changing a shared cursor. A read that
+reaches end of file returns a shorter `Vec<u8>`. Both operations raise checked
+`stainless::IoError` on failure. The `pread()` receiver is shared, and `File`
+is `Send + Sync`, so one handle can be stored in shared state and used by
+multiple threads concurrently. The runtime maps this to the platform's native
+positioned file operation (`read_at` on Unix and `seek_read` on Windows); it
+does not reopen the file for each read.
+
+The initial handle API also provides `File::create(path)`,
+`file.pwrite(offset, contents)`, `pread_exact()`, `pwrite_all()`, `len()`,
+`is_empty()`, `set_len()`, `sync_data()`, `sync_all()`, and explicit
+`try_clone()`.
+`pread()` and `pwrite()` retain low-level short-I/O semantics;
+`pread_exact()` and `pwrite_all()` loop without introducing a cursor and are
+the preferred operations for durable record formats. `OpenOptions`
+supports Rust's `read`, `write`, `append`, `truncate`, `create`, and
+`create_new` flags followed by `open(path)`.
+
+Cursor-based and buffered streams, rich metadata, permissions, and symlink
+operations remain for the next file-I/O layer.
+
+### Versioned key/value store showcase
+
+`crates/stainless-kvstore` is the first substantial library implemented in
+Stainless itself. Its `.stl` implementation owns one read/write file handle and
+an internally synchronized version/index state. Inserts append checksummed log
+records at explicitly managed offsets; `commit(next)` syncs its marker before
+advancing the write epoch, and `revert(version)` syncs its marker before
+discarding indexed entries tagged at or above the boundary. Recovery replays
+only through the last valid control record and truncates incomplete or
+uncommitted tail data.
+
+The index is held in RAM and rebuilt by replaying the append-only log at open.
+An internal `rwlock<StoreState>` allows concurrent lookups: `find()` scans the
+index and calls `pread_exact()` under one shared read guard. It never copies the
+whole index, and the complete lookup is synchronized against inserts, commits,
+reverts, and recovery, which take an exclusive write guard. The initial
+linked-list index still makes lookup O(n); ordered/sparse indexes and compaction
+are planned as later layers.
 
 Each Stainless compiler release supports one stable Rust minor release. The
 build helper compares `rustc -Vv` with the metadata version and rejects a
@@ -2942,7 +3000,7 @@ imply that all ownership or type semantics are valid.
 
 ## Cargo integration and compiler packaging
 
-The target packaging is a Cargo workspace with five publishable crates:
+The target packaging is a Cargo workspace with six publishable crates:
 
 - `stainless-syntax` owns tokens, the lossless CST, and typed syntax wrappers.
 - `stainless-compiler` owns AST/HIR lowering, name/type/ownership analysis,
@@ -2952,6 +3010,8 @@ The target packaging is a Cargo workspace with five publishable crates:
 - `stainless-build` provides the Cargo build-script API.
 - `stainlessc` is a thin CLI over `stainless-compiler` for diagnostics,
   fixtures, and standalone generation.
+- `stainless-kvstore` is a Stainless-written versioned/revertible storage
+  showcase packaged as a Rust library crate.
 
 Keeping semantics, interop, and codegen as modules inside `stainless-compiler`
 avoids premature crate boundaries; they may be split after their APIs stabilize.
@@ -2959,8 +3019,9 @@ A procedural macro is not used because whole-file parsing, external manifests,
 generated modules, dependency shims, and source-mapped diagnostics fit a build
 step better.
 
-The repository now contains all five crates. `stainless-runtime` initially owns
-the `Var`/native JSON representation and `JsonError` returned by its Rust API;
+The repository now contains all six crates. `stainless-runtime` owns the
+`Var`/native JSON representation, native JSON errors, and exact-signature file
+facades that cannot map directly to one portable inherent Rust method;
 generated checked-exception trait/object support remains inline until that ABI
 stabilizes.
 

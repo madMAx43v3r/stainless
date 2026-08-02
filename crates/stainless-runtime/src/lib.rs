@@ -138,6 +138,276 @@ impl Fs {
     }
 }
 
+/// One open file handle supporting cursor-free positioned reads.
+///
+/// Unlike [`Fs::read`], [`Self::pread`] does not reopen the path for each
+/// operation. It also leaves the file cursor untouched, so shared references
+/// to the same handle may read different ranges concurrently.
+pub struct PositionedFile(File);
+
+impl PositionedFile {
+    /// Consumes and returns an already open handle.
+    ///
+    /// This is the runtime target of Stainless's explicit move construction
+    /// for a native `File` data member.
+    #[must_use]
+    pub fn from_owned(file: Self) -> Self {
+        file
+    }
+
+    /// Opens one existing file for reading.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying filesystem error when the file cannot be opened.
+    pub fn open(path: &str) -> std::io::Result<Self> {
+        File::open(path).map(Self)
+    }
+
+    /// Creates or truncates one file and opens it for writing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying filesystem error when the file cannot be
+    /// created.
+    pub fn create(path: &str) -> std::io::Result<Self> {
+        File::create(path).map(Self)
+    }
+
+    /// Reads at most `length` bytes beginning at the absolute byte `offset`.
+    ///
+    /// The returned vector is shorter than `length` at end of file. The
+    /// operation is cursor-free and may run concurrently through shared
+    /// references to this same handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying positioned-read error.
+    pub fn pread(&self, offset: u64, length: usize) -> std::io::Result<Vec<u8>> {
+        let mut bytes = vec![0; length];
+        let count = loop {
+            match read_at(&self.0, &mut bytes, offset) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                result => break result?,
+            }
+        };
+        bytes.truncate(count);
+        Ok(bytes)
+    }
+
+    /// Reads exactly `length` bytes beginning at the absolute byte `offset`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`std::io::ErrorKind::UnexpectedEof`] when the requested range
+    /// extends beyond the file, or the underlying positioned-read error.
+    pub fn pread_exact(&self, offset: u64, length: usize) -> std::io::Result<Vec<u8>> {
+        let mut bytes = vec![0; length];
+        let mut filled = 0;
+        while filled < length {
+            let read_offset = offset
+                .checked_add(u64::try_from(filled).map_err(std::io::Error::other)?)
+                .ok_or_else(|| std::io::Error::other("positioned read offset overflow"))?;
+            let count = loop {
+                match read_at(&self.0, &mut bytes[filled..], read_offset) {
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    result => break result?,
+                }
+            };
+            if count == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+            }
+            filled += count;
+        }
+        Ok(bytes)
+    }
+
+    /// Writes bytes beginning at the absolute byte `offset` without changing
+    /// a shared cursor and returns the number of bytes written.
+    ///
+    /// Like Rust's low-level write operations, a successful call may write
+    /// fewer bytes than supplied. Callers implementing durable formats must
+    /// handle short writes before calling [`Self::sync_data`] or
+    /// [`Self::sync_all`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying positioned-write error.
+    pub fn pwrite(&self, offset: u64, bytes: &[u8]) -> std::io::Result<usize> {
+        loop {
+            match write_at(&self.0, bytes, offset) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                result => return result,
+            }
+        }
+    }
+
+    /// Writes every byte beginning at the absolute byte `offset` without
+    /// changing a shared cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`std::io::ErrorKind::WriteZero`] when the file accepts no
+    /// further bytes, an offset-overflow error, or the underlying
+    /// positioned-write error.
+    pub fn pwrite_all(&self, offset: u64, bytes: &[u8]) -> std::io::Result<()> {
+        let mut written = 0;
+        while written < bytes.len() {
+            let write_offset = offset
+                .checked_add(u64::try_from(written).map_err(std::io::Error::other)?)
+                .ok_or_else(|| std::io::Error::other("positioned write offset overflow"))?;
+            let count = self.pwrite(write_offset, &bytes[written..])?;
+            if count == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::WriteZero));
+            }
+            written += count;
+        }
+        Ok(())
+    }
+
+    /// Flushes file contents and metadata to durable storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying synchronization error.
+    pub fn sync_all(&self) -> std::io::Result<()> {
+        self.0.sync_all()
+    }
+
+    /// Flushes file contents, and any metadata required to preserve them, to
+    /// durable storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying synchronization error.
+    pub fn sync_data(&self) -> std::io::Result<()> {
+        self.0.sync_data()
+    }
+
+    /// Changes the file's length.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying truncation or extension error.
+    pub fn set_len(&self, size: u64) -> std::io::Result<()> {
+        self.0.set_len(size)
+    }
+
+    /// Returns the current file length.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying metadata lookup error.
+    pub fn len(&self) -> std::io::Result<u64> {
+        self.0.metadata().map(|metadata| metadata.len())
+    }
+
+    /// Returns whether the file currently has length zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying metadata lookup error.
+    pub fn is_empty(&self) -> std::io::Result<bool> {
+        self.len().map(|length| length == 0)
+    }
+
+    /// Opens another operating-system handle referring to the same file.
+    ///
+    /// Positioned concurrent reads do not require cloning; this operation is
+    /// available for APIs that specifically need independently owned handles.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying handle-duplication error.
+    pub fn try_clone(&self) -> std::io::Result<Self> {
+        self.0.try_clone().map(Self)
+    }
+}
+
+/// Rust-style file-open builder producing [`PositionedFile`] handles.
+pub struct PositionedOpenOptions(std::fs::OpenOptions);
+
+impl PositionedOpenOptions {
+    /// Creates an options builder with every access mode disabled.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(std::fs::OpenOptions::new())
+    }
+
+    /// Configures read access.
+    pub fn read(&mut self, enabled: bool) {
+        self.0.read(enabled);
+    }
+
+    /// Configures write access.
+    pub fn write(&mut self, enabled: bool) {
+        self.0.write(enabled);
+    }
+
+    /// Configures append access.
+    pub fn append(&mut self, enabled: bool) {
+        self.0.append(enabled);
+    }
+
+    /// Configures truncation when opening an existing file.
+    pub fn truncate(&mut self, enabled: bool) {
+        self.0.truncate(enabled);
+    }
+
+    /// Configures creation when the path does not exist.
+    pub fn create(&mut self, enabled: bool) {
+        self.0.create(enabled);
+    }
+
+    /// Configures atomic creation failure when the path already exists.
+    pub fn create_new(&mut self, enabled: bool) {
+        self.0.create_new(enabled);
+    }
+
+    /// Opens one handle with these options.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying filesystem error.
+    pub fn open(&self, path: &str) -> std::io::Result<PositionedFile> {
+        self.0.open(path).map(PositionedFile)
+    }
+}
+
+impl Default for PositionedOpenOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(unix)]
+fn read_at(file: &File, bytes: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::unix::fs::FileExt as _;
+
+    file.read_at(bytes, offset)
+}
+
+#[cfg(unix)]
+fn write_at(file: &File, bytes: &[u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::unix::fs::FileExt as _;
+
+    file.write_at(bytes, offset)
+}
+
+#[cfg(windows)]
+fn read_at(file: &File, bytes: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::windows::fs::FileExt as _;
+
+    file.seek_read(bytes, offset)
+}
+
+#[cfg(windows)]
+fn write_at(file: &File, bytes: &[u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::windows::fs::FileExt as _;
+
+    file.seek_write(bytes, offset)
+}
+
 /// An owned value from the JSON data model.
 ///
 /// Access is null-safe: selecting a missing object member, indexing beyond an
@@ -915,7 +1185,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet, LinkedList, VecDeque};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{Fs, Var};
+    use super::{Fs, PositionedFile, Var};
 
     #[test]
     fn whole_file_io_preserves_bytes_text_and_errors() {
@@ -955,6 +1225,44 @@ mod tests {
         Fs::remove_file(&path(&text)).expect("text file is removed");
         Fs::remove_dir(&path(&nested)).expect("empty nested directory is removed");
         Fs::remove_dir_all(&path(&root)).expect("root directory is removed");
+    }
+
+    #[test]
+    fn positioned_reads_share_one_handle_without_a_cursor() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test clock follows the Unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "stainless-runtime-pread-{}-{unique}.bin",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"zero-one-two-three").expect("fixture is written");
+        let file = std::sync::Arc::new(
+            PositionedFile::open(&path.to_string_lossy()).expect("fixture is opened once"),
+        );
+
+        let readers = [(0, 4, b"zero".as_slice()), (9, 3, b"two".as_slice())]
+            .into_iter()
+            .map(|(offset, length, expected)| {
+                let file = std::sync::Arc::clone(&file);
+                std::thread::spawn(move || {
+                    assert_eq!(
+                        file.pread(offset, length).expect("positioned read"),
+                        expected
+                    );
+                })
+            })
+            .collect::<Vec<_>>();
+        for reader in readers {
+            reader.join().expect("reader did not panic");
+        }
+        assert_eq!(
+            file.pread(13, 99).expect("short read at end of file"),
+            b"three"
+        );
+
+        std::fs::remove_file(path).expect("fixture is removed");
     }
 
     #[test]

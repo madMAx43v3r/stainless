@@ -21,6 +21,7 @@ pub fn validate(source: &ast::SourceFile, semantics: &SemanticModel) -> Vec<Diag
         diagnostics: Vec::new(),
         emitted: BTreeSet::new(),
         return_borrow: None,
+        receiver_binding: None,
         returns_reference: false,
         loop_depth: 0,
         loops: Vec::new(),
@@ -156,6 +157,7 @@ struct Analyzer<'a> {
     diagnostics: Vec<Diagnostic>,
     emitted: BTreeSet<(&'static str, ast::Span)>,
     return_borrow: Option<BindingId>,
+    receiver_binding: Option<BindingId>,
     returns_reference: bool,
     loop_depth: usize,
     loops: Vec<LoopContext>,
@@ -205,6 +207,8 @@ impl Analyzer<'_> {
         };
         self.state = FlowState::default();
         self.state.push_scope();
+        self.receiver_binding =
+            Some(self.declare_receiver(symbol.structure, true, constructor.span));
         for (syntax, resolved) in constructor.parameters.iter().zip(&symbol.parameters) {
             self.state.declare(
                 syntax.name.clone(),
@@ -227,6 +231,7 @@ impl Analyzer<'_> {
             self.block(body, false);
         }
         self.state.pop_scope();
+        self.receiver_binding = None;
     }
 
     fn function(&mut self, function: &ast::Function) {
@@ -235,6 +240,9 @@ impl Analyzer<'_> {
         };
         self.state = FlowState::default();
         self.state.push_scope();
+        self.receiver_binding = symbol.receiver.as_ref().map(|receiver| {
+            self.declare_receiver(receiver.structure, receiver.mutable, function.span)
+        });
         let mut parameter_ids = Vec::new();
         for (syntax, resolved) in function.parameters.iter().zip(&symbol.parameters) {
             parameter_ids.push(self.state.declare(
@@ -254,8 +262,42 @@ impl Analyzer<'_> {
             self.block(body, false);
         }
         self.state.pop_scope();
+        self.receiver_binding = None;
         self.return_borrow = None;
         self.returns_reference = false;
+    }
+
+    fn declare_receiver(
+        &mut self,
+        structure: crate::resolution::StructId,
+        mutable: bool,
+        span: ast::Span,
+    ) -> BindingId {
+        let target = self
+            .semantics
+            .structure(structure)
+            .map_or(TypeRef::Error, |symbol| match symbol.kind {
+                ast::UserTypeKind::Struct => TypeRef::Struct {
+                    path: symbol.path.clone(),
+                },
+                ast::UserTypeKind::Class => TypeRef::Class {
+                    path: symbol.path.clone(),
+                },
+                ast::UserTypeKind::Interface => TypeRef::Interface {
+                    path: symbol.path.clone(),
+                },
+            });
+        self.state.declare(
+            "\0stainless_self".to_owned(),
+            TypeRef::Reference {
+                mutable,
+                target: Box::new(target),
+            },
+            None,
+            span,
+            None,
+            self.loop_depth,
+        )
     }
 
     fn block(&mut self, block: &ast::Block, create_scope: bool) -> bool {
@@ -372,8 +414,10 @@ impl Analyzer<'_> {
             return;
         };
         let reference_loan = if binding.ty.is_reference()
-            || matches!(canonical_ref(&binding.ty), TypeRef::MutexGuard(_))
-        {
+            || matches!(
+                canonical_ref(&binding.ty),
+                TypeRef::MutexGuard(_) | TypeRef::RwLockReadGuard(_) | TypeRef::RwLockWriteGuard(_)
+            ) {
             local.initializer.as_ref().and_then(|initializer| {
                 let mutable = matches!(binding.ty, TypeRef::Reference { mutable: true, .. });
                 let origin = self.expression(
@@ -708,7 +752,14 @@ impl Analyzer<'_> {
                 let id = path
                     .segments
                     .first()
-                    .and_then(|name| self.state.lookup(name))?;
+                    .and_then(|name| self.state.lookup(name))
+                    .or_else(|| {
+                        self.semantics
+                            .expression(expression.span)
+                            .is_some_and(|resolution| resolution.field.is_some())
+                            .then_some(self.receiver_binding)
+                            .flatten()
+                    })?;
                 self.check_usage(id, usage, expression.span);
                 Some(id)
             }
@@ -886,7 +937,8 @@ impl Analyzer<'_> {
             }
             CallTarget::Intrinsic(
                 Intrinsic::MakeOwner { construction, .. }
-                | Intrinsic::MutexNew { construction, .. },
+                | Intrinsic::MutexNew { construction, .. }
+                | Intrinsic::RwLockNew { construction, .. },
             ) => {
                 self.construction_arguments(construction, arguments);
                 None
@@ -896,6 +948,10 @@ impl Analyzer<'_> {
             }
             CallTarget::Intrinsic(Intrinsic::MutexLock { .. }) => call_receiver(expression)
                 .and_then(|receiver| self.expression(receiver, Usage::BorrowShared)),
+            CallTarget::Intrinsic(Intrinsic::RwLockRead { .. } | Intrinsic::RwLockWrite { .. }) => {
+                call_receiver(expression)
+                    .and_then(|receiver| self.expression(receiver, Usage::BorrowShared))
+            }
             CallTarget::Intrinsic(Intrinsic::ConditionWait { .. }) => {
                 let mut condition_loan = None;
                 if let Some(receiver) = call_receiver(expression) {
@@ -1117,7 +1173,10 @@ impl Analyzer<'_> {
             CallTarget::Intrinsic(Intrinsic::ValueInitialization { target }) => {
                 self.call_arguments(arguments, std::iter::once(target));
             }
-            CallTarget::Intrinsic(Intrinsic::MutexNew { construction, .. }) => {
+            CallTarget::Intrinsic(
+                Intrinsic::MutexNew { construction, .. }
+                | Intrinsic::RwLockNew { construction, .. },
+            ) => {
                 self.construction_arguments(construction, arguments);
             }
             _ => {
@@ -1454,7 +1513,7 @@ fn root_origin(state: &FlowState, mut id: BindingId) -> BindingId {
     while let Some(loan) = state.bindings[id].reference_loan {
         if matches!(
             canonical_ref(&state.bindings[id].ty),
-            TypeRef::MutexGuard(_)
+            TypeRef::MutexGuard(_) | TypeRef::RwLockReadGuard(_) | TypeRef::RwLockWriteGuard(_)
         ) {
             break;
         }

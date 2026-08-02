@@ -357,6 +357,23 @@ pub enum Intrinsic {
         /// Protected value type.
         target: TypeRef,
     },
+    /// Construct an `rwlock<T>` around a selected `T` construction.
+    RwLockNew {
+        /// Protected value type.
+        target: TypeRef,
+        /// Construction performed before wrapping the value.
+        construction: Box<ResolvedCall>,
+    },
+    /// Acquire a shared read guard.
+    RwLockRead {
+        /// Protected value type.
+        target: TypeRef,
+    },
+    /// Acquire an exclusive write guard.
+    RwLockWrite {
+        /// Protected value type.
+        target: TypeRef,
+    },
     /// Wait on a condition and rebind the same named guard.
     ConditionWait {
         /// Protected value type.

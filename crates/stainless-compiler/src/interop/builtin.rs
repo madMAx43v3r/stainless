@@ -19,6 +19,8 @@ const V: &str = "V";
 pub fn standard_bindings() -> Result<NativeBindings, super::BindingError> {
     NativeBindings::new(vec![
         fs_binding(),
+        file_binding(),
+        open_options_binding(),
         io_error_binding(),
         json_error_binding(),
         list_binding(),
@@ -34,6 +36,8 @@ pub fn standard_bindings() -> Result<NativeBindings, super::BindingError> {
 pub(crate) const VAR_TYPE_PATH: &str = "rust::stainless_runtime::Var";
 const JSON_ERROR_TYPE_PATH: &str = "rust::stainless_runtime::JsonError";
 const IO_ERROR_TYPE_PATH: &str = "rust::std::io::Error";
+const FILE_TYPE_PATH: &str = "rust::std::fs::File";
+const OPEN_OPTIONS_TYPE_PATH: &str = "rust::std::fs::OpenOptions";
 
 fn fs_binding() -> NativeTypeBinding {
     let string = string_type();
@@ -47,6 +51,186 @@ fn fs_binding() -> NativeTypeBinding {
     NativeTypeBinding {
         stainless_path: "rust::std::fs".to_owned(),
         rust_path: "::stainless_runtime::Fs".to_owned(),
+        type_parameters: vec![],
+        error_format: None,
+        callables,
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn file_binding() -> NativeTypeBinding {
+    let file = TypeRef::native(FILE_TYPE_PATH, Vec::new());
+    let string_ref = TypeRef::shared_ref(string_type());
+    let bytes = vec_of(TypeRef::U8);
+    let io_error = TypeRef::native(IO_ERROR_TYPE_PATH, Vec::new());
+
+    NativeTypeBinding {
+        stainless_path: FILE_TYPE_PATH.to_owned(),
+        rust_path: "::stainless_runtime::PositionedFile".to_owned(),
+        type_parameters: vec![],
+        error_format: None,
+        callables: vec![
+            constructor(
+                "File",
+                vec![Parameter::new(
+                    "file",
+                    TypeRef::native(FILE_TYPE_PATH, Vec::new()),
+                )],
+                TypeRef::native(FILE_TYPE_PATH, Vec::new()),
+                RustLowering::AssociatedFunction {
+                    rust_path: "::stainless_runtime::PositionedFile::from_owned".to_owned(),
+                },
+            ),
+            fallible_associated(
+                "open",
+                vec![fs_path_parameter("path", &string_ref)],
+                file,
+                io_error.clone(),
+                "::stainless_runtime::PositionedFile::open",
+            ),
+            fallible_associated(
+                "create",
+                vec![fs_path_parameter("path", &string_ref)],
+                TypeRef::native(FILE_TYPE_PATH, Vec::new()),
+                io_error.clone(),
+                "::stainless_runtime::PositionedFile::create",
+            ),
+            fallible_method(
+                "pread",
+                "pread",
+                Receiver::Shared,
+                vec![
+                    Parameter::new("offset", TypeRef::U64),
+                    Parameter::new("length", TypeRef::Usize),
+                ],
+                bytes.clone(),
+                io_error,
+            ),
+            fallible_method(
+                "pread_exact",
+                "pread_exact",
+                Receiver::Shared,
+                vec![
+                    Parameter::new("offset", TypeRef::U64),
+                    Parameter::new("length", TypeRef::Usize),
+                ],
+                bytes.clone(),
+                TypeRef::native(IO_ERROR_TYPE_PATH, Vec::new()),
+            ),
+            fallible_method(
+                "pwrite",
+                "pwrite",
+                Receiver::Shared,
+                vec![
+                    Parameter::new("offset", TypeRef::U64),
+                    Parameter::new("contents", TypeRef::shared_ref(bytes.clone())),
+                ],
+                TypeRef::Usize,
+                TypeRef::native(IO_ERROR_TYPE_PATH, Vec::new()),
+            ),
+            fallible_method(
+                "pwrite_all",
+                "pwrite_all",
+                Receiver::Shared,
+                vec![
+                    Parameter::new("offset", TypeRef::U64),
+                    Parameter::new("contents", TypeRef::shared_ref(bytes.clone())),
+                ],
+                TypeRef::Void,
+                TypeRef::native(IO_ERROR_TYPE_PATH, Vec::new()),
+            ),
+            fallible_method(
+                "sync_all",
+                "sync_all",
+                Receiver::Shared,
+                vec![],
+                TypeRef::Void,
+                TypeRef::native(IO_ERROR_TYPE_PATH, Vec::new()),
+            ),
+            fallible_method(
+                "sync_data",
+                "sync_data",
+                Receiver::Shared,
+                vec![],
+                TypeRef::Void,
+                TypeRef::native(IO_ERROR_TYPE_PATH, Vec::new()),
+            ),
+            fallible_method(
+                "set_len",
+                "set_len",
+                Receiver::Shared,
+                vec![Parameter::new("size", TypeRef::U64)],
+                TypeRef::Void,
+                TypeRef::native(IO_ERROR_TYPE_PATH, Vec::new()),
+            ),
+            fallible_method(
+                "len",
+                "len",
+                Receiver::Shared,
+                vec![],
+                TypeRef::U64,
+                TypeRef::native(IO_ERROR_TYPE_PATH, Vec::new()),
+            ),
+            fallible_method(
+                "is_empty",
+                "is_empty",
+                Receiver::Shared,
+                vec![],
+                TypeRef::Bool,
+                TypeRef::native(IO_ERROR_TYPE_PATH, Vec::new()),
+            ),
+            fallible_method(
+                "try_clone",
+                "try_clone",
+                Receiver::Shared,
+                vec![],
+                TypeRef::native(FILE_TYPE_PATH, Vec::new()),
+                TypeRef::native(IO_ERROR_TYPE_PATH, Vec::new()),
+            ),
+        ],
+    }
+}
+
+fn open_options_binding() -> NativeTypeBinding {
+    let options = TypeRef::native(OPEN_OPTIONS_TYPE_PATH, Vec::new());
+    let string_ref = TypeRef::shared_ref(string_type());
+    let file = TypeRef::native(FILE_TYPE_PATH, Vec::new());
+    let io_error = TypeRef::native(IO_ERROR_TYPE_PATH, Vec::new());
+    let mut callables = vec![constructor(
+        "OpenOptions",
+        vec![],
+        options,
+        RustLowering::AssociatedFunction {
+            rust_path: "::stainless_runtime::PositionedOpenOptions::new".to_owned(),
+        },
+    )];
+    for name in [
+        "read",
+        "write",
+        "append",
+        "truncate",
+        "create",
+        "create_new",
+    ] {
+        callables.push(method(
+            name,
+            Receiver::Mutable,
+            vec![Parameter::new("enabled", TypeRef::Bool)],
+            TypeRef::Void,
+        ));
+    }
+    callables.push(fallible_method(
+        "open",
+        "open",
+        Receiver::Shared,
+        vec![fs_path_parameter("path", &string_ref)],
+        file,
+        io_error,
+    ));
+
+    NativeTypeBinding {
+        stainless_path: OPEN_OPTIONS_TYPE_PATH.to_owned(),
+        rust_path: "::stainless_runtime::PositionedOpenOptions".to_owned(),
         type_parameters: vec![],
         error_format: None,
         callables,

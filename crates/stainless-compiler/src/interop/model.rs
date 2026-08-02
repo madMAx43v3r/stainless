@@ -65,6 +65,12 @@ pub enum TypeRef {
     Mutex(Box<TypeRef>),
     /// A scoped, move-only lock guard borrowing one `mutex<T>`.
     MutexGuard(Box<TypeRef>),
+    /// A reader/writer lock owning one synchronized value (`std::sync::RwLock<T>`).
+    RwLock(Box<TypeRef>),
+    /// A scoped, move-only shared guard borrowing one `rwlock<T>`.
+    RwLockReadGuard(Box<TypeRef>),
+    /// A scoped, move-only mutable guard borrowing one `rwlock<T>`.
+    RwLockWriteGuard(Box<TypeRef>),
     /// A condition signal (`std::sync::Condvar`).
     Condition,
     /// A move-only unscoped Rust thread handle.
@@ -195,10 +201,13 @@ impl TypeRef {
     pub fn contains_reference(&self) -> bool {
         match self {
             Self::Native { arguments, .. } => arguments.iter().any(Self::contains_reference),
-            Self::Pointer { target, .. } | Self::Mutex(target) | Self::ThreadHandle(target) => {
-                target.contains_reference()
-            }
+            Self::Pointer { target, .. }
+            | Self::Mutex(target)
+            | Self::RwLock(target)
+            | Self::ThreadHandle(target) => target.contains_reference(),
             Self::MutexGuard(_)
+            | Self::RwLockReadGuard(_)
+            | Self::RwLockWriteGuard(_)
             | Self::ThreadScope
             | Self::ScopedThreadHandle(_)
             | Self::Reference { .. } => true,
@@ -657,6 +666,13 @@ fn callback_resolution_type(ty: &TypeRef) -> TypeRef {
         TypeRef::Mutex(target) => TypeRef::Mutex(Box::new(callback_resolution_type(target))),
         TypeRef::MutexGuard(target) => {
             TypeRef::MutexGuard(Box::new(callback_resolution_type(target)))
+        }
+        TypeRef::RwLock(target) => TypeRef::RwLock(Box::new(callback_resolution_type(target))),
+        TypeRef::RwLockReadGuard(target) => {
+            TypeRef::RwLockReadGuard(Box::new(callback_resolution_type(target)))
+        }
+        TypeRef::RwLockWriteGuard(target) => {
+            TypeRef::RwLockWriteGuard(Box::new(callback_resolution_type(target)))
         }
         TypeRef::Condition => TypeRef::Condition,
         TypeRef::ThreadHandle(target) => {

@@ -109,6 +109,37 @@ void conflicting(Counter& counter) {
 }
 
 #[test]
+fn move_only_file_handles_require_class_storage() {
+    let analysis = analyze(
+        r"use rust::std::fs::File;
+
+struct InvalidBlock {
+    File file;
+};
+
+class ValidBlock {
+    File file;
+public:
+    ValidBlock(File file);
+};
+
+ValidBlock::ValidBlock(File file) : file(move(file)) {}
+",
+    );
+
+    assert!(
+        analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "RES092"
+                && diagnostic
+                    .message
+                    .contains("move-only ownership cannot be stored")
+        }),
+        "{:?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
 fn resolves_exact_constructor_overloads_and_synthesized_defaults() {
     let source = r"use rust::Vec;
 

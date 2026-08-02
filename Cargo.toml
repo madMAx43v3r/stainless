@@ -2,6 +2,7 @@
 members = [
     "crates/stainless-build",
     "crates/stainless-compiler",
+    "crates/stainless-kvstore",
     "crates/stainless-runtime",
     "crates/stainless-syntax",
     "crates/stainlessc",

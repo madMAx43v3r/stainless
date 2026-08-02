@@ -26,9 +26,75 @@ fn standard_registry_contains_builtin_types_in_path_order() {
             "rust::stainless_runtime::JsonError",
             "rust::stainless_runtime::Var",
             "rust::std::fs",
+            "rust::std::fs::File",
+            "rust::std::fs::OpenOptions",
             "rust::std::io::Error",
         ]
     );
+}
+
+#[test]
+fn positioned_file_binding_uses_one_shared_cursor_free_handle() {
+    let bindings = standard_bindings().unwrap();
+    let file = bindings.type_by_path("rust::std::fs::File").unwrap();
+    let file_type = TypeRef::native("rust::std::fs::File", vec![]);
+    let string_ref = TypeRef::shared_ref(TypeRef::native("rust::String", vec![]));
+    let io_error = TypeRef::native("rust::std::io::Error", vec![]);
+
+    assert_eq!(file.rust_path, "::stainless_runtime::PositionedFile");
+    let open = file
+        .find_callable(CallStyle::AssociatedFunction, "open", &[string_ref])
+        .unwrap();
+    assert_eq!(open.return_type, file_type);
+    assert_eq!(open.rust_result_error, Some(io_error.clone()));
+
+    let pread = file
+        .find_callable(CallStyle::Method, "pread", &[TypeRef::U64, TypeRef::Usize])
+        .unwrap();
+    assert_eq!(pread.receiver, Some(Receiver::Shared));
+    assert_eq!(
+        pread.return_type,
+        TypeRef::native("rust::Vec", vec![TypeRef::U8])
+    );
+    assert_eq!(pread.rust_result_error, Some(io_error));
+
+    for name in [
+        "pwrite",
+        "pread_exact",
+        "pwrite_all",
+        "sync_all",
+        "sync_data",
+        "set_len",
+        "len",
+        "is_empty",
+        "try_clone",
+    ] {
+        assert!(
+            file.callables
+                .iter()
+                .any(|callable| callable.source_name == name),
+            "missing File.{name}"
+        );
+    }
+
+    let options = bindings.type_by_path("rust::std::fs::OpenOptions").unwrap();
+    for name in [
+        "read",
+        "write",
+        "append",
+        "truncate",
+        "create",
+        "create_new",
+        "open",
+    ] {
+        assert!(
+            options
+                .callables
+                .iter()
+                .any(|callable| callable.source_name == name),
+            "missing OpenOptions.{name}"
+        );
+    }
 }
 
 #[test]

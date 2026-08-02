@@ -1,4 +1,4 @@
-// Mutex-protected mutable state and condition notification.
+// Mutex/RW-lock-protected mutable state and condition notification.
 //
 // `mutex<T>` and `condition` are compiler-known Stainless types backed by
 // Rust's Mutex<T> and Condvar. The lock guard is intentionally inferred: it
@@ -43,4 +43,18 @@ void publish_value(
     guard.value = value;
     guard.ready = true;
     changed.notify_all();
+}
+
+shared_ptr<rwlock<SharedState>> new_rw_state() {
+    return make_shared<rwlock<SharedState>>{true, 7};
+}
+
+i32 read_value(shared_ptr<rwlock<SharedState>> state) {
+    auto guard = state.read();
+    return guard.value;
+}
+
+void write_value(shared_ptr<rwlock<SharedState>> state, i32 value) {
+    auto guard = state.write();
+    guard.value = value;
 }

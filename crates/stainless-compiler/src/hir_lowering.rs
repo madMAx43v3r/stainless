@@ -1845,6 +1845,7 @@ impl Lowerer<'_> {
                 Intrinsic::UnwrapRustResult { .. }
                     | Intrinsic::MakeOwner { .. }
                     | Intrinsic::MutexNew { .. }
+                    | Intrinsic::RwLockNew { .. }
             )
         ) || matches!(
             &call.target,
@@ -2169,6 +2170,34 @@ impl Lowerer<'_> {
                 Some(hir::Expression::MutexLock(Box::new(
                     self.lower_expression(receiver, ExpressionMode::Reference)?,
                 )))
+            }
+            CallTarget::Intrinsic(Intrinsic::RwLockNew { construction, .. }) => {
+                let value = self.lower_resolved_call(construction, None, arguments)?;
+                Some(hir::Expression::RwLockNew(Box::new(value)))
+            }
+            CallTarget::Intrinsic(Intrinsic::RwLockRead { .. } | Intrinsic::RwLockWrite { .. }) => {
+                let Some(ast::Expression {
+                    kind: ExpressionKind::Field { receiver, .. },
+                    ..
+                }) = callee
+                else {
+                    self.push(
+                        "HIR011",
+                        "rwlock operation has no receiver".to_owned(),
+                        call.span,
+                    );
+                    return None;
+                };
+                let receiver =
+                    Box::new(self.lower_expression(receiver, ExpressionMode::Reference)?);
+                if matches!(
+                    call.target,
+                    CallTarget::Intrinsic(Intrinsic::RwLockRead { .. })
+                ) {
+                    Some(hir::Expression::RwLockRead(receiver))
+                } else {
+                    Some(hir::Expression::RwLockWrite(receiver))
+                }
             }
             CallTarget::Intrinsic(Intrinsic::ConditionWait { .. }) => {
                 let Some(ast::Expression {
@@ -2700,6 +2729,13 @@ impl Lowerer<'_> {
             TypeRef::MutexGuard(target) => {
                 hir::Type::MutexGuard(Box::new(self.lower_type(target, span)?))
             }
+            TypeRef::RwLock(target) => hir::Type::RwLock(Box::new(self.lower_type(target, span)?)),
+            TypeRef::RwLockReadGuard(target) => {
+                hir::Type::RwLockReadGuard(Box::new(self.lower_type(target, span)?))
+            }
+            TypeRef::RwLockWriteGuard(target) => {
+                hir::Type::RwLockWriteGuard(Box::new(self.lower_type(target, span)?))
+            }
             TypeRef::Condition => hir::Type::Condition,
             TypeRef::ThreadHandle(target) => {
                 hir::Type::ThreadHandle(Box::new(self.lower_type(target, span)?))
@@ -3085,7 +3121,9 @@ fn automatic_pointee_type(ty: &TypeRef) -> &TypeRef {
                 | PointerKind::SharedNullable,
             target,
         }
-        | TypeRef::MutexGuard(target) => canonical_ref(target),
+        | TypeRef::MutexGuard(target)
+        | TypeRef::RwLockReadGuard(target)
+        | TypeRef::RwLockWriteGuard(target) => canonical_ref(target),
         ty => ty,
     }
 }

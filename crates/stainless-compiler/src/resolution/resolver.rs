@@ -993,6 +993,9 @@ impl Resolver<'_> {
             | TypeRef::Pointer { .. }
             | TypeRef::Mutex(_)
             | TypeRef::MutexGuard(_)
+            | TypeRef::RwLock(_)
+            | TypeRef::RwLockReadGuard(_)
+            | TypeRef::RwLockWriteGuard(_)
             | TypeRef::ThreadHandle(_)
             | TypeRef::ThreadScope
             | TypeRef::ScopedThreadHandle(_)
@@ -1470,14 +1473,18 @@ impl Resolver<'_> {
             TypeRef::Mutex(protected) => {
                 self.resolve_mutex_slot_construction(protected, arguments, span, context)
             }
+            TypeRef::RwLock(protected) => {
+                self.resolve_rwlock_slot_construction(protected, arguments, span, context)
+            }
             TypeRef::Condition => self.resolve_condition_construction(arguments, span, context),
-            TypeRef::MutexGuard(_) => {
+            TypeRef::MutexGuard(_) | TypeRef::RwLockReadGuard(_) | TypeRef::RwLockWriteGuard(_) => {
                 for argument in arguments {
                     self.resolve_expression(argument, None, context);
                 }
                 self.push(
                     "RES113",
-                    "mutex guards can only be produced by `mutex<T>.lock()`".to_owned(),
+                    "lock guards can only be produced by `lock()`, `read()`, or `write()`"
+                        .to_owned(),
                     span,
                 );
                 None
@@ -1582,6 +1589,26 @@ impl Resolver<'_> {
         })
     }
 
+    fn resolve_rwlock_slot_construction(
+        &mut self,
+        protected: &TypeRef,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> Option<ResolvedCall> {
+        let construction = self.resolve_slot_construction(protected, arguments, span, context)?;
+        let throws = construction.throws.clone();
+        Some(ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::RwLockNew {
+                target: protected.clone(),
+                construction: Box::new(construction),
+            }),
+            return_type: TypeRef::RwLock(Box::new(protected.clone())),
+            throws,
+        })
+    }
+
     fn resolve_condition_construction(
         &mut self,
         arguments: &[Expression],
@@ -1656,16 +1683,29 @@ impl Resolver<'_> {
                     throws,
                 })
             }
+            TypeRef::RwLock(protected) => {
+                let construction = self.resolve_default_call(protected, span, context)?;
+                let throws = construction.throws.clone();
+                Some(ResolvedCall {
+                    span,
+                    target: CallTarget::Intrinsic(Intrinsic::RwLockNew {
+                        target: protected.as_ref().clone(),
+                        construction: Box::new(construction),
+                    }),
+                    return_type: TypeRef::RwLock(protected.clone()),
+                    throws,
+                })
+            }
             TypeRef::Condition => Some(ResolvedCall {
                 span,
                 target: CallTarget::Intrinsic(Intrinsic::ConditionNew),
                 return_type: TypeRef::Condition,
                 throws: Vec::new(),
             }),
-            TypeRef::MutexGuard(_) => {
+            TypeRef::MutexGuard(_) | TypeRef::RwLockReadGuard(_) | TypeRef::RwLockWriteGuard(_) => {
                 self.push(
                     "RES113",
-                    "mutex guards cannot be default-constructed".to_owned(),
+                    "lock guards cannot be default-constructed".to_owned(),
                     span,
                 );
                 None
@@ -3810,6 +3850,12 @@ impl Resolver<'_> {
             } if matches!(path.segments.as_slice(), [name] if name == "mutex") => {
                 self.resolve_mutex_constructor(type_arguments, arguments, span, context)
             }
+            ExpressionKind::GenericName {
+                path,
+                arguments: type_arguments,
+            } if matches!(path.segments.as_slice(), [name] if name == "rwlock") => {
+                self.resolve_rwlock_constructor(type_arguments, arguments, span, context)
+            }
             ExpressionKind::GenericName { path, .. } => {
                 for argument in arguments {
                     self.resolve_expression(argument, None, context);
@@ -4207,6 +4253,9 @@ impl Resolver<'_> {
             TypeRef::Mutex(target) => {
                 self.resolve_mutex_method(target.as_ref(), name, arguments, span, context)
             }
+            TypeRef::RwLock(target) => {
+                self.resolve_rwlock_method(target.as_ref(), name, arguments, span, context)
+            }
             TypeRef::Condition => self.resolve_condition_method(name, arguments, span, context),
             TypeRef::ThreadHandle(target) => self.resolve_thread_handle_method(
                 target.as_ref(),
@@ -4339,6 +4388,60 @@ impl Resolver<'_> {
             target: CallTarget::Intrinsic(Intrinsic::MutexLock {
                 target: target.clone(),
             }),
+            return_type: return_type.clone(),
+            throws: Vec::new(),
+        };
+        (temporary(return_type), Some(call))
+    }
+
+    fn resolve_rwlock_method(
+        &mut self,
+        target: &TypeRef,
+        name: &ast::Path,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        let operation = name.segments.as_slice();
+        if !matches!(operation, [name] if name == "read" || name == "write")
+            || !arguments.is_empty()
+        {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES113",
+                if matches!(operation, [name] if name == "read" || name == "write") {
+                    format!(
+                        "`rwlock<T>.{}()` requires no arguments, found {}",
+                        operation[0],
+                        arguments.len()
+                    )
+                } else {
+                    format!("`rwlock<T>` has no method `{}`", name.display())
+                },
+                span,
+            );
+            return (error_info(), None);
+        }
+        let read = operation == ["read"];
+        let return_type = if read {
+            TypeRef::RwLockReadGuard(Box::new(target.clone()))
+        } else {
+            TypeRef::RwLockWriteGuard(Box::new(target.clone()))
+        };
+        let intrinsic = if read {
+            Intrinsic::RwLockRead {
+                target: target.clone(),
+            }
+        } else {
+            Intrinsic::RwLockWrite {
+                target: target.clone(),
+            }
+        };
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(intrinsic),
             return_type: return_type.clone(),
             throws: Vec::new(),
         };
@@ -5098,11 +5201,19 @@ impl Resolver<'_> {
             return (error_info(), None);
         }
         let argument = self.resolve_expression(&arguments[0], None, context);
-        if matches!(canonical_ref(&argument.ty), TypeRef::MutexGuard(_)) {
+        let guard_type = canonical_ref(&argument.ty);
+        if matches!(
+            guard_type,
+            TypeRef::MutexGuard(_) | TypeRef::RwLockReadGuard(_) | TypeRef::RwLockWriteGuard(_)
+        ) {
             self.push(
                 "RES114",
-                "mutex guards cannot be moved explicitly; `condition.wait(guard)` performs the only permitted guard transfer"
-                    .to_owned(),
+                if matches!(guard_type, TypeRef::MutexGuard(_)) {
+                    "mutex guards cannot be moved explicitly; `condition.wait(guard)` performs the only permitted guard transfer"
+                        .to_owned()
+                } else {
+                    "rwlock guards cannot be moved explicitly".to_owned()
+                },
                 arguments[0].span,
             );
         }
@@ -5180,6 +5291,68 @@ impl Resolver<'_> {
         let call = ResolvedCall {
             span,
             target: CallTarget::Intrinsic(Intrinsic::MutexNew {
+                target,
+                construction: Box::new(construction),
+            }),
+            return_type: return_type.clone(),
+            throws,
+        };
+        (temporary(return_type), Some(call))
+    }
+
+    fn resolve_rwlock_constructor(
+        &mut self,
+        type_arguments: &[ast::Type],
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        if type_arguments.len() != 1 {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES113",
+                format!(
+                    "`rwlock` requires one protected type argument, found {}",
+                    type_arguments.len()
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+        let target = self.resolve_type(&type_arguments[0], &context.namespace, false);
+        if target == TypeRef::Error {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            return (error_info(), None);
+        }
+        if matches!(target, TypeRef::Void | TypeRef::Reference { .. })
+            || target.contains_reference()
+        {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES113",
+                format!(
+                    "`rwlock` cannot protect type `{}` because it contains a reference",
+                    display_type(&target)
+                ),
+                type_arguments[0].span,
+            );
+            return (error_info(), None);
+        }
+        let return_type = TypeRef::RwLock(Box::new(target.clone()));
+        let Some(construction) = self.resolve_slot_construction(&target, arguments, span, context)
+        else {
+            return (error_info(), None);
+        };
+        let throws = construction.throws.clone();
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::RwLockNew {
                 target,
                 construction: Box::new(construction),
             }),
@@ -5283,6 +5456,20 @@ impl Resolver<'_> {
                         construction: Box::new(construction),
                     }),
                     return_type: TypeRef::Mutex(protected.clone()),
+                    throws,
+                })
+            }
+            TypeRef::RwLock(protected) => {
+                let construction =
+                    self.resolve_braced_slot_construction(protected, initializers, span, context)?;
+                let throws = construction.throws.clone();
+                Some(ResolvedCall {
+                    span,
+                    target: CallTarget::Intrinsic(Intrinsic::RwLockNew {
+                        target: protected.as_ref().clone(),
+                        construction: Box::new(construction),
+                    }),
+                    return_type: TypeRef::RwLock(protected.clone()),
                     throws,
                 })
             }
@@ -6948,6 +7135,37 @@ impl Resolver<'_> {
                     } else {
                         TypeRef::Mutex(Box::new(arguments[0].clone()))
                     }
+                } else if matches!(segments.as_slice(), [name] if name == "rwlock") {
+                    let arguments = named
+                        .arguments
+                        .iter()
+                        .map(|argument| self.resolve_type(argument, namespace, false))
+                        .collect::<Vec<_>>();
+                    if arguments.len() != 1 {
+                        self.push(
+                            "RES113",
+                            format!(
+                                "`rwlock` expects one protected type argument, found {}",
+                                arguments.len()
+                            ),
+                            ty.span,
+                        );
+                        TypeRef::Error
+                    } else if matches!(arguments[0], TypeRef::Void | TypeRef::Reference { .. })
+                        || arguments[0].contains_reference()
+                    {
+                        self.push(
+                            "RES113",
+                            format!(
+                                "`rwlock` cannot protect type `{}` because it contains a reference",
+                                display_type(&arguments[0])
+                            ),
+                            ty.span,
+                        );
+                        TypeRef::Error
+                    } else {
+                        TypeRef::RwLock(Box::new(arguments[0].clone()))
+                    }
                 } else if matches!(segments.as_slice(), [name] if name == "condition") {
                     if !named.arguments.is_empty() {
                         self.push(
@@ -7408,6 +7626,8 @@ impl Resolver<'_> {
                         | "rust::Set"
                         | "rust::Option"
                         | "rust::Result"
+                        | "rust::std::fs::File"
+                        | "rust::std::fs::OpenOptions"
                         | "rust::stainless_runtime::Var"
                 ) && arguments
                     .iter()
@@ -7427,9 +7647,15 @@ impl Resolver<'_> {
                 }
             },
             TypeRef::Mutex(target) => self.thread_auto_trait(target, false, visiting),
+            TypeRef::RwLock(target) => {
+                self.thread_auto_trait(target, false, visiting)
+                    && (!sync || self.thread_auto_trait(target, true, visiting))
+            }
             TypeRef::ThreadHandle(target) => self.thread_auto_trait(target, sync, visiting),
             TypeRef::Reference { .. }
             | TypeRef::MutexGuard(_)
+            | TypeRef::RwLockReadGuard(_)
+            | TypeRef::RwLockWriteGuard(_)
             | TypeRef::ThreadScope
             | TypeRef::ScopedThreadHandle(_)
             | TypeRef::Callback(_)
@@ -7673,6 +7899,9 @@ impl Resolver<'_> {
             | TypeRef::Pointer { .. }
             | TypeRef::Mutex(_)
             | TypeRef::MutexGuard(_)
+            | TypeRef::RwLock(_)
+            | TypeRef::RwLockReadGuard(_)
+            | TypeRef::RwLockWriteGuard(_)
             | TypeRef::Condition
             | TypeRef::ThreadHandle(_)
             | TypeRef::ThreadScope
@@ -7772,6 +8001,13 @@ fn substitute(ty: &TypeRef, substitutions: &BTreeMap<String, TypeRef>) -> TypeRe
         TypeRef::MutexGuard(target) => {
             TypeRef::MutexGuard(Box::new(substitute(target, substitutions)))
         }
+        TypeRef::RwLock(target) => TypeRef::RwLock(Box::new(substitute(target, substitutions))),
+        TypeRef::RwLockReadGuard(target) => {
+            TypeRef::RwLockReadGuard(Box::new(substitute(target, substitutions)))
+        }
+        TypeRef::RwLockWriteGuard(target) => {
+            TypeRef::RwLockWriteGuard(Box::new(substitute(target, substitutions)))
+        }
         TypeRef::ThreadHandle(target) => {
             TypeRef::ThreadHandle(Box::new(substitute(target, substitutions)))
         }
@@ -7824,7 +8060,9 @@ fn automatic_pointee(ty: &TypeRef) -> &TypeRef {
             kind: PointerKind::Unique | PointerKind::Shared,
             target,
         }
-        | TypeRef::MutexGuard(target) => canonical_ref(target),
+        | TypeRef::MutexGuard(target)
+        | TypeRef::RwLockReadGuard(target)
+        | TypeRef::RwLockWriteGuard(target) => canonical_ref(target),
         target => target,
     }
 }
@@ -7840,7 +8078,7 @@ fn is_shared_owner(ty: &TypeRef) -> bool {
 }
 
 fn pointee_category(ty: &TypeRef, category: ValueCategory) -> ValueCategory {
-    if is_shared_owner(ty) {
+    if is_shared_owner(ty) || matches!(canonical_ref(ty), TypeRef::RwLockReadGuard(_)) {
         ValueCategory::SharedPlace
     } else {
         category
@@ -8225,6 +8463,9 @@ fn contains_move_only_storage(ty: &TypeRef) -> bool {
     match ty {
         TypeRef::Mutex(_)
         | TypeRef::MutexGuard(_)
+        | TypeRef::RwLock(_)
+        | TypeRef::RwLockReadGuard(_)
+        | TypeRef::RwLockWriteGuard(_)
         | TypeRef::Condition
         | TypeRef::ThreadHandle(_)
         | TypeRef::ThreadScope
@@ -8239,7 +8480,12 @@ fn contains_move_only_storage(ty: &TypeRef) -> bool {
                 | PointerKind::Atomic
                 | PointerKind::AtomicNullable
         ),
-        TypeRef::Native { arguments, .. } => arguments.iter().any(contains_move_only_storage),
+        TypeRef::Native { path, arguments } => {
+            matches!(
+                path.as_str(),
+                "rust::std::fs::File" | "rust::std::fs::OpenOptions"
+            ) || arguments.iter().any(contains_move_only_storage)
+        }
         TypeRef::Reference { target, .. } => contains_move_only_storage(target),
         _ => false,
     }
@@ -8350,6 +8596,13 @@ fn display_type(ty: &TypeRef) -> String {
         }
         TypeRef::Mutex(target) => format!("mutex<{}>", display_type(target)),
         TypeRef::MutexGuard(target) => format!("<mutex_guard<{}>>", display_type(target)),
+        TypeRef::RwLock(target) => format!("rwlock<{}>", display_type(target)),
+        TypeRef::RwLockReadGuard(target) => {
+            format!("<rwlock_read_guard<{}>>", display_type(target))
+        }
+        TypeRef::RwLockWriteGuard(target) => {
+            format!("<rwlock_write_guard<{}>>", display_type(target))
+        }
         TypeRef::Condition => "condition".to_owned(),
         TypeRef::ThreadHandle(target) => {
             format!("rust::std::thread::JoinHandle<{}>", display_type(target))

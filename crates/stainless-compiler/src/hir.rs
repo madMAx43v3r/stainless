@@ -255,6 +255,12 @@ pub enum Type {
     Mutex(Box<Type>),
     /// A scoped Rust mutex guard with an inferred borrow lifetime.
     MutexGuard(Box<Type>),
+    /// A Rust reader/writer lock owning one value.
+    RwLock(Box<Type>),
+    /// A scoped Rust shared reader guard with an inferred borrow lifetime.
+    RwLockReadGuard(Box<Type>),
+    /// A scoped Rust exclusive writer guard with an inferred borrow lifetime.
+    RwLockWriteGuard(Box<Type>),
     /// A Rust condition variable.
     Condition,
     /// A move-only Rust thread handle.
@@ -631,6 +637,12 @@ pub enum Expression {
     ConditionNew,
     /// Acquire a mutex, recovering its value if another thread panicked.
     MutexLock(Box<Expression>),
+    /// Construct a reader/writer lock around an initialized value.
+    RwLockNew(Box<Expression>),
+    /// Acquire a shared reader guard, recovering after a panic.
+    RwLockRead(Box<Expression>),
+    /// Acquire an exclusive writer guard, recovering after a panic.
+    RwLockWrite(Box<Expression>),
     /// Release a guard while waiting and transparently reacquire it.
     ConditionWait {
         /// Condition variable expression.

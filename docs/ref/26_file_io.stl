@@ -3,6 +3,8 @@
 
 use rust::{String, Vec};
 use rust::std::fs;
+use rust::std::fs::File;
+use rust::std::fs::OpenOptions;
 
 String load_text(const String& path) throws stainless::IoError {
     return fs::read_to_string(path);
@@ -32,8 +34,20 @@ i32 main() throws stainless::IoError {
     String nested_directory = "stainless-file-io-directory/nested/leaf";
 
     save_text(text_path, "Stainless");
+    File file = File::open(text_path);
+    Vec<u8> middle = file.pread(2u64, 4usize);
     String text = load_text(text_path);
     Vec<u8> original = fs::read(text_path);
+
+    OpenOptions options;
+    options.read(true);
+    options.write(true);
+    File writable = options.open(text_path);
+    Vec<u8> patch;
+    patch.push(115u8);
+    usize written = writable.pwrite(0u64, patch);
+    writable.sync_data();
+    u64 file_length = writable.len();
     u64 copied = fs::copy(text_path, copy_path);
 
     Vec<u8> replacement;
@@ -53,8 +67,12 @@ i32 main() throws stainless::IoError {
 
     if (text.len() != 9usize ||
         original.len() != 9usize ||
+        middle.len() != 4usize ||
+        !middle.contains(97u8) ||
         !original.contains(83u8) ||
         copied != 9u64 ||
+        written != 1usize ||
+        file_length != 9u64 ||
         !text_exists ||
         !renamed_exists ||
         fs::exists(text_path) ||

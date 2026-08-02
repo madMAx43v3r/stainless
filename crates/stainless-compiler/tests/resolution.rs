@@ -278,6 +278,20 @@ fn resolves_mutex_guards_condition_waits_and_notifications() {
                 if matches!(target.as_ref(), TypeRef::Struct { path } if path == &["SharedState"])
         )
     }));
+    assert!(analysis.semantics.bindings.iter().any(|binding| {
+        matches!(
+            &binding.ty,
+            TypeRef::RwLockReadGuard(target)
+                if matches!(target.as_ref(), TypeRef::Struct { path } if path == &["SharedState"])
+        )
+    }));
+    assert!(analysis.semantics.bindings.iter().any(|binding| {
+        matches!(
+            &binding.ty,
+            TypeRef::RwLockWriteGuard(target)
+                if matches!(target.as_ref(), TypeRef::Struct { path } if path == &["SharedState"])
+        )
+    }));
     for expected in ["lock", "wait", "notify"] {
         assert!(analysis.semantics.calls.iter().any(|call| matches!(
             (&call.target, expected),
@@ -289,6 +303,16 @@ fn resolves_mutex_guards_condition_waits_and_notifications() {
                 | (
                     CallTarget::Intrinsic(Intrinsic::ConditionNotify { all: true }),
                     "notify"
+                )
+        )));
+    }
+    for expected in ["read", "write"] {
+        assert!(analysis.semantics.calls.iter().any(|call| matches!(
+            (&call.target, expected),
+            (CallTarget::Intrinsic(Intrinsic::RwLockRead { .. }), "read")
+                | (
+                    CallTarget::Intrinsic(Intrinsic::RwLockWrite { .. }),
+                    "write"
                 )
         )));
     }
@@ -326,6 +350,29 @@ void invalid_sync() {
             analysis.diagnostics
         );
     }
+}
+
+#[test]
+fn rwlock_read_guards_reject_mutation() {
+    let analysis = analyze(
+        r"struct State {
+    i32 value;
+};
+
+void invalid_read_mutation(const rwlock<State>& state) {
+    auto guard = state.read();
+    guard.value = 1;
+}
+",
+    );
+    assert!(
+        analysis
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "RES013"),
+        "{:#?}",
+        analysis.diagnostics
+    );
 }
 
 #[test]

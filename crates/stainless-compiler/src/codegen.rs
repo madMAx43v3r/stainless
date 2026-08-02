@@ -1142,6 +1142,26 @@ impl Emitter {
                     Err(#poisoned) => #poisoned.into_inner(),
                 }))
             }
+            hir::Expression::RwLockNew(value) => {
+                let value = self.expression(value)?;
+                Ok(quote!(::std::sync::RwLock::new(#value)))
+            }
+            hir::Expression::RwLockRead(lock) => {
+                let lock = self.expression(lock)?;
+                let poisoned = self.temporary("poisoned_rwlock_read")?;
+                Ok(quote!(match (#lock).read() {
+                    Ok(guard) => guard,
+                    Err(#poisoned) => #poisoned.into_inner(),
+                }))
+            }
+            hir::Expression::RwLockWrite(lock) => {
+                let lock = self.expression(lock)?;
+                let poisoned = self.temporary("poisoned_rwlock_write")?;
+                Ok(quote!(match (#lock).write() {
+                    Ok(guard) => guard,
+                    Err(#poisoned) => #poisoned.into_inner(),
+                }))
+            }
             hir::Expression::ConditionWait { condition, guard } => {
                 let condition = self.expression(condition)?;
                 let guard = self.expression(guard)?;
@@ -1656,6 +1676,18 @@ fn type_tokens(ty: &hir::Type, lifetime: Option<&syn::Lifetime>) -> Result<Token
         hir::Type::MutexGuard(target) => {
             let target = type_tokens(target, None)?;
             Ok(quote!(::std::sync::MutexGuard<'_, #target>))
+        }
+        hir::Type::RwLock(target) => {
+            let target = type_tokens(target, None)?;
+            Ok(quote!(::std::sync::RwLock<#target>))
+        }
+        hir::Type::RwLockReadGuard(target) => {
+            let target = type_tokens(target, None)?;
+            Ok(quote!(::std::sync::RwLockReadGuard<'_, #target>))
+        }
+        hir::Type::RwLockWriteGuard(target) => {
+            let target = type_tokens(target, None)?;
+            Ok(quote!(::std::sync::RwLockWriteGuard<'_, #target>))
         }
         hir::Type::Condition => Ok(quote!(::std::sync::Condvar)),
         hir::Type::ThreadHandle(target) => {

@@ -352,6 +352,32 @@ void invalid(Result<Payload, String> result) {
     assert_codes(&analysis, &["OWN001"]);
 }
 
+#[test]
+fn mutex_member_guards_borrow_the_implicit_receiver_stably() {
+    let analysis = analyze(
+        r"struct State {
+    i32 value;
+};
+
+class Store {
+    mutex<State> state;
+public:
+    Store();
+    i32 read() const;
+};
+
+Store::Store() : state(State{0}) {}
+
+i32 Store::read() const {
+    auto guard = state.lock();
+    return guard.value;
+}
+",
+    );
+
+    assert_codes(&analysis, &[]);
+}
+
 fn assert_codes(analysis: &stainless_compiler::Analysis, expected: &[&str]) {
     let ownership = analysis
         .diagnostics
