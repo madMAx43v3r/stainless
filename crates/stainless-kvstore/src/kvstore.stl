@@ -1,0 +1,394 @@
+// Append-only, versioned key/value storage implemented entirely in Stainless.
+//
+// Writes are tagged with the current version. commit(next) makes those writes
+// durable before advancing the write epoch. revert(version) durably records
+// the boundary and removes every indexed value tagged >= version. Recovery
+// replays only through the last valid commit/revert record and truncates an
+// incomplete or uncommitted tail.
+
+use rust::{List, String, Vec};
+use rust::std::fs;
+use rust::std::fs::{File, OpenOptions};
+use rust::std::thread;
+
+namespace kvstore {
+
+struct Value {
+    Vec<u8> bytes;
+};
+
+struct IndexEntry {
+    u64 key;
+    u32 version;
+    u64 sequence;
+    u64 value_offset;
+    usize value_length;
+};
+
+struct StoreState {
+    List<IndexEntry> index;
+    u32 current_version;
+    u64 next_sequence;
+    u64 log_end;
+};
+
+void push_u32(Vec<u8>& output, u32 value) {
+    for (usize index = 0usize; index < 4usize; index += 1usize) {
+        output.push(u8(value % 256u32));
+        value /= 256u32;
+    }
+}
+
+void push_u64(Vec<u8>& output, u64 value) {
+    for (usize index = 0usize; index < 8usize; index += 1usize) {
+        output.push(u8(value % 256u64));
+        value /= 256u64;
+    }
+}
+
+u32 decode_u32(const Vec<u8>& bytes) {
+    u32 value = 0u32;
+    u32 factor = 1u32;
+    usize index = 0usize;
+    for (auto byte : bytes) {
+        value += u32(byte) * factor;
+        index += 1usize;
+        if (index < bytes.len()) {
+            factor *= 256u32;
+        }
+    }
+    return value;
+}
+
+u64 decode_u64(const Vec<u8>& bytes) {
+    u64 value = 0u64;
+    u64 factor = 1u64;
+    usize index = 0usize;
+    for (auto byte : bytes) {
+        value += u64(byte) * factor;
+        index += 1usize;
+        if (index < bytes.len()) {
+            factor *= 256u64;
+        }
+    }
+    return value;
+}
+
+u32 record_checksum(const Vec<u8>& payload) {
+    u32 checksum = 1u32;
+    for (auto byte : payload) {
+        checksum = (checksum + u32(byte)) % 65521u32;
+    }
+    return checksum;
+}
+
+Vec<u8> make_record(
+    u8 kind,
+    u32 version,
+    u64 sequence,
+    u64 key,
+    const Vec<u8>& value) {
+    Vec<u8> payload;
+    payload.push(kind);
+    push_u32(payload, version);
+    push_u64(payload, sequence);
+    push_u64(payload, key);
+    push_u64(payload, u64(value.len()));
+    for (auto byte : value) {
+        payload.push(byte);
+    }
+
+    u32 checksum = record_checksum(payload);
+    Vec<u8> record;
+    push_u64(record, u64(payload.len()) + 12u64);
+    record.append(payload);
+    push_u32(record, checksum);
+    return move(record);
+}
+
+Vec<u8> empty_bytes() {
+    Vec<u8> value;
+    return move(value);
+}
+
+StoreState initial_state() {
+    List<IndexEntry> index;
+    StoreState state = StoreState{move(index), 0u32, 0u64, 0u64};
+    return state;
+}
+
+File open_log(const String& path) throws stainless::IoError {
+    OpenOptions options;
+    options.read(true);
+    options.write(true);
+    options.create(true);
+    return options.open(path);
+}
+
+class Table {
+    File log;
+    rwlock<StoreState> state;
+
+public:
+    Table(const String& path) throws stainless::IoError;
+
+    void recover() const throws stainless::IoError;
+    void insert(u64 key, Vec<u8> value) const throws stainless::IoError;
+    bool commit(u32 next_version) const throws stainless::IoError;
+    bool revert(u32 version) const throws stainless::IoError;
+    u32 current_version() const;
+    shared_nullptr<Value> find(u64 key) const throws stainless::IoError;
+};
+
+Table::Table(const String& path) throws stainless::IoError
+    : log(open_log(path)), state(initial_state()) {
+}
+
+void Table::insert(u64 key, Vec<u8> value) const throws stainless::IoError {
+    auto guard = state.write();
+    u64 sequence = guard.next_sequence;
+    u32 version = guard.current_version;
+    Vec<u8> record = make_record(
+        0u8,
+        version,
+        sequence,
+        key,
+        value);
+    u64 value_offset = guard.log_end + 37u64;
+    log.pwrite_all(guard.log_end, record);
+    guard.log_end += u64(record.len());
+    guard.next_sequence += 1u64;
+    guard.index.push_back(IndexEntry{
+        key,
+        version,
+        sequence,
+        value_offset,
+        value.len()
+    });
+}
+
+bool Table::commit(u32 next_version) const throws stainless::IoError {
+    auto guard = state.write();
+    if (next_version <= guard.current_version) {
+        return false;
+    }
+    Vec<u8> record = make_record(
+        1u8,
+        next_version,
+        0u64,
+        0u64,
+        empty_bytes());
+    log.pwrite_all(guard.log_end, record);
+    guard.log_end += u64(record.len());
+    log.sync_data();
+    guard.current_version = next_version;
+    return true;
+}
+
+bool Table::revert(u32 version) const throws stainless::IoError {
+    auto guard = state.write();
+    if (version > guard.current_version) {
+        return false;
+    }
+    Vec<u8> record = make_record(2u8, version, 0u64, 0u64, empty_bytes());
+    log.pwrite_all(guard.log_end, record);
+    guard.log_end += u64(record.len());
+    log.sync_data();
+
+    List<IndexEntry> retained;
+    for (auto entry : guard.index) {
+        if (entry.version < version) {
+            retained.push_back(entry);
+        }
+    }
+    guard.index = move(retained);
+    guard.current_version = version;
+    return true;
+}
+
+u32 Table::current_version() const {
+    auto guard = state.read();
+    return guard.current_version;
+}
+
+shared_nullptr<Value> Table::find(u64 key) const throws stainless::IoError {
+    auto guard = state.read();
+    bool found = false;
+    u32 best_version = 0u32;
+    u64 best_sequence = 0u64;
+    u64 best_offset = 0u64;
+    usize best_length = 0usize;
+
+    for (const auto& entry : guard.index) {
+        if (entry.key == key && entry.version <= guard.current_version &&
+            (!found || entry.version > best_version ||
+             (entry.version == best_version && entry.sequence > best_sequence))) {
+            found = true;
+            best_version = entry.version;
+            best_sequence = entry.sequence;
+            best_offset = entry.value_offset;
+            best_length = entry.value_length;
+        }
+    }
+    if (!found) {
+        return nullptr;
+    }
+    return shared_nullptr<Value>(
+        make_shared<Value>{log.pread_exact(best_offset, best_length)});
+}
+
+shared_ptr<Table> open_table(const String& path) throws stainless::IoError {
+    shared_ptr<Table> table = make_shared<Table>(path);
+    table.recover();
+    return table;
+}
+
+void Table::recover() const throws stainless::IoError {
+    auto guard = state.write();
+    u64 file_size = log.len();
+    u64 offset = 0u64;
+    u64 committed_end = 0u64;
+    u32 committed_version = 0u32;
+    u64 working_next_sequence = 0u64;
+    u64 committed_next_sequence = 0u64;
+    List<IndexEntry> working;
+    List<IndexEntry> committed;
+
+    for (; offset + 41u64 <= file_size;) {
+        u64 record_size = decode_u64(log.pread_exact(offset, 8usize));
+        if (record_size < 41u64 || record_size > file_size - offset) {
+            break;
+        }
+        u64 payload_size = record_size - 12u64;
+        Vec<u8> payload = log.pread_exact(offset + 8u64, usize(payload_size));
+        u32 expected_checksum = decode_u32(
+            log.pread_exact(offset + 8u64 + payload_size, 4usize));
+        if (record_checksum(payload) != expected_checksum) {
+            break;
+        }
+
+        u8 kind = u8(decode_u32(log.pread_exact(offset + 8u64, 1usize)));
+        u32 version = decode_u32(log.pread_exact(offset + 9u64, 4usize));
+        u64 sequence = decode_u64(log.pread_exact(offset + 13u64, 8usize));
+        u64 key = decode_u64(log.pread_exact(offset + 21u64, 8usize));
+        u64 value_length = decode_u64(log.pread_exact(offset + 29u64, 8usize));
+        if (record_size != 41u64 + value_length) {
+            break;
+        }
+
+        if (kind == 0u8) {
+            working.push_back(IndexEntry{
+                key,
+                version,
+                sequence,
+                offset + 37u64,
+                usize(value_length)
+            });
+            if (sequence >= working_next_sequence) {
+                working_next_sequence = sequence + 1u64;
+            }
+        } else if (kind == 1u8) {
+            committed = working.clone();
+            committed_version = version;
+            committed_next_sequence = working_next_sequence;
+            committed_end = offset + record_size;
+        } else if (kind == 2u8) {
+            List<IndexEntry> retained;
+            for (auto entry : working) {
+                if (entry.version < version) {
+                    retained.push_back(entry);
+                }
+            }
+            working = move(retained);
+            committed = working.clone();
+            committed_version = version;
+            committed_next_sequence = working_next_sequence;
+            committed_end = offset + record_size;
+        } else {
+            break;
+        }
+        offset += record_size;
+    }
+
+    if (file_size != committed_end) {
+        log.set_len(committed_end);
+    }
+    guard.index = move(committed);
+    guard.current_version = committed_version;
+    guard.next_sequence = committed_next_sequence;
+    guard.log_end = committed_end;
+}
+
+Vec<u8> one_byte(u8 value) {
+    Vec<u8> bytes;
+    bytes.push(value);
+    return move(bytes);
+}
+
+bool value_is(shared_nullptr<Value> maybe, u8 expected) {
+    if (!maybe) {
+        return false;
+    }
+    shared_ptr<Value> value = shared_ptr<Value>(maybe);
+    return value.bytes.len() == 1usize && value.bytes.contains(expected);
+}
+
+void write_history(const String& path) throws stainless::IoError {
+    shared_ptr<Table> table = open_table(path);
+    table.insert(7u64, one_byte(10u8));
+    table.commit(1u32);
+    table.insert(7u64, one_byte(20u8));
+    table.commit(2u32);
+    table.revert(1u32);
+}
+
+struct ReaderState {
+    i32 successful;
+};
+
+void read_in_thread(
+    shared_ptr<Table> table,
+    shared_ptr<mutex<ReaderState>> result) {
+    try {
+        if (value_is(table.find(7u64), 10u8)) {
+            auto guard = result.lock();
+            guard.successful += 1;
+        }
+    } catch (const stainless::IoError& error) {
+    }
+}
+
+i32 self_test(const String& path)
+    throws stainless::IoError, stainless::ThreadError {
+    if (fs::exists(path)) {
+        fs::remove_file(path);
+    }
+    write_history(path);
+
+    shared_ptr<Table> recovered = open_table(path);
+    if (recovered.current_version() != 1u32 ||
+        !value_is(recovered.find(7u64), 10u8)) {
+        return 1;
+    }
+
+    shared_ptr<mutex<ReaderState>> result =
+        make_shared<mutex<ReaderState>>{0};
+    auto first = thread::spawn([recovered, result]() {
+        read_in_thread(recovered, result);
+    });
+    auto second = thread::spawn([recovered, result]() {
+        read_in_thread(recovered, result);
+    });
+    first.join();
+    second.join();
+
+    auto guard = result.lock();
+    i32 status = 2;
+    if (guard.successful == 2) {
+        status = 0;
+    }
+    fs::remove_file(path);
+    return status;
+}
+
+} // namespace kvstore
