@@ -32,6 +32,16 @@ selects the greatest entry in the inclusive
 `(key, 0)..=(key, current_version)` range through a non-escaping callback, so
 lookups neither scan nor clone the index.
 
+`find_range(lower, upper)` returns the latest visible value for every logical
+key in the inclusive interval, ordered from low to high. It walks only the
+matching compound-index interval and coalesces historical versions while
+holding one shared state guard. `find_range_last(lower, upper, count)` returns
+at most the last `count` logical keys in reverse order. The symmetric
+`find_range_first(lower, upper, count)` returns at most the first `count` keys
+in ascending order. The bounded calls perform ordered predecessor or successor
+lookups per result, so finding a small prefix or suffix does not scan the
+entire range.
+
 Recovery additionally builds an in-memory `Map<u32, u64>` super-index mapping
 each committed version to its commit-record offset. `revert(version)` uses an
 exact entry or the least successor entry to seek directly to the branch
@@ -70,6 +80,9 @@ let store = Table::<(u32, String), String>::open("users.db")?;
 store.insert((7, "alice".into()), "active".into())?;
 store.commit(1)?;
 assert_eq!(store.find(&(7, "alice".into()))?, Some("active".into()));
+let rows = store.find_range(&(7, "a".into()), &(7, "z".into()))?;
+let first_rows = store.find_range_first(&(7, "a".into()), &(7, "z".into()), 10)?;
+let last_rows = store.find_range_last(&(7, "a".into()), &(7, "z".into()), 10)?;
 # Ok::<(), stainless_kvstore::Error>(())
 ```
 

@@ -63,6 +63,57 @@ fn typed_store_persists_compound_keys_and_generic_values() {
 }
 
 #[test]
+fn range_find_returns_latest_values_and_a_reverse_bounded_tail() {
+    let path = temporary_log("range-find");
+    let table = Table::<u32, u32>::open(&path).expect("open should succeed");
+
+    for key in 1..=5 {
+        table.insert(key, key * 10).expect("initial insert");
+    }
+    assert!(table.commit(1).expect("first commit"));
+    table.insert(3, 300).expect("replacement insert");
+    assert!(table.commit(2).expect("second commit"));
+
+    assert_eq!(
+        table.find_range(&2, &4).expect("range lookup"),
+        [(2, 20), (3, 300), (4, 40)]
+    );
+    assert_eq!(
+        table
+            .find_range_first(&1, &5, 3)
+            .expect("forward prefix lookup"),
+        [(1, 10), (2, 20), (3, 300)]
+    );
+    assert_eq!(
+        table
+            .find_range_last(&1, &5, 3)
+            .expect("reverse tail lookup"),
+        [(5, 50), (4, 40), (3, 300)]
+    );
+    assert!(
+        table
+            .find_range_first(&1, &5, 0)
+            .expect("empty forward prefix lookup")
+            .is_empty()
+    );
+    assert!(
+        table
+            .find_range_last(&1, &5, 0)
+            .expect("empty reverse tail lookup")
+            .is_empty()
+    );
+    assert!(
+        table
+            .find_range(&5, &1)
+            .expect("reversed bounds are empty")
+            .is_empty()
+    );
+
+    drop(table);
+    remove_logs(&path);
+}
+
+#[test]
 fn compound_key_codec_preserves_tuple_order() {
     let mut keys = [
         (2_u32, "alpha".to_owned()),

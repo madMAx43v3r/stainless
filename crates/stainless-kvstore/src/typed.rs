@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use super::__stainless_namespace_kvstore::Table as RawTable;
 use super::{
-    __StainlessExceptionBox, stainless_kvstore_commit_raw, stainless_kvstore_find_raw,
-    stainless_kvstore_insert_raw, stainless_kvstore_open_raw, stainless_kvstore_revert_raw,
-    stainless_kvstore_version_raw,
+    __StainlessExceptionBox, stainless_kvstore_commit_raw, stainless_kvstore_find_range_first_raw,
+    stainless_kvstore_find_range_last_raw, stainless_kvstore_find_range_raw,
+    stainless_kvstore_find_raw, stainless_kvstore_insert_raw, stainless_kvstore_open_raw,
+    stainless_kvstore_revert_raw, stainless_kvstore_version_raw,
 };
 
 /// An encoding, decoding, path, or Stainless storage failure.
@@ -106,6 +107,77 @@ impl<K: OrderedKey, V: Codec> Table<K, V> {
         let value =
             stainless_kvstore_find_raw(Arc::clone(&self.raw), &key).map_err(stainless_error)?;
         value.map(|value| V::decode(&value.bytes)).transpose()
+    }
+
+    /// Finds the newest visible value for every key in the inclusive range.
+    ///
+    /// Results are ordered from `lower` to `upper`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a bound cannot be encoded, a positioned read
+    /// fails, or a persisted key or value cannot be decoded.
+    pub fn find_range(&self, lower: &K, upper: &K) -> Result<Vec<(K, V)>, Error> {
+        let lower = lower.encode()?;
+        let upper = upper.encode()?;
+        let values = stainless_kvstore_find_range_raw(Arc::clone(&self.raw), &lower, &upper)
+            .map_err(stainless_error)?;
+        values
+            .into_iter()
+            .map(|entry| Ok((K::decode(&entry.key)?, V::decode(&entry.value)?)))
+            .collect()
+    }
+
+    /// Finds the first `count` keys in the inclusive range.
+    ///
+    /// Results are returned in ascending key order. This performs bounded
+    /// successor lookups rather than scanning the complete range.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a bound cannot be encoded, a positioned read
+    /// fails, or a persisted key or value cannot be decoded.
+    pub fn find_range_first(
+        &self,
+        lower: &K,
+        upper: &K,
+        count: usize,
+    ) -> Result<Vec<(K, V)>, Error> {
+        let lower = lower.encode()?;
+        let upper = upper.encode()?;
+        let values =
+            stainless_kvstore_find_range_first_raw(Arc::clone(&self.raw), &lower, &upper, count)
+                .map_err(stainless_error)?;
+        values
+            .into_iter()
+            .map(|entry| Ok((K::decode(&entry.key)?, V::decode(&entry.value)?)))
+            .collect()
+    }
+
+    /// Finds the last `count` keys in the inclusive range.
+    ///
+    /// Results are returned in descending key order. This performs bounded
+    /// predecessor lookups rather than scanning the complete range.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a bound cannot be encoded, a positioned read
+    /// fails, or a persisted key or value cannot be decoded.
+    pub fn find_range_last(
+        &self,
+        lower: &K,
+        upper: &K,
+        count: usize,
+    ) -> Result<Vec<(K, V)>, Error> {
+        let lower = lower.encode()?;
+        let upper = upper.encode()?;
+        let values =
+            stainless_kvstore_find_range_last_raw(Arc::clone(&self.raw), &lower, &upper, count)
+                .map_err(stainless_error)?;
+        values
+            .into_iter()
+            .map(|entry| Ok((K::decode(&entry.key)?, V::decode(&entry.value)?)))
+            .collect()
     }
 
     /// Durably commits pending updates and advances to `next_version`.

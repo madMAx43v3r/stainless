@@ -27,6 +27,11 @@ struct IndexEntry {
     u32 length;
 };
 
+struct KeyValue {
+    Vec<u8> key;
+    Vec<u8> value;
+};
+
 struct InsertRecord {
     // Version in which this key/value pair was written.
     u32 version;
@@ -89,44 +94,16 @@ public:
     bool revert(u32 version) const throws IndexCorrupt, stainless::IoError;
     u32 current_version() const;
     shared_nullptr<Value> find(const Vec<u8>& key) const throws stainless::IoError;
+    Vec<KeyValue> find_range(const Vec<u8>& lower, const Vec<u8>& upper) const throws stainless::IoError;
+    Vec<KeyValue> find_range_first(
+        const Vec<u8>& lower,
+        const Vec<u8>& upper,
+        usize count) const throws stainless::IoError;
+    Vec<KeyValue> find_range_last(
+        const Vec<u8>& lower,
+        const Vec<u8>& upper,
+        usize count) const throws stainless::IoError;
 };
-
-u32 record_checksum_range(const Vec<u8>& record, usize begin, usize end)
-{
-    u32 sum = 1;
-    u32 weighted_sum = 0;
-    record.with_range(
-        begin,
-        end,
-        [&sum, &weighted_sum](const u8& byte) {
-            sum = (sum + u32(byte)) % 65521;
-            weighted_sum = (weighted_sum + sum) % 65521;
-        });
-    return weighted_sum * 65536 + sum;
-}
-
-u32 record_checksum(const Vec<u8>& payload)
-{
-    return record_checksum_range(payload, 0, payload.len());
-}
-
-Vec<u8> make_data_record(u32 version, const Vec<u8>& key, const Vec<u8>& value) throws stainless::IoError
-{
-    Vec<u8> payload;
-    payload.push(RecordKind::Insert);
-    BigEndian::write_u32(payload, version);
-    BigEndian::write_u64(payload, key.len());
-    BigEndian::write_u32(payload, value.len());
-    payload.extend_from_slice(key);
-    payload.extend_from_slice(value);
-
-    u32 checksum = record_checksum(payload);
-    Vec<u8> record;
-    BigEndian::write_u64(record, u64(payload.len()) + 12);
-    record.append(payload);
-    BigEndian::write_u32(record, checksum);
-    return record;
-}
 
 Vec<u8> InsertRecord::write() const
 {
@@ -139,7 +116,7 @@ Vec<u8> InsertRecord::write() const
     payload.extend_from_slice(key);
 
     u64 record_size = u64(payload.len()) + 12;
-    u32 checksum = record_checksum(payload);
+    u32 checksum = detail::record_checksum(payload);
     Vec<u8> record;
     BigEndian::write_u64(record, record_size);
     record.append(payload);
@@ -155,7 +132,7 @@ Vec<u8> CommitRecord::write() const
     BigEndian::write_u64(payload, data_len);
 
     u64 record_size = u64(payload.len()) + 12;
-    u32 checksum = record_checksum(payload);
+    u32 checksum = detail::record_checksum(payload);
     Vec<u8> record;
     BigEndian::write_u64(record, record_size);
     record.append(payload);
@@ -163,78 +140,15 @@ Vec<u8> CommitRecord::write() const
     return record;
 }
 
-StoreState initial_state()
-{
-    Map<tuple<Vec<u8>, u32>, IndexEntry> index;
-    Map<u32, u64> version_offsets;
-    version_offsets.insert(0, 0);
-    StoreState state = StoreState{
-        move(index),
-        move(version_offsets),
-        0,
-        0,
-        0
-    };
-    return state;
-}
-
-String make_index_path(const String& path)
-{
-    String result = path.clone();
-    result.push_str(".index");
-    return result;
-}
-
-File open_log(const String& path) throws stainless::IoError
-{
-    OpenOptions options;
-    options.read(true);
-    options.write(true);
-    options.create(true);
-    return options.open(path);
-}
-
-u8 decode_u8_at(const Vec<u8>& bytes, usize offset) throws IndexCorrupt
-{
-    try {
-        return BigEndian::read_u8_at(bytes, offset);
-    } catch (const stainless::IoError& _error) {
-        throw IndexCorrupt{stainless::Exception("invalid index WAL u8 field")};
-    }
-}
-
-u32 decode_u32_at(const Vec<u8>& bytes, usize offset) throws IndexCorrupt
-{
-    try {
-        return BigEndian::read_u32_at(bytes, offset);
-    } catch (const stainless::IoError& _error) {
-        throw IndexCorrupt{stainless::Exception("invalid index WAL u32 field")};
-    }
-}
-
-u64 decode_u64_at(const Vec<u8>& bytes, usize offset) throws IndexCorrupt
-{
-    try {
-        return BigEndian::read_u64_at(bytes, offset);
-    } catch (const stainless::IoError& _error) {
-        throw IndexCorrupt{stainless::Exception("invalid index WAL u64 field")};
-    }
-}
-
-u8 index_record_kind(const Vec<u8>& record) throws IndexCorrupt
-{
-    return decode_u8_at(record, 8);
-}
-
 InsertRecord InsertRecord::read(const Vec<u8>& record)
 {
     u64 record_size = u64(record.len());
-    if (index_record_kind(record) != RecordKind::Insert || record_size < 37) {
+    if (detail::index_record_kind(record) != RecordKind::Insert || record_size < 37) {
         throw IndexCorrupt{
             stainless::Exception("invalid index WAL insert record")
         };
     }
-    u64 key_length = decode_u64_at(record, 25);
+    u64 key_length = detail::decode_u64_at(record, 25);
     if (record_size != 37 + key_length) {
         throw IndexCorrupt{
             stainless::Exception("invalid index WAL key length")
@@ -249,62 +163,30 @@ InsertRecord InsertRecord::read(const Vec<u8>& record)
             key.push(byte);
         });
     return InsertRecord{
-        decode_u32_at(record, 9),
-        decode_u64_at(record, 13),
-        decode_u32_at(record, 21),
+        detail::decode_u32_at(record, 9),
+        detail::decode_u64_at(record, 13),
+        detail::decode_u32_at(record, 21),
         move(key)
     };
 }
 
 CommitRecord CommitRecord::read(const Vec<u8>& record)
 {
-    if (record.len() != 25 || index_record_kind(record) != RecordKind::Commit) {
+    if (record.len() != 25 || detail::index_record_kind(record) != RecordKind::Commit) {
         throw IndexCorrupt{
             stainless::Exception("invalid index WAL commit record")
         };
     }
     return CommitRecord{
-        decode_u32_at(record, 9),
-        decode_u64_at(record, 13)
+        detail::decode_u32_at(record, 9),
+        detail::decode_u64_at(record, 13)
     };
 }
 
-Vec<u8> read_index_record_at(
-    const File& index_log,
-    u64 start,
-    u64 file_len) throws IndexCorrupt, stainless::IoError
-{
-    if (start > file_len || file_len - start < 8) {
-        throw IndexCorrupt{
-            stainless::Exception("truncated index WAL record header")
-        };
-    }
-    u64 record_size = decode_u64_at(index_log.pread_exact(start, 8), 0);
-    if (record_size < 25 || record_size > file_len - start) {
-        throw IndexCorrupt{
-            stainless::Exception("invalid index WAL record size")
-        };
-    }
-    Vec<u8> record = index_log.pread_exact(start, usize(record_size));
-    if (decode_u64_at(record, 0) != record_size) {
-        throw IndexCorrupt{
-            stainless::Exception("invalid index WAL record framing")
-        };
-    }
-    usize checksum_offset = record.len() - 4;
-    u32 expected_checksum = decode_u32_at(record, checksum_offset);
-    if (record_checksum_range(record, 8, checksum_offset) != expected_checksum) {
-        throw IndexCorrupt{
-            stainless::Exception("index WAL checksum mismatch")
-        };
-    }
-    return record;
-}
-
 Table::Table(const String& path)
-    : data_log(open_log(path)),
-      index_log(open_log(make_index_path(path))),
-      state(initial_state())
+    : data_log(detail::open_log(path)),
+      index_log(detail::open_log(detail::make_index_path(path))),
+      state(detail::initial_state())
 {
 }
 
@@ -317,7 +199,7 @@ void Table::insert(Vec<u8> key, Vec<u8> value) const
     }
     auto guard = state.write();
     u32 version = guard.current_version;
-    Vec<u8> data_record = make_data_record(version, key, value);
+    Vec<u8> data_record = detail::make_data_record(version, key, value);
     u64 offset = guard.data_len + 25 + u64(key.len());
     u64 data_len = guard.data_len + u64(data_record.len());
     InsertRecord insert = InsertRecord{
@@ -388,7 +270,7 @@ bool Table::revert(u32 version) const
         }
     }
     if (version != 0 || !exact_version) {
-        Vec<u8> marker_bytes = read_index_record_at(index_log, marker_offset, guard.index_len);
+        Vec<u8> marker_bytes = detail::read_index_record_at(index_log, marker_offset, guard.index_len);
         CommitRecord marker = CommitRecord::read(marker_bytes);
         if ((exact_version && marker.version != version) || (!exact_version && marker.version <= version)) {
             throw IndexCorrupt{
@@ -405,11 +287,11 @@ bool Table::revert(u32 version) const
     Vec<tuple<Vec<u8>, u32>> removed;
     Vec<u32> removed_versions;
     for (u64 scan_offset = boundary; scan_offset < guard.index_len;) {
-        Vec<u8> record = read_index_record_at(
+        Vec<u8> record = detail::read_index_record_at(
             index_log,
             scan_offset,
             guard.index_len);
-        u8 kind = index_record_kind(record);
+        u8 kind = detail::index_record_kind(record);
         if (kind == RecordKind::Insert) {
             InsertRecord insert = InsertRecord::read(record);
             removed.push(tuple<Vec<u8>, u32>(
@@ -491,6 +373,150 @@ shared_nullptr<Value> Table::find(const Vec<u8>& key) const
         make_shared<Value>{data_log.pread_exact(best_offset, usize(best_length))});
 }
 
+Vec<KeyValue> Table::find_range(const Vec<u8>& lower, const Vec<u8>& upper) const
+{
+    auto guard = state.read();
+    u32 current_version = guard.current_version;
+    tuple<Vec<u8>, u32> index_lower = tuple<Vec<u8>, u32>(lower.clone(), 0);
+    tuple<Vec<u8>, u32> index_upper = tuple<Vec<u8>, u32>(upper.clone(), current_version);
+    Vec<tuple<Vec<u8>, IndexEntry>> entries;
+    bool has_candidate = false;
+    Vec<u8> candidate_key;
+    IndexEntry candidate_location = IndexEntry{0, 0};
+
+    guard.index.with_range(
+        index_lower,
+        index_upper,
+        [&entries,
+         &has_candidate,
+         &candidate_key,
+         &candidate_location](
+            const tuple<Vec<u8>, u32>& index_key,
+            const IndexEntry& location) {
+            if (!has_candidate || candidate_key != index_key.0) {
+                if (has_candidate) {
+                    entries.push(tuple<Vec<u8>, IndexEntry>(
+                        candidate_key.clone(),
+                        candidate_location));
+                }
+                candidate_key = index_key.0.clone();
+                has_candidate = true;
+            }
+            candidate_location = location;
+        });
+    if (has_candidate) {
+        entries.push(tuple<Vec<u8>, IndexEntry>(
+            move(candidate_key),
+            candidate_location));
+    }
+    return detail::read_key_values(data_log, entries);
+}
+
+Vec<KeyValue> Table::find_range_last(
+    const Vec<u8>& lower,
+    const Vec<u8>& upper,
+    usize count) const
+{
+    auto guard = state.read();
+    tuple<Vec<u8>, u32> index_lower = tuple<Vec<u8>, u32>(lower.clone(), 0);
+    tuple<Vec<u8>, u32> index_upper = tuple<Vec<u8>, u32>(upper.clone(), guard.current_version);
+    Vec<tuple<Vec<u8>, IndexEntry>> entries;
+    bool include_upper = true;
+
+    for (; entries.len() < count;) {
+        bool found = false;
+        Vec<u8> key;
+        IndexEntry location = IndexEntry{0, 0};
+        if (include_upper) {
+            found = guard.index.with_last_in_range(
+                index_lower,
+                index_upper,
+                [&key, &location](
+                    const tuple<Vec<u8>, u32>& index_key,
+                    const IndexEntry& selected) {
+                    key = index_key.0.clone();
+                    location = selected;
+                });
+            include_upper = false;
+        } else {
+            found = guard.index.with_last_before(
+                index_lower,
+                index_upper,
+                [&key, &location](
+                    const tuple<Vec<u8>, u32>& index_key,
+                    const IndexEntry& selected) {
+                    key = index_key.0.clone();
+                    location = selected;
+                });
+        }
+        if (!found) {
+            break;
+        }
+        entries.push(tuple<Vec<u8>, IndexEntry>(key.clone(), location));
+        index_upper = tuple<Vec<u8>, u32>(move(key), 0);
+    }
+    return detail::read_key_values(data_log, entries);
+}
+
+Vec<KeyValue> Table::find_range_first(
+    const Vec<u8>& lower,
+    const Vec<u8>& upper,
+    usize count) const
+{
+    auto guard = state.read();
+    u32 current_version = guard.current_version;
+    tuple<Vec<u8>, u32> index_lower = tuple<Vec<u8>, u32>(lower.clone(), 0);
+    tuple<Vec<u8>, u32> index_upper = tuple<Vec<u8>, u32>(upper.clone(), current_version);
+    Vec<tuple<Vec<u8>, IndexEntry>> entries;
+    bool include_lower = true;
+
+    for (; entries.len() < count;) {
+        bool found = false;
+        Vec<u8> key;
+        if (include_lower) {
+            found = guard.index.with_first_in_range(
+                index_lower,
+                index_upper,
+                [&key](
+                    const tuple<Vec<u8>, u32>& index_key,
+                    const IndexEntry& _selected) {
+                    key = index_key.0.clone();
+                });
+            include_lower = false;
+        } else {
+            found = guard.index.with_first_after(
+                index_lower,
+                index_upper,
+                [&key](
+                    const tuple<Vec<u8>, u32>& index_key,
+                    const IndexEntry& _selected) {
+                    key = index_key.0.clone();
+                });
+        }
+        if (!found) {
+            break;
+        }
+
+        IndexEntry location = IndexEntry{0, 0};
+        tuple<Vec<u8>, u32> key_lower = tuple<Vec<u8>, u32>(key.clone(), 0);
+        tuple<Vec<u8>, u32> key_upper = tuple<Vec<u8>, u32>(key.clone(), current_version);
+        found = guard.index.with_last_in_range(
+            key_lower,
+            key_upper,
+            [&location](
+                const tuple<Vec<u8>, u32>& _index_key,
+                const IndexEntry& selected) {
+                location = selected;
+            });
+        if (!found) {
+            break;
+        }
+        entries.push(tuple<Vec<u8>, IndexEntry>(key.clone(), location));
+        index_lower = tuple<Vec<u8>, u32>(move(key), current_version);
+    }
+    return detail::read_key_values(data_log, entries);
+}
+
 shared_ptr<Table> open_table(const String& path) throws stainless::IoError
 {
     shared_ptr<Table> table = make_shared<Table>(path);
@@ -514,12 +540,12 @@ void Table::recover() const
 
     for (; offset < index_file_len;) {
         try {
-            Vec<u8> record = read_index_record_at(
+            Vec<u8> record = detail::read_index_record_at(
                 index_log,
                 offset,
                 index_file_len);
             u64 next_offset = offset + u64(record.len());
-            u8 kind = index_record_kind(record);
+            u8 kind = detail::index_record_kind(record);
             if (kind == RecordKind::Insert) {
                 InsertRecord insert = InsertRecord::read(record);
                 if (insert.offset > data_file_len ||
@@ -569,20 +595,6 @@ void Table::recover() const
     guard.index_len = committed_index_len;
 }
 
-Vec<u8> one_byte(u8 value)
-{
-    Vec<u8> bytes;
-    bytes.push(value);
-    return bytes;
-}
-
-Vec<u8> test_key(u64 value)
-{
-    Vec<u8> bytes;
-    BigEndian::write_u64(bytes, value);
-    return bytes;
-}
-
 void insert_bytes(shared_ptr<Table> table, Vec<u8> key, Vec<u8> value) throws ValueTooLarge, stainless::IoError
 {
     table.insert(move(key), move(value));
@@ -591,6 +603,32 @@ void insert_bytes(shared_ptr<Table> table, Vec<u8> key, Vec<u8> value) throws Va
 shared_nullptr<Value> find_bytes(shared_ptr<Table> table, const Vec<u8>& key) throws stainless::IoError
 {
     return table.find(key);
+}
+
+Vec<KeyValue> find_range_bytes(
+    shared_ptr<Table> table,
+    const Vec<u8>& lower,
+    const Vec<u8>& upper) throws stainless::IoError
+{
+    return table.find_range(lower, upper);
+}
+
+Vec<KeyValue> find_range_last_bytes(
+    shared_ptr<Table> table,
+    const Vec<u8>& lower,
+    const Vec<u8>& upper,
+    usize count) throws stainless::IoError
+{
+    return table.find_range_last(lower, upper, count);
+}
+
+Vec<KeyValue> find_range_first_bytes(
+    shared_ptr<Table> table,
+    const Vec<u8>& lower,
+    const Vec<u8>& upper,
+    usize count) throws stainless::IoError
+{
+    return table.find_range_first(lower, upper, count);
 }
 
 bool commit_table(shared_ptr<Table> table, u32 version) throws stainless::IoError
@@ -606,6 +644,168 @@ bool revert_table(shared_ptr<Table> table, u32 version) throws IndexCorrupt, sta
 u32 table_version(shared_ptr<Table> table)
 {
     return table.current_version();
+}
+
+namespace detail {
+
+u32 record_checksum_range(const Vec<u8>& record, usize begin, usize end)
+{
+    u32 sum = 1;
+    u32 weighted_sum = 0;
+    record.with_range(
+        begin,
+        end,
+        [&sum, &weighted_sum](const u8& byte) {
+            sum = (sum + u32(byte)) % 65521;
+            weighted_sum = (weighted_sum + sum) % 65521;
+        });
+    return weighted_sum * 65536 + sum;
+}
+
+u32 record_checksum(const Vec<u8>& payload)
+{
+    return record_checksum_range(payload, 0, payload.len());
+}
+
+Vec<u8> make_data_record(u32 version, const Vec<u8>& key, const Vec<u8>& value) throws stainless::IoError
+{
+    Vec<u8> payload;
+    payload.push(RecordKind::Insert);
+    BigEndian::write_u32(payload, version);
+    BigEndian::write_u64(payload, key.len());
+    BigEndian::write_u32(payload, value.len());
+    payload.extend_from_slice(key);
+    payload.extend_from_slice(value);
+
+    u32 checksum = record_checksum(payload);
+    Vec<u8> record;
+    BigEndian::write_u64(record, u64(payload.len()) + 12);
+    record.append(payload);
+    BigEndian::write_u32(record, checksum);
+    return record;
+}
+
+StoreState initial_state()
+{
+    Map<tuple<Vec<u8>, u32>, IndexEntry> index;
+    Map<u32, u64> version_offsets;
+    version_offsets.insert(0, 0);
+    StoreState state = StoreState{
+        move(index),
+        move(version_offsets),
+        0,
+        0,
+        0
+    };
+    return state;
+}
+
+String make_index_path(const String& path)
+{
+    String result = path.clone();
+    result.push_str(".index");
+    return result;
+}
+
+File open_log(const String& path) throws stainless::IoError
+{
+    OpenOptions options;
+    options.read(true);
+    options.write(true);
+    options.create(true);
+    return options.open(path);
+}
+
+u8 decode_u8_at(const Vec<u8>& bytes, usize offset) throws IndexCorrupt
+{
+    try {
+        return BigEndian::read_u8_at(bytes, offset);
+    } catch (const stainless::IoError& _error) {
+        throw IndexCorrupt{stainless::Exception("invalid index WAL u8 field")};
+    }
+}
+
+u32 decode_u32_at(const Vec<u8>& bytes, usize offset) throws IndexCorrupt
+{
+    try {
+        return BigEndian::read_u32_at(bytes, offset);
+    } catch (const stainless::IoError& _error) {
+        throw IndexCorrupt{stainless::Exception("invalid index WAL u32 field")};
+    }
+}
+
+u64 decode_u64_at(const Vec<u8>& bytes, usize offset) throws IndexCorrupt
+{
+    try {
+        return BigEndian::read_u64_at(bytes, offset);
+    } catch (const stainless::IoError& _error) {
+        throw IndexCorrupt{stainless::Exception("invalid index WAL u64 field")};
+    }
+}
+
+u8 index_record_kind(const Vec<u8>& record) throws IndexCorrupt
+{
+    return decode_u8_at(record, 8);
+}
+
+Vec<u8> read_index_record_at(
+    const File& index_log,
+    u64 start,
+    u64 file_len) throws IndexCorrupt, stainless::IoError
+{
+    if (start > file_len || file_len - start < 8) {
+        throw IndexCorrupt{
+            stainless::Exception("truncated index WAL record header")
+        };
+    }
+    u64 record_size = decode_u64_at(index_log.pread_exact(start, 8), 0);
+    if (record_size < 25 || record_size > file_len - start) {
+        throw IndexCorrupt{
+            stainless::Exception("invalid index WAL record size")
+        };
+    }
+    Vec<u8> record = index_log.pread_exact(start, usize(record_size));
+    if (decode_u64_at(record, 0) != record_size) {
+        throw IndexCorrupt{
+            stainless::Exception("invalid index WAL record framing")
+        };
+    }
+    usize checksum_offset = record.len() - 4;
+    u32 expected_checksum = decode_u32_at(record, checksum_offset);
+    if (record_checksum_range(record, 8, checksum_offset) != expected_checksum) {
+        throw IndexCorrupt{
+            stainless::Exception("index WAL checksum mismatch")
+        };
+    }
+    return record;
+}
+
+Vec<KeyValue> read_key_values(
+    const File& data_log,
+    const Vec<tuple<Vec<u8>, IndexEntry>>& entries) throws stainless::IoError
+{
+    Vec<KeyValue> values;
+    for (const auto& entry : entries) {
+        values.push(KeyValue{
+            entry.0.clone(),
+            data_log.pread_exact(entry.1.offset, usize(entry.1.length))
+        });
+    }
+    return values;
+}
+
+Vec<u8> one_byte(u8 value)
+{
+    Vec<u8> bytes;
+    bytes.push(value);
+    return bytes;
+}
+
+Vec<u8> test_key(u64 value)
+{
+    Vec<u8> bytes;
+    BigEndian::write_u64(bytes, value);
+    return bytes;
 }
 
 bool value_is(shared_nullptr<Value> maybe, u8 expected)
@@ -638,31 +838,33 @@ void read_in_thread(shared_ptr<Table> table, shared_ptr<mutex<ReaderState>> resu
     }
 }
 
+} // namespace detail
+
 i32 self_test(const String& path)
     throws IndexCorrupt, ValueTooLarge, stainless::IoError, stainless::ThreadError
 {
-    String index_path = make_index_path(path);
+    String index_path = detail::make_index_path(path);
     if (fs::exists(path)) {
         fs::remove_file(path);
     }
     if (fs::exists(index_path)) {
         fs::remove_file(index_path);
     }
-    write_history(path);
+    detail::write_history(path);
 
     shared_ptr<Table> recovered = open_table(path);
     if (recovered.current_version() != 1 ||
-        !value_is(recovered.find(test_key(7)), 10)) {
+        !detail::value_is(recovered.find(detail::test_key(7)), 10)) {
         return 1;
     }
 
     shared_ptr<mutex<ReaderState>> result =
         make_shared<mutex<ReaderState>>{0};
     auto first = thread::spawn([recovered, result]() {
-        read_in_thread(recovered, result);
+        detail::read_in_thread(recovered, result);
     });
     auto second = thread::spawn([recovered, result]() {
-        read_in_thread(recovered, result);
+        detail::read_in_thread(recovered, result);
     });
     first.join();
     second.join();

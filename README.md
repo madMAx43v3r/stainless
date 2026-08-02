@@ -2226,16 +2226,21 @@ The compiler crate currently registers the following source-visible APIs:
   `clone`.
 - `rust::Map<K, V>`: an ordered map backed by Rust `BTreeMap<K, V>`, with
   `Map()`, `len`, `is_empty`, `clear`, `insert`, `remove`, `contains_key`,
-  `with`, `with_mut`, `with_first_in_range`, `with_last_in_range`, `retain`,
-  `append`, `clone`, and
+  `with`, `with_mut`, `with_range`, `with_first_in_range`, `with_first_after`,
+  `with_last_in_range`, `with_last_before`, `retain`, `append`, `clone`, and
   key/value structured-binding range iteration. `with(key, callback)` and
   `with_mut(key, callback)` perform an O(log n) lookup and confine the borrowed
   value to one non-escaping callback, avoiding a storable `Option<&V>`.
   `with_first_in_range(lower, upper, callback)` and
   `with_last_in_range(lower, upper, callback)` similarly borrow the least or
-  greatest entry in an inclusive range without exposing a Rust iterator. `retain` has
-  exact predicate overloads for `(const K&, const V&)` and for `const K&`
-  alone; both still scan the complete map and are not used by kvstore revert.
+  greatest entry in an inclusive range without exposing a Rust iterator.
+  `with_range(lower, upper, callback)` visits the inclusive interval in
+  ascending order and returns its entry count. `with_last_before(lower, upper,
+  callback)` selects the greatest entry in the half-open `[lower, upper)`
+  interval; `with_first_after(lower, upper, callback)` symmetrically selects
+  the least entry in `(lower, upper]`. `retain` has exact predicate overloads for
+  `(const K&, const V&)` and for `const K&` alone; both still scan the complete
+  map and are not used by kvstore revert.
 - `rust::MultiMap<K, V>`: an ordered multimap backed by the compact runtime's
   B-tree with private `List<V>` buckets. `MultiMap()`, `insert`, `len`,
   `key_len`, `is_empty`, `clear`, `contains_key`, `remove`, `remove_all`,
@@ -2526,6 +2531,14 @@ replaces that version's location. `find()` uses the map's non-escaping
 `with_last_in_range()` callback to select the greatest entry between `(key, 0)`
 and `(key, current_version)` in O(log n), then calls `pread_exact()` under the
 same shared `rwlock<StoreState>` guard. It never copies or scans the index.
+`find_range(lower, upper)` walks the inclusive compound-key interval once,
+coalesces each logical key's versions, and returns its latest visible values in
+ascending key order. `find_range_first(lower, upper, count)` and
+`find_range_last(lower, upper, count)` return bounded prefixes and suffixes.
+They use ordered successor or predecessor lookups per logical key, returning
+the first results ascending and the last results descending without scanning
+the rest of the interval. All three keep the same shared guard while reading
+value bytes, so they remain consistent with concurrent commits and reverts.
 Recovery also builds an in-memory `Map<u32, u64>` super-index from each
 committed version to its index-WAL marker offset. `revert(version)` uses an
 exact marker or the least successor marker to seek directly to the selected

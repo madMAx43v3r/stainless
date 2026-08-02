@@ -94,6 +94,78 @@ where
     true
 }
 
+/// Visits every entry in an inclusive key range in ascending order.
+pub fn btree_map_with_range<K, V, F>(
+    map: &BTreeMap<K, V>,
+    lower: &K,
+    upper: &K,
+    mut callback: F,
+) -> usize
+where
+    K: Ord,
+    F: FnMut(&K, &V),
+{
+    if lower > upper {
+        return 0;
+    }
+    let mut count = 0;
+    for (key, value) in map.range(lower..=upper) {
+        callback(key, value);
+        count += 1;
+    }
+    count
+}
+
+/// Invokes `callback` with the greatest entry at or above `lower` and strictly
+/// below `upper`.
+pub fn btree_map_with_last_before<K, V, F>(
+    map: &BTreeMap<K, V>,
+    lower: &K,
+    upper: &K,
+    callback: F,
+) -> bool
+where
+    K: Ord,
+    F: FnOnce(&K, &V),
+{
+    if lower >= upper {
+        return false;
+    }
+    let Some((key, value)) = map.range(lower..upper).next_back() else {
+        return false;
+    };
+    callback(key, value);
+    true
+}
+
+/// Invokes `callback` with the least entry strictly above `lower` and at or
+/// below `upper`.
+pub fn btree_map_with_first_after<K, V, F>(
+    map: &BTreeMap<K, V>,
+    lower: &K,
+    upper: &K,
+    callback: F,
+) -> bool
+where
+    K: Ord,
+    F: FnOnce(&K, &V),
+{
+    if lower >= upper {
+        return false;
+    }
+    let Some((key, value)) = map
+        .range((
+            std::ops::Bound::Excluded(lower),
+            std::ops::Bound::Included(upper),
+        ))
+        .next()
+    else {
+        return false;
+    };
+    callback(key, value);
+    true
+}
+
 /// Retains map entries accepted by a read-only, non-escaping callback.
 pub fn btree_map_retain<K, V, F>(map: &mut BTreeMap<K, V>, mut predicate: F)
 where
@@ -1764,7 +1836,8 @@ mod tests {
 
     use super::{
         BigEndian, Fs, LittleEndian, MultiMap, PositionedFile, Var, btree_map_retain,
-        btree_map_retain_keys, btree_map_with_first_in_range, btree_map_with_last_in_range,
+        btree_map_retain_keys, btree_map_with_first_after, btree_map_with_first_in_range,
+        btree_map_with_last_before, btree_map_with_last_in_range, btree_map_with_range,
         vec_with_range,
     };
 
@@ -1856,6 +1929,33 @@ mod tests {
             },
         ));
         assert_eq!(selected, 30);
+        let mut visited = Vec::new();
+        assert_eq!(
+            btree_map_with_range(&values, &("alpha", 2), &("beta", 1), |key, value| visited
+                .push((*key, *value)),),
+            2
+        );
+        assert_eq!(visited, [(("alpha", 3), 30), (("beta", 1), 40)]);
+        assert!(btree_map_with_last_before(
+            &values,
+            &("alpha", 0),
+            &("beta", 0),
+            |key, value| {
+                assert_eq!(*key, ("alpha", 3));
+                selected = *value;
+            },
+        ));
+        assert_eq!(selected, 30);
+        assert!(btree_map_with_first_after(
+            &values,
+            &("alpha", 3),
+            &("beta", 1),
+            |key, value| {
+                assert_eq!(*key, ("beta", 1));
+                selected = *value;
+            },
+        ));
+        assert_eq!(selected, 40);
         assert!(!btree_map_with_last_in_range(
             &values,
             &("alpha", 4),

@@ -907,6 +907,15 @@ fn map_binding() -> NativeTypeBinding {
         ],
         TypeRef::Void,
     );
+    let with_entries = TypeRef::callback(
+        CallbackKind::FnMut,
+        CallbackEscape::Call,
+        vec![
+            TypeRef::shared_ref(k.clone()),
+            TypeRef::shared_ref(v.clone()),
+        ],
+        TypeRef::Void,
+    );
     let retain_entry = TypeRef::callback(
         CallbackKind::FnMut,
         CallbackEscape::Call,
@@ -999,6 +1008,42 @@ fn map_binding() -> NativeTypeBinding {
                 },
             },
             CallableBinding {
+                source_name: "with_range".to_owned(),
+                style: CallStyle::Method,
+                receiver: Some(Receiver::Shared),
+                parameters: vec![
+                    Parameter::new("lower", TypeRef::shared_ref(k.clone())),
+                    Parameter::new("upper", TypeRef::shared_ref(k.clone())),
+                    Parameter::new("callback", with_entries),
+                ],
+                is_async: false,
+                return_type: TypeRef::Usize,
+                rust_result_error: None,
+                return_borrow: None,
+                requirements: key_ord(),
+                lowering: RustLowering::FunctionWithReceiver {
+                    rust_path: "::stainless_runtime::btree_map_with_range".to_owned(),
+                },
+            },
+            CallableBinding {
+                source_name: "with_first_after".to_owned(),
+                style: CallStyle::Method,
+                receiver: Some(Receiver::Shared),
+                parameters: vec![
+                    Parameter::new("lower", TypeRef::shared_ref(k.clone())),
+                    Parameter::new("upper", TypeRef::shared_ref(k.clone())),
+                    Parameter::new("callback", with_entry.clone()),
+                ],
+                is_async: false,
+                return_type: TypeRef::Bool,
+                rust_result_error: None,
+                return_borrow: None,
+                requirements: key_ord(),
+                lowering: RustLowering::FunctionWithReceiver {
+                    rust_path: "::stainless_runtime::btree_map_with_first_after".to_owned(),
+                },
+            },
+            CallableBinding {
                 source_name: "with_first_in_range".to_owned(),
                 style: CallStyle::Method,
                 receiver: Some(Receiver::Shared),
@@ -1014,6 +1059,24 @@ fn map_binding() -> NativeTypeBinding {
                 requirements: key_ord(),
                 lowering: RustLowering::FunctionWithReceiver {
                     rust_path: "::stainless_runtime::btree_map_with_first_in_range".to_owned(),
+                },
+            },
+            CallableBinding {
+                source_name: "with_last_before".to_owned(),
+                style: CallStyle::Method,
+                receiver: Some(Receiver::Shared),
+                parameters: vec![
+                    Parameter::new("lower", TypeRef::shared_ref(k.clone())),
+                    Parameter::new("upper", TypeRef::shared_ref(k.clone())),
+                    Parameter::new("callback", with_entry.clone()),
+                ],
+                is_async: false,
+                return_type: TypeRef::Bool,
+                rust_result_error: None,
+                return_borrow: None,
+                requirements: key_ord(),
+                lowering: RustLowering::FunctionWithReceiver {
+                    rust_path: "::stainless_runtime::btree_map_with_last_before".to_owned(),
                 },
             },
             CallableBinding {

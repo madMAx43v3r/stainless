@@ -80,6 +80,37 @@ i32 copied_and_moved_map_entries()
     return total;
 }
 
+i32 ordered_map_ranges()
+{
+    Map<i32, i32> values;
+    values.insert(1, 10);
+    values.insert(2, 20);
+    values.insert(3, 30);
+
+    i32 forward_total = 0;
+    usize count = values.with_range(
+        1,
+        2,
+        [&forward_total](const i32& key, const i32& value) {
+            forward_total += key + value;
+        });
+    i32 predecessor = 0;
+    values.with_last_before(
+        1,
+        3,
+        [&predecessor](const i32& _key, const i32& value) {
+            predecessor = value;
+        });
+    i32 successor = 0;
+    values.with_first_after(
+        1,
+        3,
+        [&successor](const i32& _key, const i32& value) {
+            successor = value;
+        });
+    return forward_total + predecessor + successor + i32(count);
+}
+
 i32 ordered_multimap_entries()
 {
     MultiMap<i32, i32> values;

@@ -292,6 +292,90 @@ fn ordered_collections_preserve_ord_requirements() {
 }
 
 #[test]
+fn ordered_map_interval_callbacks_have_exact_non_escaping_bindings() {
+    let bindings = standard_bindings().unwrap();
+    let map = bindings.type_by_path("rust::Map").unwrap();
+    let k = TypeRef::Parameter("K".to_owned());
+    let v = TypeRef::Parameter("V".to_owned());
+
+    let range_callback = TypeRef::callback(
+        CallbackKind::FnMut,
+        stainless_compiler::interop::CallbackEscape::Call,
+        vec![
+            TypeRef::shared_ref(k.clone()),
+            TypeRef::shared_ref(v.clone()),
+        ],
+        TypeRef::Void,
+    );
+    let range = map
+        .find_callable(
+            CallStyle::Method,
+            "with_range",
+            &[
+                TypeRef::shared_ref(k.clone()),
+                TypeRef::shared_ref(k.clone()),
+                range_callback,
+            ],
+        )
+        .unwrap();
+    assert_eq!(range.return_type, TypeRef::Usize);
+    assert!(matches!(
+        range.lowering,
+        RustLowering::FunctionWithReceiver { ref rust_path }
+            if rust_path == "::stainless_runtime::btree_map_with_range"
+    ));
+
+    let first_after = map
+        .find_callable(
+            CallStyle::Method,
+            "with_first_after",
+            &[
+                TypeRef::shared_ref(k.clone()),
+                TypeRef::shared_ref(k.clone()),
+                TypeRef::callback(
+                    CallbackKind::FnOnce,
+                    stainless_compiler::interop::CallbackEscape::Call,
+                    vec![
+                        TypeRef::shared_ref(k.clone()),
+                        TypeRef::shared_ref(v.clone()),
+                    ],
+                    TypeRef::Void,
+                ),
+            ],
+        )
+        .unwrap();
+    assert_eq!(first_after.return_type, TypeRef::Bool);
+    assert!(matches!(
+        first_after.lowering,
+        RustLowering::FunctionWithReceiver { ref rust_path }
+            if rust_path == "::stainless_runtime::btree_map_with_first_after"
+    ));
+
+    let last_before = map
+        .find_callable(
+            CallStyle::Method,
+            "with_last_before",
+            &[
+                TypeRef::shared_ref(k.clone()),
+                TypeRef::shared_ref(k.clone()),
+                TypeRef::callback(
+                    CallbackKind::FnOnce,
+                    stainless_compiler::interop::CallbackEscape::Call,
+                    vec![TypeRef::shared_ref(k), TypeRef::shared_ref(v)],
+                    TypeRef::Void,
+                ),
+            ],
+        )
+        .unwrap();
+    assert_eq!(last_before.return_type, TypeRef::Bool);
+    assert!(matches!(
+        last_before.lowering,
+        RustLowering::FunctionWithReceiver { ref rust_path }
+            if rust_path == "::stainless_runtime::btree_map_with_last_before"
+    ));
+}
+
+#[test]
 fn ordered_map_range_and_multimap_callbacks_are_non_escaping() {
     let bindings = standard_bindings().unwrap();
     let map = bindings.type_by_path("rust::Map").unwrap();
