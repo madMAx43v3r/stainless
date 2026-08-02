@@ -8,6 +8,70 @@ use stainless_compiler::resolution::{
 use stainless_compiler::{analyze, analyze_with_bindings};
 
 #[test]
+fn positive_integer_literals_default_to_u32_and_infer_from_context() {
+    let analysis = analyze(
+        r"void literals() {
+    auto positive = 42;
+    auto large_positive = 4294967296;
+    auto negative = -1;
+    auto large_negative = -2147483649;
+    u8 byte = 1;
+    i64 contextual = 42;
+    i32 minimum = -2147483648;
+    i32 signed = 4;
+    i32 right_literal = signed + 1;
+    i32 left_literal = 1 + signed;
+}
+",
+    );
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+
+    let binding_type = |name| {
+        analysis
+            .semantics
+            .bindings
+            .iter()
+            .find(|binding| binding.name == name)
+            .map(|binding| binding.ty.clone())
+    };
+    assert_eq!(binding_type("positive"), Some(TypeRef::U32));
+    assert_eq!(binding_type("large_positive"), Some(TypeRef::U64));
+    assert_eq!(binding_type("negative"), Some(TypeRef::I32));
+    assert_eq!(binding_type("large_negative"), Some(TypeRef::I64));
+    assert_eq!(binding_type("byte"), Some(TypeRef::U8));
+    assert_eq!(binding_type("contextual"), Some(TypeRef::I64));
+    assert_eq!(binding_type("minimum"), Some(TypeRef::I32));
+    assert_eq!(binding_type("right_literal"), Some(TypeRef::I32));
+    assert_eq!(binding_type("left_literal"), Some(TypeRef::I32));
+
+    let invalid = analyze(
+        r"void invalid_literals() {
+    u8 byte = 256;
+    i32 too_positive = 2147483648;
+    i32 too_negative = -2147483649;
+    u8 unsigned_negative = -1;
+    auto suffixed_unsigned_negative = -1u8;
+    auto too_large = 18446744073709551616;
+}
+",
+    );
+    assert_eq!(
+        invalid
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "RES128")
+            .count(),
+        6,
+        "{:#?}",
+        invalid.diagnostics
+    );
+}
+
+#[test]
 fn resolves_reference_parser_fixtures_without_semantic_errors() {
     for source in [
         include_str!("../../../docs/ref/01_basics.stl"),

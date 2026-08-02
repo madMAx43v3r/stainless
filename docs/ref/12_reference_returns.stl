@@ -13,27 +13,32 @@ struct Config {
     String& name_mut();
 };
 
-const String& Config::name() const {
+const String& Config::name() const
+{
     // The result is tied to the const receiver.
     return name_;
 }
 
-String& Config::name_mut() {
+String& Config::name_mut()
+{
     // A mutable result requires a mutable receiver.
     return name_;
 }
 
-const String& identity(const String& value) {
+const String& identity(const String& value)
+{
     // A free function may return its sole reference parameter.
     return value;
 }
 
-usize inspect_name(const Config& config) {
+usize inspect_name(const Config& config)
+{
     const String& name = config.name();
     return name.len();
 }
 
-usize update_name(Config& config) {
+usize update_name(Config& config)
+{
     String& name = config.name_mut();
     name.push('!');
     return name.len();

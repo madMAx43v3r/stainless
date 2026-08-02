@@ -21,23 +21,27 @@ struct Profile : Entity {
     Map<String, i32> metrics;
 };
 
-var read_json(const String& source) throws stainless::JsonError {
+var read_json(const String& source) throws stainless::JsonError
+{
     // Assigning Result<var, JsonError> to var performs the normal implicit
     // native Result unwrap and converts the error to stainless::JsonError.
     var parsed = var::parse(source);
     return parsed;
 }
 
-var read_json_file(const String& path) throws stainless::JsonError {
+var read_json_file(const String& path) throws stainless::JsonError
+{
     var parsed = var::parse_file(path);
     return parsed;
 }
 
-String encode_json(const var& value) {
+String encode_json(const var& value)
+{
     return value.to_json();
 }
 
-bool rejects_cycle(var& value) {
+bool rejects_cycle(var& value)
+{
     try {
         value.self = value;
     } catch (const stainless::JsonError& error) {
@@ -46,7 +50,8 @@ bool rejects_cycle(var& value) {
     return false;
 }
 
-i32 main() throws stainless::JsonError {
+i32 main() throws stainless::JsonError
+{
     var object = {
         field: 123,
         "display_name": "Stainless",

@@ -6,18 +6,18 @@ use rust::std::fs;
 use rust::std::fs::File;
 use rust::std::fs::OpenOptions;
 
-String load_text(const String& path) throws stainless::IoError {
+String load_text(const String& path) throws stainless::IoError
+{
     return fs::read_to_string(path);
 }
 
-void save_text(
-    const String& path,
-    const String& contents
-) throws stainless::IoError {
+void save_text(const String& path, const String& contents) throws stainless::IoError
+{
     fs::write(path, contents);
 }
 
-bool missing_file_is_checked(const String& path) {
+bool missing_file_is_checked(const String& path)
+{
     try {
         fs::read_to_string(path);
     } catch (const stainless::IoError& error) {
@@ -26,7 +26,8 @@ bool missing_file_is_checked(const String& path) {
     return false;
 }
 
-i32 main() throws stainless::IoError {
+i32 main() throws stainless::IoError
+{
     String text_path = "stainless-file-io-test.txt";
     String copy_path = "stainless-file-io-copy.bin";
     String renamed_path = "stainless-file-io-renamed.bin";

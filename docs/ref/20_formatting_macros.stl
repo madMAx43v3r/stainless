@@ -1,7 +1,8 @@
 // Purpose-built access to Rust's common formatting macros.
 use rust::{eprintln, format, write, writeln, String};
 
-String render_line(i32 value) {
+String render_line(i32 value)
+{
     String output = format!("value={}", value);
 
     try {
@@ -17,7 +18,8 @@ String render_line(i32 value) {
     return output;
 }
 
-i32 main() {
+i32 main()
+{
     String line = render_line(21);
     eprintln!("{}", line);
     return 0;

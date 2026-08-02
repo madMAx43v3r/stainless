@@ -7,7 +7,8 @@ use rust::{String, Vec};
 
 namespace samples {
 
-usize vec_basics() {
+usize vec_basics()
+{
     // No initializer means an ordinary default construction, equivalent to
     // the explicit Vec() form and lowered to Rust Vec::new().
     Vec<String> values;
@@ -23,7 +24,8 @@ usize vec_basics() {
     return values.len();
 }
 
-String string_basics(const String& suffix) {
+String string_basics(const String& suffix)
+{
     String text = "stainless";
     text.push(' ');
     text.push_str(suffix);
@@ -36,7 +38,8 @@ String string_basics(const String& suffix) {
     return text;
 }
 
-Vec<u8> consume_string(String text) {
+Vec<u8> consume_string(String text)
+{
     // into_bytes consumes its String receiver.
     return move(text).into_bytes();
 }

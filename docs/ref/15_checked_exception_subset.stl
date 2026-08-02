@@ -18,7 +18,8 @@ struct Resource {
 };
 
 Resource::Resource(i32 value, bool fail) throws OpenError
-    : value(value) {
+    : value(value)
+{
     if (fail) {
         throw OpenError{
             DomainError{stainless::Exception("resource unavailable"), 30},
@@ -27,12 +28,14 @@ Resource::Resource(i32 value, bool fail) throws OpenError
     }
 }
 
-i32 create(bool fail) throws OpenError {
+i32 create(bool fail) throws OpenError
+{
     Resource resource = Resource(6, fail);
     return resource.value;
 }
 
-i32 rethrow_as_base(bool fail) throws DomainError {
+i32 rethrow_as_base(bool fail) throws DomainError
+{
     try {
         return create(fail);
     } catch (const OpenError& error) {
@@ -41,7 +44,8 @@ i32 rethrow_as_base(bool fail) throws DomainError {
     }
 }
 
-i32 handle(bool fail) {
+i32 handle(bool fail)
+{
     try {
         return rethrow_as_base(fail);
     } catch (const DomainError& error) {

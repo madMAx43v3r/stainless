@@ -6,11 +6,13 @@ use rust::{Map, String, Vec};
 
 namespace samples {
 
-tuple<i32, String> make_compound_key(i32 group, const String& name) {
+tuple<i32, String> make_compound_key(i32 group, const String& name)
+{
     return tuple<i32, String>(group, name);
 }
 
-i32 compound_key_order() {
+i32 compound_key_order()
+{
     Map<tuple<i32, String>, i32> values;
     values.insert(tuple<i32, String>(2, "beta"), 2);
     values.insert(tuple<i32, String>(1, "zeta"), 1);
@@ -23,7 +25,8 @@ i32 compound_key_order() {
     return order;
 }
 
-usize moved_native_tuple_element() {
+usize moved_native_tuple_element()
+{
     Vec<u8> bytes;
     bytes.push(7u8);
     tuple<Vec<u8>, u32> key = tuple<Vec<u8>, u32>(move(bytes), 3u32);

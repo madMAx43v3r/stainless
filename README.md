@@ -95,6 +95,9 @@ syntax.
 ## Provisional syntax examples
 
 The `.stl` files in [`docs/ref`](docs/ref/) show the intended source style.
+Stainless source uses a 120-column limit. Function definitions place the
+opening brace on the following line; control-flow blocks and lambdas keep the
+opening brace on the same line as their header.
 They are design references rather than a stable language specification; files
 become executable parser or transpilation fixtures as their language slice is
 implemented:
@@ -762,8 +765,14 @@ C++ spellings such as `short`, `int`, `long`, `unsigned`, `size_t`, `float`,
 collection lengths, and address-sized quantities. Public data formats should
 prefer an explicitly sized integer.
 
-Integer literals use Rust-style expected-type inference and otherwise default
-to `i32`; suffixes such as `42u64` select an exact integer type. Floating
+Integer literals use Rust-style expected-type inference. Context wins, so
+`u8 value = 1;` is valid. Without a context, a non-negative literal defaults to
+`u32`, or to `u64` when its value exceeds `u32::MAX`. Unary `-` similarly gives
+an unsuffixed literal an `i32` or `i64` context according to its magnitude.
+Thus `auto positive = 1;` is `u32`, `auto large = 4294967296;` is `u64`,
+`auto negative = -1;` is `i32`, and `i64 value = 1;` remains `i64`. Values that
+do not fit the selected or contextual type are compiler errors; wider types
+such as `u128` and `i128` require an explicit context or suffix. Floating
 literals follow C++ spelling: an unsuffixed literal such as `3.0` always has
 type `f64`, while the `f` suffix in `3.0f` selects `f32`. Rust literal suffixes
 such as `3.0f32` and `3.0f64` are not accepted in Stainless source. An expected
@@ -2191,7 +2200,7 @@ The compiler crate currently registers the following source-visible APIs:
 - `rust::Vec<T>`: `Vec()`, `Vec::with_capacity`, `len`, `is_empty`,
   `capacity`, `reserve`, `reserve_exact`, `shrink_to`, `shrink_to_fit`,
   `push`, `pop`, `clear`, `truncate`, `insert`, `remove`, `swap_remove`,
-  `append`, `reverse`, `clone`, `contains`, `sort`, `dedup`, and the
+  `append`, `extend_from_slice`, `reverse`, `clone`, `contains`, `sort`, `dedup`, and the
   non-escaping `with_range(begin, end, callback)` slice adapter. The adapter
   visits a checked half-open range without allocating or exposing a storable
   Rust slice and returns `false` for invalid bounds.
@@ -2479,6 +2488,10 @@ operations rather than source-level arithmetic loops. A read with the wrong
 byte count raises `stainless::IoError` with `InvalidData`. The corresponding
 `read_u8_at()`, `read_u32_at()`, and `read_u64_at()` forms decode directly at a
 checked `usize` offset in an existing byte vector.
+The write methods also accept `usize` values such as collection lengths,
+allowing `BigEndian::write_u32(output, values.len())` without a redundant cast.
+Conversion to `u64` is lossless on every supported Rust target; conversion to
+`u32` is checked and raises `stainless::IoError` instead of truncating.
 
 Cursor-based and buffered streams, rich metadata, permissions, and symlink
 operations remain for the next file-I/O layer.

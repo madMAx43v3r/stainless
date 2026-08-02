@@ -82,6 +82,19 @@ fn endian_binding(name: &str) -> NativeTypeBinding {
                 &format!("{rust_path}::write_u64"),
             ),
             fallible_associated(
+                "write_u32",
+                write_parameters(TypeRef::Usize),
+                TypeRef::Void,
+                io_error.clone(),
+                &format!("{rust_path}::write_usize_u32"),
+            ),
+            associated(
+                "write_u64",
+                write_parameters(TypeRef::Usize),
+                TypeRef::Void,
+                &format!("{rust_path}::write_usize_u64"),
+            ),
+            fallible_associated(
                 "read_u8",
                 read_parameters(),
                 TypeRef::U8,
@@ -1364,6 +1377,13 @@ fn vec_element_methods(t: &TypeRef, vec_t: &TypeRef) -> Vec<CallableBinding> {
 
 fn vec_trait_methods(t: &TypeRef, vec_t: &TypeRef) -> Vec<CallableBinding> {
     vec![
+        method_with_requirements(
+            "extend_from_slice",
+            Receiver::Mutable,
+            vec![Parameter::new("other", TypeRef::shared_ref(vec_t.clone()))],
+            TypeRef::Void,
+            vec![requirement(T, "::core::clone::Clone")],
+        ),
         method_with_requirements(
             "clone",
             Receiver::Shared,

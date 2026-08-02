@@ -337,6 +337,8 @@ impl<K: Ord, V> MultiMap<K, V> {
 ///
 /// Stainless exposes these operations as `stainless::BigEndian`. They delegate
 /// to Rust's optimized `to_be_bytes()` and `from_be_bytes()` implementations.
+const _: () = assert!(std::mem::size_of::<usize>() <= std::mem::size_of::<u64>());
+
 pub struct BigEndian;
 
 impl BigEndian {
@@ -348,6 +350,27 @@ impl BigEndian {
     /// Writes one `u64` in network byte order at the end of `output`.
     pub fn write_u64(output: &mut Vec<u8>, value: u64) {
         output.extend_from_slice(&value.to_be_bytes());
+    }
+
+    /// Writes a `usize` as one checked big-endian `u32`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` when `value` does not fit in `u32`.
+    pub fn write_usize_u32(output: &mut Vec<u8>, value: usize) -> std::io::Result<()> {
+        let value = u32::try_from(value).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("value {value} does not fit in a big-endian u32 field"),
+            )
+        })?;
+        Self::write_u32(output, value);
+        Ok(())
+    }
+
+    /// Writes a `usize` as one big-endian `u64`.
+    pub fn write_usize_u64(output: &mut Vec<u8>, value: usize) {
+        Self::write_u64(output, value as u64);
     }
 
     /// Decodes one byte.
@@ -447,6 +470,27 @@ impl LittleEndian {
     /// Writes one `u64` in little-endian order at the end of `output`.
     pub fn write_u64(output: &mut Vec<u8>, value: u64) {
         output.extend_from_slice(&value.to_le_bytes());
+    }
+
+    /// Writes a `usize` as one checked little-endian `u32`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` when `value` does not fit in `u32`.
+    pub fn write_usize_u32(output: &mut Vec<u8>, value: usize) -> std::io::Result<()> {
+        let value = u32::try_from(value).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("value {value} does not fit in a little-endian u32 field"),
+            )
+        })?;
+        Self::write_u32(output, value);
+        Ok(())
+    }
+
+    /// Writes a `usize` as one little-endian `u64`.
+    pub fn write_usize_u64(output: &mut Vec<u8>, value: usize) {
+        Self::write_u64(output, value as u64);
     }
 
     /// Decodes one byte.
@@ -1738,6 +1782,11 @@ mod tests {
         let mut bytes = vec![0xaa];
         BigEndian::write_u32(&mut bytes, 0x0102_0304);
         BigEndian::write_u64(&mut bytes, 0x0506_0708_090a_0b0c);
+        let mut length_bytes = Vec::new();
+        BigEndian::write_usize_u32(&mut length_bytes, 4).unwrap();
+        BigEndian::write_usize_u64(&mut length_bytes, 8);
+        assert_eq!(&length_bytes[..4], &4_u32.to_be_bytes());
+        assert_eq!(&length_bytes[4..], &8_u64.to_be_bytes());
         assert_eq!(
             bytes,
             [

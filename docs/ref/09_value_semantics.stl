@@ -9,7 +9,8 @@ struct Pair {
     i32 right;
 };
 
-i32 struct_copy_example() {
+i32 struct_copy_example()
+{
     Pair original = Pair{10, 20};
 
     // Struct copy construction leaves original valid.
@@ -26,12 +27,14 @@ public:
     unique_ptr<Token> clone() const;
 };
 
-unique_ptr<Token> Token::clone() const {
+unique_ptr<Token> Token::clone() const
+{
     // This constructs a distinct class object.
     return make_unique<Token>();
 }
 
-i32 class_move_example() {
+i32 class_move_example()
+{
     Token original;
 
     // Class values can move explicitly but can never copy.

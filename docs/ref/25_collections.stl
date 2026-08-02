@@ -6,7 +6,8 @@ use rust::{List, Map, MultiMap, Queue, Set};
 
 namespace samples {
 
-i32 collection_order() {
+i32 collection_order()
+{
     // Default construction uses the corresponding Rust collection new().
     List<i32> linked;
     linked.push_back(2);
@@ -61,7 +62,8 @@ i32 collection_order() {
         + set_order + i32(lookup.len());
 }
 
-i32 copied_and_moved_map_entries() {
+i32 copied_and_moved_map_entries()
+{
     Map<i32, i32> values;
     values.insert(2, 20);
     values.insert(1, 10);
@@ -78,7 +80,8 @@ i32 copied_and_moved_map_entries() {
     return total;
 }
 
-i32 ordered_multimap_entries() {
+i32 ordered_multimap_entries()
+{
     MultiMap<i32, i32> values;
     values.insert(2, 20);
     values.insert(1, 10);

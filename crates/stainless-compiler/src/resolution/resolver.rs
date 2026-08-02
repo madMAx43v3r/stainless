@@ -49,6 +49,7 @@ pub fn resolve(source: &SourceFile, bindings: &NativeBindings) -> Resolution {
         struct_by_span: BTreeMap::new(),
         constructor_sets: BTreeMap::new(),
         constructor_by_span: BTreeMap::new(),
+        resolving_negated_integer_literal: false,
     };
     if source_uses_exceptions(source) {
         resolver.install_exception_builtins();
@@ -81,6 +82,7 @@ struct Resolver<'bindings> {
     struct_by_span: BTreeMap<Span, StructId>,
     constructor_sets: BTreeMap<StructId, Vec<ConstructorId>>,
     constructor_by_span: BTreeMap<Span, ConstructorId>,
+    resolving_negated_integer_literal: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -3058,6 +3060,25 @@ impl Resolver<'_> {
             }
             ExpressionKind::Literal(literal) => {
                 let ty = literal_type(literal.kind, &literal.text, expected);
+                if literal.kind == LiteralKind::Integer
+                    && let Some(magnitude) = integer_magnitude(&literal.text)
+                    && !integer_literal_fits(magnitude, &ty, self.resolving_negated_integer_literal)
+                {
+                    let sign = if self.resolving_negated_integer_literal {
+                        "negative "
+                    } else {
+                        ""
+                    };
+                    self.push(
+                        "RES128",
+                        format!(
+                            "{sign}integer literal `{}` does not fit in `{}`",
+                            literal.text,
+                            display_type(&ty)
+                        ),
+                        expression.span,
+                    );
+                }
                 if literal.kind == LiteralKind::Null
                     && literal.text == "nullptr"
                     && ty == TypeRef::Error
@@ -4186,11 +4207,22 @@ impl Resolver<'_> {
         expected: Option<&TypeRef>,
         context: &mut FunctionContext,
     ) -> ExpressionInfo {
-        let operand_expected = match operator {
-            PrefixOperator::Not => None,
-            _ => expected,
+        let negative_default = (operator == PrefixOperator::Negate && expected.is_none())
+            .then(|| unsuffixed_integer_literal_text(operand).map(default_negative_integer_type))
+            .flatten();
+        let resolving_negated_integer_literal = self.resolving_negated_integer_literal;
+        self.resolving_negated_integer_literal =
+            operator == PrefixOperator::Negate && integer_literal_text(operand).is_some();
+        let actual = if let Some(negative_default) = negative_default.as_ref() {
+            self.resolve_expression(operand, Some(negative_default), context)
+        } else {
+            let operand_expected = match operator {
+                PrefixOperator::Not => None,
+                _ => expected,
+            };
+            self.resolve_expression(operand, operand_expected, context)
         };
-        let actual = self.resolve_expression(operand, operand_expected, context);
+        self.resolving_negated_integer_literal = resolving_negated_integer_literal;
         match operator {
             PrefixOperator::Not => {
                 if canonical(&actual.ty) != TypeRef::Bool && !is_nullable_pointer_test(&actual.ty) {
@@ -4292,7 +4324,9 @@ impl Resolver<'_> {
             return temporary(TypeRef::Bool);
         }
 
-        let (left_info, right_info) = if is_null_literal(left) {
+        let infer_left_from_right = is_null_literal(left)
+            || is_unsuffixed_integer_literal(left) && !is_unsuffixed_integer_literal(right);
+        let (left_info, right_info) = if infer_left_from_right {
             let right_info = self.resolve_expression(right, expected, context);
             let left_info =
                 self.resolve_expression(left, Some(&canonical(&right_info.ty)), context);
@@ -6651,7 +6685,7 @@ impl Resolver<'_> {
             .get(&structure)
             .cloned()
             .unwrap_or_default();
-        let arity_candidates = candidates
+        let mut arity_candidates = candidates
             .into_iter()
             .filter(|id| self.model.constructors[id.0].parameters.len() == arguments.len())
             .collect::<Vec<_>>();
@@ -6678,6 +6712,27 @@ impl Resolver<'_> {
                 span,
             );
             return (error_info(), None);
+        }
+
+        let integer_literal_candidates = arity_candidates
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.model.constructors[id.0]
+                    .parameters
+                    .iter()
+                    .zip(arguments)
+                    .all(|(parameter, argument)| {
+                        !is_unsuffixed_integer_literal(argument)
+                            || is_integer(&canonical(&substitute_type(
+                                &parameter.ty,
+                                &substitutions,
+                            )))
+                    })
+            })
+            .collect::<Vec<_>>();
+        if !integer_literal_candidates.is_empty() {
+            arity_candidates = integer_literal_candidates;
         }
 
         let contextual_parameters = (arity_candidates.len() == 1).then(|| {
@@ -6866,7 +6921,7 @@ impl Resolver<'_> {
             );
             return (error_info(), None);
         }
-        let arity_candidates = candidates
+        let mut arity_candidates = candidates
             .into_iter()
             .filter(|id| self.model.functions[id.0].parameters.len() == arguments.len())
             .collect::<Vec<_>>();
@@ -6884,6 +6939,24 @@ impl Resolver<'_> {
                 span,
             );
             return (error_info(), None);
+        }
+
+        let integer_literal_candidates = arity_candidates
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.model.functions[id.0]
+                    .parameters
+                    .iter()
+                    .zip(arguments)
+                    .all(|(parameter, argument)| {
+                        !is_unsuffixed_integer_literal(argument)
+                            || is_integer(&canonical(&parameter.ty))
+                    })
+            })
+            .collect::<Vec<_>>();
+        if !integer_literal_candidates.is_empty() {
+            arity_candidates = integer_literal_candidates;
         }
 
         let contextual_parameters = (arity_candidates.len() == 1).then(|| {
@@ -7071,6 +7144,34 @@ impl Resolver<'_> {
             .collect::<Vec<_>>();
         if !lambda_arity_candidates.is_empty() {
             candidates = lambda_arity_candidates;
+        }
+
+        let fixed_width_literal_candidates = candidates
+            .iter()
+            .filter(|candidate| {
+                candidate
+                    .parameter_types
+                    .iter()
+                    .zip(arguments)
+                    .enumerate()
+                    .all(|(index, (parameter, argument))| {
+                        if !is_unsuffixed_integer_literal(argument) {
+                            return true;
+                        }
+                        let has_fixed_width_candidate = candidates.iter().any(|other| {
+                            other
+                                .parameter_types
+                                .get(index)
+                                .is_some_and(|ty| is_fixed_width_integer(canonical_ref(ty)))
+                        });
+                        !has_fixed_width_candidate
+                            || is_fixed_width_integer(canonical_ref(parameter))
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !fixed_width_literal_candidates.is_empty() {
+            candidates = fixed_width_literal_candidates;
         }
 
         let contextual = (candidates.len() == 1).then(|| {
@@ -9283,8 +9384,93 @@ fn literal_type(kind: LiteralKind, text: &str, expected: Option<&TypeRef>) -> Ty
         LiteralKind::Float => TypeRef::F64,
         LiteralKind::Integer => integer_suffix(text)
             .or_else(|| expected.filter(|ty| is_integer(ty)).cloned())
-            .unwrap_or(TypeRef::I32),
+            .unwrap_or_else(|| default_positive_integer_type(text)),
     }
+}
+
+fn unsuffixed_integer_literal_text(expression: &Expression) -> Option<&str> {
+    integer_literal_text(expression).filter(|text| integer_suffix(text).is_none())
+}
+
+fn integer_literal_text(expression: &Expression) -> Option<&str> {
+    match &expression.kind {
+        ExpressionKind::Literal(ast::Literal {
+            kind: LiteralKind::Integer,
+            text,
+            ..
+        }) => Some(text),
+        ExpressionKind::Parenthesized(inner) => integer_literal_text(inner),
+        _ => None,
+    }
+}
+
+fn is_unsuffixed_integer_literal(expression: &Expression) -> bool {
+    unsuffixed_integer_literal_text(expression).is_some()
+}
+
+fn default_positive_integer_type(text: &str) -> TypeRef {
+    if integer_magnitude(text).is_none_or(|value| value > u128::from(u32::MAX)) {
+        TypeRef::U64
+    } else {
+        TypeRef::U32
+    }
+}
+
+fn default_negative_integer_type(text: &str) -> TypeRef {
+    if integer_magnitude(text).is_some_and(|value| value > (1_u128 << 31)) {
+        TypeRef::I64
+    } else {
+        TypeRef::I32
+    }
+}
+
+fn integer_magnitude(text: &str) -> Option<u128> {
+    let number = integer_suffix_text(text)
+        .and_then(|suffix| text.strip_suffix(suffix))
+        .unwrap_or(text);
+    let normalized = number.replace('_', "");
+    let (digits, radix) = normalized
+        .strip_prefix("0x")
+        .map(|digits| (digits, 16))
+        .or_else(|| normalized.strip_prefix("0o").map(|digits| (digits, 8)))
+        .or_else(|| normalized.strip_prefix("0b").map(|digits| (digits, 2)))
+        .unwrap_or((normalized.as_str(), 10));
+    u128::from_str_radix(digits, radix).ok()
+}
+
+fn integer_suffix_text(text: &str) -> Option<&'static str> {
+    [
+        "i128", "isize", "u128", "usize", "i64", "u64", "i32", "u32", "i16", "u16", "i8", "u8",
+    ]
+    .into_iter()
+    .find(|suffix| text.ends_with(suffix))
+}
+
+fn integer_literal_fits(magnitude: u128, ty: &TypeRef, negated: bool) -> bool {
+    let (signed, bits) = match canonical_ref(ty) {
+        TypeRef::I8 => (true, 8),
+        TypeRef::I16 => (true, 16),
+        TypeRef::I32 => (true, 32),
+        TypeRef::I64 => (true, 64),
+        TypeRef::I128 => (true, 128),
+        TypeRef::Isize => (true, isize::BITS),
+        TypeRef::U8 => (false, 8),
+        TypeRef::U16 => (false, 16),
+        TypeRef::U32 => (false, 32),
+        TypeRef::U64 => (false, 64),
+        TypeRef::U128 => (false, 128),
+        TypeRef::Usize => (false, usize::BITS),
+        _ => return true,
+    };
+    if negated {
+        return signed && magnitude <= 1_u128 << (bits - 1);
+    }
+    let value_bits = bits - u32::from(signed);
+    magnitude <= u128::MAX >> (u128::BITS - value_bits)
+}
+
+fn is_fixed_width_integer(ty: &TypeRef) -> bool {
+    is_integer(ty) && !matches!(ty, TypeRef::Usize | TypeRef::Isize)
 }
 
 fn is_null_literal(expression: &Expression) -> bool {

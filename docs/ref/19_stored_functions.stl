@@ -7,33 +7,40 @@ struct Transformer {
     function<i32(i32)> callback;
 };
 
-i32 add_one(i32 value) {
+i32 add_one(i32 value)
+{
     return value + 1;
 }
 
-i32 read_ref(const i32& value) {
+i32 read_ref(const i32& value)
+{
     return value;
 }
 
-i32 invoke_mut(function_mut<i32()>& callback) {
+i32 invoke_mut(function_mut<i32()>& callback)
+{
     return callback();
 }
 
-i32 invoke_shared(function<i32(i32)> callback, i32 value) {
+i32 invoke_shared(function<i32(i32)> callback, i32 value)
+{
     return callback(value);
 }
 
-i32 invoke_owned(function_mut<i32()> callback) {
+i32 invoke_owned(function_mut<i32()> callback)
+{
     return callback();
 }
 
-function<i32(i32)> make_adder(i32 offset) {
+function<i32(i32)> make_adder(i32 offset)
+{
     return [offset](i32 value) {
         return offset + value;
     };
 }
 
-i32 stored_functions() {
+i32 stored_functions()
+{
     i32 initial = 2;
 
     function<i32(i32)> add = [offset = initial](i32 value) {

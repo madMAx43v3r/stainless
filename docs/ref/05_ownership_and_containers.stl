@@ -11,15 +11,18 @@ struct Config {
     String name;
 };
 
-Config make_config(i32 version, String name) {
+Config make_config(i32 version, String name)
+{
     return Config{version, move(name)};
 }
 
-i32 read_version(const Config& config) {
+i32 read_version(const Config& config)
+{
     return config.version;
 }
 
-usize vector_example() {
+usize vector_example()
+{
     Vec<i32> values;
     values.push(10);
     values.push(20);
@@ -31,7 +34,8 @@ usize vector_example() {
     return values.len();
 }
 
-i32 unique_example() {
+i32 unique_example()
+{
     unique_ptr<Config> owner =
         make_unique<Config>(make_config(1, "development"));
 
@@ -45,7 +49,8 @@ i32 unique_example() {
     return borrowed_version + relocated.version;
 }
 
-i32 nullable_unique_example() {
+i32 nullable_unique_example()
+{
     unique_nullptr<Config> maybe;
 
     if (!maybe) {
@@ -64,7 +69,8 @@ i32 nullable_unique_example() {
     return definite.version;
 }
 
-i32 guarded_nullable_unique(unique_nullptr<Config> maybe) {
+i32 guarded_nullable_unique(unique_nullptr<Config> maybe)
+{
     // The failure block must exit. A nullable unique owner yields mutable T&.
     auto& config = require(maybe) {
         return -1;
@@ -74,7 +80,8 @@ i32 guarded_nullable_unique(unique_nullptr<Config> maybe) {
     return config.version;
 }
 
-void guarded_nullable_unique_void(unique_nullptr<Config> maybe) {
+void guarded_nullable_unique_void(unique_nullptr<Config> maybe)
+{
     // A void failure block runs before its implicit return.
     auto& config = require(maybe) {
         println!("configuration is missing");
@@ -83,7 +90,8 @@ void guarded_nullable_unique_void(unique_nullptr<Config> maybe) {
     config.version = 2;
 }
 
-i32 shared_example() {
+i32 shared_example()
+{
     shared_nullptr<Config> current;
 
     if (!current) {

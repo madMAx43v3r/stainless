@@ -122,7 +122,7 @@ u32 select(u32 value) {
 }
 
 i32 exact_overload() {
-    return select(30);
+    return select(i32(30));
 }
 
 f32 suffixed_float() {

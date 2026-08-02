@@ -23,7 +23,8 @@ public:
     Session(bool available) throws IoError;
 };
 
-String read_file(const String& path, bool available) throws IoError {
+String read_file(const String& path, bool available) throws IoError
+{
     if (!available) {
         throw IoError{
             stainless::Exception("input could not be read"),
@@ -34,7 +35,8 @@ String read_file(const String& path, bool available) throws IoError {
     return "version=1";
 }
 
-Config parse_config(String source, bool valid) throws ParseError {
+Config parse_config(String source, bool valid) throws ParseError
+{
     if (!valid) {
         throw ParseError{
             stainless::Exception("input could not be parsed"),
@@ -45,7 +47,8 @@ Config parse_config(String source, bool valid) throws ParseError {
     return Config{1};
 }
 
-Session::Session(bool available) throws IoError {
+Session::Session(bool available) throws IoError
+{
     if (!available) {
         throw IoError{
             stainless::Exception("session could not be opened"),
@@ -54,27 +57,22 @@ Session::Session(bool available) throws IoError {
     }
 }
 
-unique_ptr<Session> open_session(bool available) throws IoError {
+unique_ptr<Session> open_session(bool available) throws IoError
+{
     // Construction is checked before the successful value is placed in Box.
     return make_unique<Session>(available);
 }
 
-Config load(
-    const String& path,
-    bool available,
-    bool valid
-) throws IoError, ParseError {
+Config load(const String& path, bool available, bool valid) throws IoError, ParseError
+{
     // No source-level ? is needed. Both calls feed their checked exceptions
     // into this function's declared throws set.
     String source = read_file(path, available);
     return parse_config(move(source), valid);
 }
 
-Config load_or_default(
-    const String& path,
-    bool available,
-    bool valid
-) throws IoError {
+Config load_or_default(const String& path, bool available, bool valid) throws IoError
+{
     try {
         return load(path, available, valid);
     } catch (const ParseError& error) {
@@ -83,7 +81,8 @@ Config load_or_default(
     }
 }
 
-i32 run(const String& path, bool available, bool valid) {
+i32 run(const String& path, bool available, bool valid)
+{
     try {
         Config config = load(path, available, valid);
         return config.version;

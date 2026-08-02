@@ -11,7 +11,8 @@ struct Point2 {
     f32 length_squared() const;
 };
 
-f32 Point2::length_squared() const {
+f32 Point2::length_squared() const
+{
     return x * x + y * y;
 }
 
@@ -21,22 +22,26 @@ struct Point3 : Point2 {
     f32 length_squared() const;
 };
 
-f32 Point3::length_squared() const {
+f32 Point3::length_squared() const
+{
     // Data-base fields participate in convenient field lookup.
     return x * x + y * y + z * z;
 }
 
-f32 planar_length_squared(const Point2& point) {
+f32 planar_length_squared(const Point2& point)
+{
     // The static receiver type is Point2, so this selects Point2's function.
     return point.length_squared();
 }
 
-f32 explicit_base_x(const Point3& point) {
+f32 explicit_base_x(const Point3& point)
+{
     // C++-style qualification selects a field in the data-base subobject.
     return point.Point2::x;
 }
 
-f32 example() {
+f32 example()
+{
     Point3 point = Point3{Point2{3.0f, 4.0f}, 12.0f};
 
     // Same-named functions are selected from the static receiver type.

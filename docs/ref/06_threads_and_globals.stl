@@ -19,18 +19,21 @@ atomic_nullptr<Config> current_config;
 
 thread_local i32 reads_on_this_thread = 0;
 
-i32 read_required(const atomic_ptr<Config>& slot) {
+i32 read_required(const atomic_ptr<Config>& slot)
+{
     shared_ptr<Config> snapshot = slot.__load();
     return snapshot.version;
 }
 
-i32 local_required_example() {
+i32 local_required_example()
+{
     shared_ptr<Config> initial = make_shared<Config>(Config{1});
     atomic_ptr<Config> required = atomic_ptr<Config>(initial);
     return read_required(required);
 }
 
-i32 read_slot(const atomic_nullptr<Config>& slot) {
+i32 read_slot(const atomic_nullptr<Config>& slot)
+{
     // require retains the shared snapshot returned by __load and exposes only
     // its non-null const Config reference.
     const auto& snapshot = require(slot.__load()) {
@@ -39,24 +42,29 @@ i32 read_slot(const atomic_nullptr<Config>& slot) {
     return snapshot.version;
 }
 
-i32 read_current_version() {
+i32 read_current_version()
+{
     reads_on_this_thread += 1;
     return read_slot(current_config);
 }
 
-void install(shared_nullptr<Config> replacement) {
+void install(shared_nullptr<Config> replacement)
+{
     current_config.__store(move(replacement));
 }
 
-shared_nullptr<Config> exchange(shared_nullptr<Config> replacement) {
+shared_nullptr<Config> exchange(shared_nullptr<Config> replacement)
+{
     return current_config.__swap(move(replacement));
 }
 
-void worker(shared_ptr<Config> local) {
+void worker(shared_ptr<Config> local)
+{
     i32 version = local.version;
 }
 
-bool start_worker() throws stainless::ThreadError {
+bool start_worker() throws stainless::ThreadError
+{
     // Copying a shared_ptr creates the separate Arc handle captured by the
     // thread. join() maps a Rust panic to checked ThreadError.
     shared_ptr<Config> local = make_shared<Config>(startup_config);

@@ -7,7 +7,8 @@ use rust::Vec;
 
 namespace samples {
 
-i32 sum_shared(const Vec<i32>& values) {
+i32 sum_shared(const Vec<i32>& values)
+{
     i32 result = 0;
     for (const auto& value : values) {
         result += value;
@@ -15,13 +16,15 @@ i32 sum_shared(const Vec<i32>& values) {
     return result;
 }
 
-void increment_all(Vec<i32>& values) {
+void increment_all(Vec<i32>& values)
+{
     for (auto& value : values) {
         value += 1;
     }
 }
 
-i32 sum_copies(const Vec<i32>& values) {
+i32 sum_copies(const Vec<i32>& values)
+{
     i32 result = 0;
     for (auto value : values) {
         result += value;
@@ -29,7 +32,8 @@ i32 sum_copies(const Vec<i32>& values) {
     return result;
 }
 
-i32 consume_values(Vec<i32> values) {
+i32 consume_values(Vec<i32> values)
+{
     i32 result = 0;
     for (auto value : move(values)) {
         result += value;

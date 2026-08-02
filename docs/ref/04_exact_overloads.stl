@@ -6,22 +6,26 @@ use rust::String;
 
 namespace samples {
 
-i32 select(i32 left, i32 right) {
+i32 select(i32 left, i32 right)
+{
     return left;
 }
 
 // i32 select(const i32& left, const i32& right); // Invalid: this differs
 // from select(i32, i32) only in value/reference passing semantics.
 
-String select(String left, String right) {
+String select(String left, String right)
+{
     return left;
 }
 
-i32 inspect(const i32& value) {
+i32 inspect(const i32& value)
+{
     return value;
 }
 
-i32 reborrow(i32& value) {
+i32 reborrow(i32& value)
+{
     // A mutable reference may implicitly reborrow as const after inspect has
     // been selected. The conversion does not participate in overload ranking.
     return inspect(value);
@@ -32,15 +36,18 @@ struct Selector {
     String choose(String left, String right) const;
 };
 
-i32 Selector::choose(i32 left, i32 right) const {
+i32 Selector::choose(i32 left, i32 right) const
+{
     return right;
 }
 
-String Selector::choose(String left, String right) const {
+String Selector::choose(String left, String right) const
+{
     return right;
 }
 
-i32 example() {
+i32 example()
+{
     Selector selector;
 
     auto first = select(10, 20);

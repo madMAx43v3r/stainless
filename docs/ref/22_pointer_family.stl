@@ -6,15 +6,18 @@ struct Config {
     i32 version;
 };
 
-shared_ptr<Config> load_slot(const atomic_ptr<Config>& slot) {
+shared_ptr<Config> load_slot(const atomic_ptr<Config>& slot)
+{
     return slot.__load();
 }
 
-void store_slot(const atomic_ptr<Config>& slot, shared_ptr<Config> replacement) {
+void store_slot(const atomic_ptr<Config>& slot, shared_ptr<Config> replacement)
+{
     slot.__store(replacement);
 }
 
-i32 pointer_family() {
+i32 pointer_family()
+{
     unique_nullptr<Config> maybe_unique;
     if (maybe_unique == nullptr) {
         maybe_unique = unique_nullptr<Config>(

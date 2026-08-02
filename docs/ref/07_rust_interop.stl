@@ -12,14 +12,16 @@ use rust::regex::Regex;
 
 namespace samples {
 
-usize standard_api_example() {
+usize standard_api_example()
+{
     Vec<String> values;
     values.push("one");
     values.push("two");
     return values.len();
 }
 
-bool external_crate_example(const String& text) throws stainless::RustError {
+bool external_crate_example(const String& text) throws stainless::RustError
+{
     // Regex::new remains a fallible factory because it returns Result rather
     // than Regex. The compiler-adapted unwrap method consumes that temporary
     // and emits an inline checked match. Err becomes the generic RustError
@@ -28,7 +30,8 @@ bool external_crate_example(const String& text) throws stainless::RustError {
     return expression.is_match(text);
 }
 
-bool implicit_external_unwrap(const String& text) throws stainless::RustError {
+bool implicit_external_unwrap(const String& text) throws stainless::RustError
+{
     // The explicit Regex destination makes this Result<Regex, E>-to-Regex
     // initialization insert the same checked unwrap intrinsic.
     Regex expression = Regex::new("^stainless$");

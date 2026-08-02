@@ -11,10 +11,12 @@ struct Box<T> {
     const T& get() const;
 };
 
-Box<T>::Box(T value) : value(move(value)) {
+Box<T>::Box(T value) : value(move(value))
+{
 }
 
-const T& Box<T>::get() const {
+const T& Box<T>::get() const
+{
     return value;
 }
 
@@ -27,14 +29,17 @@ private:
     T value;
 };
 
-Holder<T>::Holder(T value) : value(move(value)) {
+Holder<T>::Holder(T value) : value(move(value))
+{
 }
 
-const T& Holder<T>::get() const {
+const T& Holder<T>::get() const
+{
     return value;
 }
 
-i32 generic_values() {
+i32 generic_values()
+{
     Box<i32> boxed = Box<i32>(20);
     Box<i32> copied = boxed;
     Holder<i32> holder = Holder<i32>(22);

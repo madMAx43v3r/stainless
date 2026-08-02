@@ -9,21 +9,23 @@ struct SharedState {
     i32 value;
 };
 
-shared_ptr<mutex<SharedState>> new_shared_state() {
+shared_ptr<mutex<SharedState>> new_shared_state()
+{
     return make_shared<mutex<SharedState>>{false, 0};
 }
 
-unique_ptr<mutex<SharedState>> new_unique_state() {
+unique_ptr<mutex<SharedState>> new_unique_state()
+{
     return make_unique<mutex<SharedState>>{false, 0};
 }
 
-shared_ptr<condition> new_condition() {
+shared_ptr<condition> new_condition()
+{
     return make_shared<condition>();
 }
 
-i32 wait_for_value(
-    shared_ptr<mutex<SharedState>> state,
-    shared_ptr<condition> changed) {
+i32 wait_for_value(shared_ptr<mutex<SharedState>> state, shared_ptr<condition> changed)
+{
     auto guard = state.lock();
 
     // Condition waits may wake spuriously, so always re-check the state.
@@ -35,26 +37,27 @@ i32 wait_for_value(
     return guard.value;
 }
 
-void publish_value(
-    shared_ptr<mutex<SharedState>> state,
-    shared_ptr<condition> changed,
-    i32 value) {
+void publish_value(shared_ptr<mutex<SharedState>> state, shared_ptr<condition> changed, i32 value)
+{
     auto guard = state.lock();
     guard.value = value;
     guard.ready = true;
     changed.notify_all();
 }
 
-shared_ptr<rwlock<SharedState>> new_rw_state() {
+shared_ptr<rwlock<SharedState>> new_rw_state()
+{
     return make_shared<rwlock<SharedState>>{true, 7};
 }
 
-i32 read_value(shared_ptr<rwlock<SharedState>> state) {
+i32 read_value(shared_ptr<rwlock<SharedState>> state)
+{
     auto guard = state.read();
     return guard.value;
 }
 
-void write_value(shared_ptr<rwlock<SharedState>> state, i32 value) {
+void write_value(shared_ptr<rwlock<SharedState>> state, i32 value)
+{
     auto guard = state.write();
     guard.value = value;
 }

@@ -14,7 +14,8 @@ struct Dimensions {
 };
 
 Dimensions::Dimensions(i32 width, i32 height)
-    : width(width), height(height) {
+    : width(width), height(height)
+{
 }
 
 struct NamedDimensions : Dimensions {
@@ -23,11 +24,9 @@ struct NamedDimensions : Dimensions {
     NamedDimensions(i32 width, i32 height, const String& name);
 };
 
-NamedDimensions::NamedDimensions(
-    i32 width,
-    i32 height,
-    const String& name)
-    : Dimensions(width, height), name(name) {
+NamedDimensions::NamedDimensions(i32 width, i32 height, const String& name)
+    : Dimensions(width, height), name(name)
+{
 }
 
 struct StringList {
@@ -38,7 +37,8 @@ struct NoDefault {
     NoDefault() = delete;
 };
 
-i32 constructor_example() {
+i32 constructor_example()
+{
     NamedDimensions dimensions = NamedDimensions(3, 4, "preview");
 
     // StringList receives a synthesized default constructor because Vec can

@@ -1,10 +1,10 @@
 // Append-only, versioned key/value storage implemented entirely in Stainless.
 //
-// Writes are tagged with the current version. commit(next) makes those writes
-// durable before advancing the write epoch. revert(version) durably records
-// the boundary and removes every indexed value tagged >= version. Recovery
-// replays only through the last valid commit/revert record and truncates an
-// incomplete or uncommitted tail.
+// Values and their compact index records live in separate append-only files.
+// Writes are tagged with the current version. commit(next) syncs the data file
+// before appending the durable index commit marker. An in-memory super-index
+// maps versions to index-WAL commit offsets, so revert(version) seeks directly
+// to the selected boundary and reads the discarded suffix sequentially.
 
 use rust::{Map, String, Vec};
 use rust::std::fs;
@@ -18,71 +18,175 @@ struct Value {
     Vec<u8> bytes;
 };
 
+struct ReaderState {
+    i32 successful;
+};
+
 struct IndexEntry {
     u64 offset;
     u32 length;
 };
 
+struct InsertRecord {
+    // Version in which this key/value pair was written.
+    u32 version;
+    // First byte of the value in the data WAL.
+    u64 offset;
+    // Number of value bytes in the data WAL.
+    u32 length;
+    // Logical key used by the in-memory ordered index.
+    Vec<u8> key;
+
+    static InsertRecord read(const Vec<u8>& bytes) throws IndexCorrupt;
+    Vec<u8> write() const;
+};
+
+struct CommitRecord {
+    // Version made current by this commit marker.
+    u32 version;
+    // Durable data-WAL length at this commit boundary.
+    u64 data_len;
+
+    static CommitRecord read(const Vec<u8>& bytes) throws IndexCorrupt;
+    Vec<u8> write() const;
+};
+
 struct RecordKind {
     static const u8 Insert = 0;
     static const u8 Commit = 1;
-    static const u8 Revert = 2;
 };
 
 struct ValueTooLarge : stainless::Exception {
 };
 
-struct StoreState {
-    Map<tuple<Vec<u8>, u32>, IndexEntry> index;
-    u32 current_version;
-    u64 log_end;
+struct IndexCorrupt : stainless::Exception {
 };
 
-u32 record_checksum(const Vec<u8>& payload) {
-    u32 checksum = 1;
-    for (auto byte : payload) {
-        checksum = (checksum + u32(byte)) % 65521;
-    }
-    return checksum;
+struct Limits {
+    static const usize MaxValueLength = 4294967295;
+    static const u32 MaxVersion = 4294967295;
+};
+
+struct StoreState {
+    Map<tuple<Vec<u8>, u32>, IndexEntry> index;
+    Map<u32, u64> version_offsets;
+    u32 current_version;
+    u64 data_len;
+    u64 index_len;
+};
+
+class Table {
+    File data_log;
+    File index_log;
+    rwlock<StoreState> state;
+
+public:
+    Table(const String& path) throws stainless::IoError;
+
+    void recover() const throws stainless::IoError;
+    void insert(Vec<u8> key, Vec<u8> value) const throws ValueTooLarge, stainless::IoError;
+    bool commit(u32 next_version) const throws stainless::IoError;
+    bool revert(u32 version) const throws IndexCorrupt, stainless::IoError;
+    u32 current_version() const;
+    shared_nullptr<Value> find(const Vec<u8>& key) const throws stainless::IoError;
+};
+
+u32 record_checksum_range(const Vec<u8>& record, usize begin, usize end)
+{
+    u32 sum = 1;
+    u32 weighted_sum = 0;
+    record.with_range(
+        begin,
+        end,
+        [&sum, &weighted_sum](const u8& byte) {
+            sum = (sum + u32(byte)) % 65521;
+            weighted_sum = (weighted_sum + sum) % 65521;
+        });
+    return weighted_sum * 65536 + sum;
 }
 
-Vec<u8> make_record(
-    u8 kind,
-    u32 version,
-    const Vec<u8>& key,
-    const Vec<u8>& value) {
+u32 record_checksum(const Vec<u8>& payload)
+{
+    return record_checksum_range(payload, 0, payload.len());
+}
+
+Vec<u8> make_data_record(u32 version, const Vec<u8>& key, const Vec<u8>& value) throws stainless::IoError
+{
     Vec<u8> payload;
-    payload.push(kind);
+    payload.push(RecordKind::Insert);
     BigEndian::write_u32(payload, version);
-    BigEndian::write_u64(payload, u64(key.len()));
-    BigEndian::write_u32(payload, u32(value.len()));
-    for (auto byte : key) {
-        payload.push(byte);
-    }
-    for (auto byte : value) {
-        payload.push(byte);
-    }
+    BigEndian::write_u64(payload, key.len());
+    BigEndian::write_u32(payload, value.len());
+    payload.extend_from_slice(key);
+    payload.extend_from_slice(value);
 
     u32 checksum = record_checksum(payload);
     Vec<u8> record;
     BigEndian::write_u64(record, u64(payload.len()) + 12);
     record.append(payload);
     BigEndian::write_u32(record, checksum);
-    return move(record);
+    return record;
 }
 
-Vec<u8> empty_bytes() {
-    Vec<u8> value;
-    return move(value);
+Vec<u8> InsertRecord::write() const
+{
+    Vec<u8> payload;
+    payload.push(RecordKind::Insert);
+    BigEndian::write_u32(payload, version);
+    BigEndian::write_u64(payload, offset);
+    BigEndian::write_u32(payload, length);
+    BigEndian::write_u64(payload, key.len());
+    payload.extend_from_slice(key);
+
+    u64 record_size = u64(payload.len()) + 12;
+    u32 checksum = record_checksum(payload);
+    Vec<u8> record;
+    BigEndian::write_u64(record, record_size);
+    record.append(payload);
+    BigEndian::write_u32(record, checksum);
+    return record;
 }
 
-StoreState initial_state() {
+Vec<u8> CommitRecord::write() const
+{
+    Vec<u8> payload;
+    payload.push(RecordKind::Commit);
+    BigEndian::write_u32(payload, version);
+    BigEndian::write_u64(payload, data_len);
+
+    u64 record_size = u64(payload.len()) + 12;
+    u32 checksum = record_checksum(payload);
+    Vec<u8> record;
+    BigEndian::write_u64(record, record_size);
+    record.append(payload);
+    BigEndian::write_u32(record, checksum);
+    return record;
+}
+
+StoreState initial_state()
+{
     Map<tuple<Vec<u8>, u32>, IndexEntry> index;
-    StoreState state = StoreState{move(index), 0, 0};
+    Map<u32, u64> version_offsets;
+    version_offsets.insert(0, 0);
+    StoreState state = StoreState{
+        move(index),
+        move(version_offsets),
+        0,
+        0,
+        0
+    };
     return state;
 }
 
-File open_log(const String& path) throws stainless::IoError {
+String make_index_path(const String& path)
+{
+    String result = path.clone();
+    result.push_str(".index");
+    return result;
+}
+
+File open_log(const String& path) throws stainless::IoError
+{
     OpenOptions options;
     options.read(true);
     options.write(true);
@@ -90,95 +194,276 @@ File open_log(const String& path) throws stainless::IoError {
     return options.open(path);
 }
 
-class Table {
-    File log;
-    rwlock<StoreState> state;
+u8 decode_u8_at(const Vec<u8>& bytes, usize offset) throws IndexCorrupt
+{
+    try {
+        return BigEndian::read_u8_at(bytes, offset);
+    } catch (const stainless::IoError& _error) {
+        throw IndexCorrupt{stainless::Exception("invalid index WAL u8 field")};
+    }
+}
 
-public:
-    Table(const String& path) throws stainless::IoError;
+u32 decode_u32_at(const Vec<u8>& bytes, usize offset) throws IndexCorrupt
+{
+    try {
+        return BigEndian::read_u32_at(bytes, offset);
+    } catch (const stainless::IoError& _error) {
+        throw IndexCorrupt{stainless::Exception("invalid index WAL u32 field")};
+    }
+}
 
-    void recover() const throws stainless::IoError;
-    void insert(Vec<u8> key, Vec<u8> value) const
-        throws ValueTooLarge, stainless::IoError;
-    bool commit(u32 next_version) const throws stainless::IoError;
-    bool revert(u32 version) const throws stainless::IoError;
-    u32 current_version() const;
-    shared_nullptr<Value> find(const Vec<u8>& key) const throws stainless::IoError;
-};
+u64 decode_u64_at(const Vec<u8>& bytes, usize offset) throws IndexCorrupt
+{
+    try {
+        return BigEndian::read_u64_at(bytes, offset);
+    } catch (const stainless::IoError& _error) {
+        throw IndexCorrupt{stainless::Exception("invalid index WAL u64 field")};
+    }
+}
+
+u8 index_record_kind(const Vec<u8>& record) throws IndexCorrupt
+{
+    return decode_u8_at(record, 8);
+}
+
+InsertRecord InsertRecord::read(const Vec<u8>& record) throws IndexCorrupt
+{
+    u64 record_size = u64(record.len());
+    if (index_record_kind(record) != RecordKind::Insert || record_size < 37) {
+        throw IndexCorrupt{
+            stainless::Exception("invalid index WAL insert record")
+        };
+    }
+    u64 key_length = decode_u64_at(record, 25);
+    if (record_size != 37 + key_length) {
+        throw IndexCorrupt{
+            stainless::Exception("invalid index WAL key length")
+        };
+    }
+
+    Vec<u8> key;
+    record.with_range(
+        33,
+        record.len() - 4,
+        [&key](const u8& byte) {
+            key.push(byte);
+        });
+    return InsertRecord{
+        decode_u32_at(record, 9),
+        decode_u64_at(record, 13),
+        decode_u32_at(record, 21),
+        move(key)
+    };
+}
+
+CommitRecord CommitRecord::read(const Vec<u8>& record) throws IndexCorrupt
+{
+    if (record.len() != 25 || index_record_kind(record) != RecordKind::Commit) {
+        throw IndexCorrupt{
+            stainless::Exception("invalid index WAL commit record")
+        };
+    }
+    return CommitRecord{
+        decode_u32_at(record, 9),
+        decode_u64_at(record, 13)
+    };
+}
+
+Vec<u8> read_index_record_at(
+    const File& index_log,
+    u64 start,
+    u64 file_len) throws IndexCorrupt, stainless::IoError
+{
+    if (start > file_len || file_len - start < 8) {
+        throw IndexCorrupt{
+            stainless::Exception("truncated index WAL record header")
+        };
+    }
+    u64 record_size = decode_u64_at(index_log.pread_exact(start, 8), 0);
+    if (record_size < 25 || record_size > file_len - start) {
+        throw IndexCorrupt{
+            stainless::Exception("invalid index WAL record size")
+        };
+    }
+    Vec<u8> record = index_log.pread_exact(start, usize(record_size));
+    if (decode_u64_at(record, 0) != record_size) {
+        throw IndexCorrupt{
+            stainless::Exception("invalid index WAL record framing")
+        };
+    }
+    usize checksum_offset = record.len() - 4;
+    u32 expected_checksum = decode_u32_at(record, checksum_offset);
+    if (record_checksum_range(record, 8, checksum_offset) != expected_checksum) {
+        throw IndexCorrupt{
+            stainless::Exception("index WAL checksum mismatch")
+        };
+    }
+    return record;
+}
 
 Table::Table(const String& path) throws stainless::IoError
-    : log(open_log(path)), state(initial_state()) {
+    : data_log(open_log(path)),
+      index_log(open_log(make_index_path(path))),
+      state(initial_state())
+{
 }
 
 void Table::insert(Vec<u8> key, Vec<u8> value) const
-    throws ValueTooLarge, stainless::IoError {
-    if (value.len() > usize(4294967295u32)) {
+    throws ValueTooLarge, stainless::IoError
+{
+    if (value.len() > Limits::MaxValueLength) {
         throw ValueTooLarge{
             stainless::Exception("encoded value exceeds the u32 length limit")
         };
     }
     auto guard = state.write();
     u32 version = guard.current_version;
-    Vec<u8> record = make_record(
-        RecordKind::Insert,
+    Vec<u8> data_record = make_data_record(version, key, value);
+    u64 offset = guard.data_len + 25 + u64(key.len());
+    u64 data_len = guard.data_len + u64(data_record.len());
+    InsertRecord insert = InsertRecord{
         version,
-        key,
-        value);
-    u64 value_offset = guard.log_end + 25 + u64(key.len());
-    log.pwrite_all(guard.log_end, record);
-    guard.log_end += u64(record.len());
+        offset,
+        u32(value.len()),
+        move(key)
+    };
+    Vec<u8> index_record = insert.write();
+    data_log.pwrite_all(guard.data_len, data_record);
+    index_log.pwrite_all(guard.index_len, index_record);
+    guard.data_len = data_len;
+    guard.index_len += u64(index_record.len());
     guard.index.insert(
-        tuple<Vec<u8>, u32>(move(key), version),
-        IndexEntry{value_offset, u32(value.len())});
+        tuple<Vec<u8>, u32>(move(insert.key), insert.version),
+        IndexEntry{insert.offset, insert.length});
 }
 
-bool Table::commit(u32 next_version) const throws stainless::IoError {
+bool Table::commit(u32 next_version) const throws stainless::IoError
+{
     auto guard = state.write();
     if (next_version <= guard.current_version) {
         return false;
     }
-    Vec<u8> record = make_record(
-        RecordKind::Commit,
+    CommitRecord commit = CommitRecord{
         next_version,
-        empty_bytes(),
-        empty_bytes());
-    log.pwrite_all(guard.log_end, record);
-    guard.log_end += u64(record.len());
-    log.sync_data();
+        guard.data_len
+    };
+    Vec<u8> record = commit.write();
+    u64 version_offset = guard.index_len;
+    data_log.set_len(guard.data_len);
+    data_log.sync_data();
+    index_log.set_len(guard.index_len);
+    index_log.pwrite_all(guard.index_len, record);
+    guard.index_len += u64(record.len());
+    index_log.set_len(guard.index_len);
+    index_log.sync_data();
+    guard.version_offsets.insert(next_version, version_offset);
     guard.current_version = next_version;
     return true;
 }
 
-bool Table::revert(u32 version) const throws stainless::IoError {
+bool Table::revert(u32 version) const
+    throws IndexCorrupt, stainless::IoError
+{
     auto guard = state.write();
     if (version > guard.current_version) {
         return false;
     }
-    Vec<u8> record = make_record(
-        RecordKind::Revert,
+    u64 marker_offset = 0;
+    bool exact_version = guard.version_offsets.with(
         version,
-        empty_bytes(),
-        empty_bytes());
-    log.pwrite_all(guard.log_end, record);
-    guard.log_end += u64(record.len());
-    log.sync_data();
-
-    guard.index.retain(
-        [version](
-            const tuple<Vec<u8>, u32>& index_key,
-            const IndexEntry& _location) {
-            return index_key.1 < version;
+        [&marker_offset](const u64& offset) {
+            marker_offset = offset;
         });
+    u64 boundary = 0;
+    u64 data_len = 0;
+    if (!exact_version) {
+        bool found_successor = guard.version_offsets.with_first_in_range(
+            version,
+            Limits::MaxVersion,
+            [&marker_offset](const u32& _indexed_version, const u64& offset) {
+                marker_offset = offset;
+            });
+        if (!found_successor) {
+            throw IndexCorrupt{
+                stainless::Exception("missing successor version offset")
+            };
+        }
+    }
+    if (version != 0 || !exact_version) {
+        Vec<u8> marker_bytes = read_index_record_at(index_log, marker_offset, guard.index_len);
+        CommitRecord marker = CommitRecord::read(marker_bytes);
+        if ((exact_version && marker.version != version) || (!exact_version && marker.version <= version)) {
+            throw IndexCorrupt{
+                stainless::Exception("invalid indexed commit marker")
+            };
+        }
+        boundary = marker_offset;
+        if (exact_version) {
+            boundary += u64(marker_bytes.len());
+        }
+        data_len = marker.data_len;
+    }
+
+    Vec<tuple<Vec<u8>, u32>> removed;
+    Vec<u32> removed_versions;
+    for (u64 scan_offset = boundary; scan_offset < guard.index_len;) {
+        Vec<u8> record = read_index_record_at(
+            index_log,
+            scan_offset,
+            guard.index_len);
+        u8 kind = index_record_kind(record);
+        if (kind == RecordKind::Insert) {
+            InsertRecord insert = InsertRecord::read(record);
+            removed.push(tuple<Vec<u8>, u32>(
+                move(insert.key),
+                insert.version));
+        } else if (kind == RecordKind::Commit) {
+            CommitRecord commit = CommitRecord::read(record);
+            removed_versions.push(commit.version);
+        } else {
+            throw IndexCorrupt{
+                stainless::Exception("unknown index WAL record kind")
+            };
+        }
+        scan_offset += u64(record.len());
+    }
+
+    index_log.set_len(boundary);
+    u64 new_index_len = boundary;
+    if (!exact_version) {
+        CommitRecord commit = CommitRecord{version, data_len};
+        Vec<u8> marker = commit.write();
+        index_log.pwrite_all(boundary, marker);
+        new_index_len += u64(marker.len());
+        index_log.set_len(new_index_len);
+    }
+    index_log.sync_data();
+
+    for (const auto& index_key : removed) {
+        guard.index.remove(index_key);
+    }
+    for (auto removed_version : removed_versions) {
+        guard.version_offsets.remove(removed_version);
+    }
+    if (!exact_version) {
+        guard.version_offsets.insert(version, boundary);
+    }
     guard.current_version = version;
+    guard.data_len = data_len;
+    guard.index_len = new_index_len;
+    data_log.set_len(data_len);
+    data_log.sync_data();
     return true;
 }
 
-u32 Table::current_version() const {
+u32 Table::current_version() const
+{
     auto guard = state.read();
     return guard.current_version;
 }
 
-shared_nullptr<Value> Table::find(const Vec<u8>& key) const throws stainless::IoError {
+shared_nullptr<Value> Table::find(const Vec<u8>& key) const throws stainless::IoError
+{
     auto guard = state.read();
     bool found = false;
     u64 best_offset = 0;
@@ -205,121 +490,128 @@ shared_nullptr<Value> Table::find(const Vec<u8>& key) const throws stainless::Io
         return nullptr;
     }
     return shared_nullptr<Value>(
-        make_shared<Value>{log.pread_exact(best_offset, usize(best_length))});
+        make_shared<Value>{data_log.pread_exact(best_offset, usize(best_length))});
 }
 
-shared_ptr<Table> open_table(const String& path) throws stainless::IoError {
+shared_ptr<Table> open_table(const String& path) throws stainless::IoError
+{
     shared_ptr<Table> table = make_shared<Table>(path);
     table.recover();
     return table;
 }
 
-void Table::recover() const throws stainless::IoError {
+void Table::recover() const throws stainless::IoError
+{
     auto guard = state.write();
-    u64 file_size = log.len();
+    u64 data_file_len = data_log.len();
+    u64 index_file_len = index_log.len();
     u64 offset = 0;
-    u64 committed_end = 0;
+    u64 committed_index_len = 0;
+    u64 committed_data_len = 0;
     u32 committed_version = 0;
     Map<tuple<Vec<u8>, u32>, IndexEntry> working;
-    Map<tuple<Vec<u8>, u32>, IndexEntry> committed;
+    Map<u32, u64> recovered_version_offsets;
+    recovered_version_offsets.insert(0, 0);
+    Vec<tuple<Vec<u8>, u32>> pending;
 
-    for (; offset + 29 <= file_size;) {
-        u64 record_size = BigEndian::read_u64(log.pread_exact(offset, 8));
-        if (record_size < 29 || record_size > file_size - offset) {
+    for (; offset < index_file_len;) {
+        try {
+            Vec<u8> record = read_index_record_at(
+                index_log,
+                offset,
+                index_file_len);
+            u64 next_offset = offset + u64(record.len());
+            u8 kind = index_record_kind(record);
+            if (kind == RecordKind::Insert) {
+                InsertRecord insert = InsertRecord::read(record);
+                if (insert.offset > data_file_len ||
+                    u64(insert.length) > data_file_len - insert.offset) {
+                    break;
+                }
+                pending.push(tuple<Vec<u8>, u32>(
+                    insert.key.clone(),
+                    insert.version));
+                working.insert(
+                    tuple<Vec<u8>, u32>(move(insert.key), insert.version),
+                    IndexEntry{insert.offset, insert.length});
+            } else if (kind == RecordKind::Commit) {
+                CommitRecord commit = CommitRecord::read(record);
+                if (commit.data_len > data_file_len) {
+                    break;
+                }
+                pending.clear();
+                recovered_version_offsets.insert(commit.version, offset);
+                committed_version = commit.version;
+                committed_data_len = commit.data_len;
+                committed_index_len = next_offset;
+            } else {
+                break;
+            }
+            offset = next_offset;
+        } catch (const IndexCorrupt& _error) {
             break;
         }
-        u64 payload_size = record_size - 12;
-        Vec<u8> payload = log.pread_exact(offset + 8, usize(payload_size));
-        u32 expected_checksum = BigEndian::read_u32(
-            log.pread_exact(offset + 8 + payload_size, 4));
-        if (record_checksum(payload) != expected_checksum) {
-            break;
-        }
-
-        u8 kind = BigEndian::read_u8(log.pread_exact(offset + 8, 1));
-        u32 version = BigEndian::read_u32(log.pread_exact(offset + 9, 4));
-        u64 key_length = BigEndian::read_u64(log.pread_exact(offset + 13, 8));
-        u32 value_length = BigEndian::read_u32(log.pread_exact(offset + 21, 4));
-        if (record_size != 29 + key_length + u64(value_length)) {
-            break;
-        }
-
-        if (kind == RecordKind::Insert) {
-            Vec<u8> key = log.pread_exact(offset + 25, usize(key_length));
-            working.insert(
-                tuple<Vec<u8>, u32>(move(key), version),
-                IndexEntry{
-                    offset + 25 + key_length,
-                    value_length
-                });
-        } else if (kind == RecordKind::Commit) {
-            committed = working.clone();
-            committed_version = version;
-            committed_end = offset + record_size;
-        } else if (kind == RecordKind::Revert) {
-            working.retain(
-                [version](
-                    const tuple<Vec<u8>, u32>& index_key,
-                    const IndexEntry& _location) {
-                    return index_key.1 < version;
-                });
-            committed = working.clone();
-            committed_version = version;
-            committed_end = offset + record_size;
-        } else {
-            break;
-        }
-        offset += record_size;
     }
 
-    if (file_size != committed_end) {
-        log.set_len(committed_end);
+    for (const auto& index_key : pending) {
+        working.remove(index_key);
     }
-    guard.index = move(committed);
+    if (index_file_len != committed_index_len) {
+        index_log.set_len(committed_index_len);
+        index_log.sync_data();
+    }
+    if (data_file_len != committed_data_len) {
+        data_log.set_len(committed_data_len);
+        data_log.sync_data();
+    }
+    guard.index = move(working);
+    guard.version_offsets = move(recovered_version_offsets);
     guard.current_version = committed_version;
-    guard.log_end = committed_end;
+    guard.data_len = committed_data_len;
+    guard.index_len = committed_index_len;
 }
 
-Vec<u8> one_byte(u8 value) {
+Vec<u8> one_byte(u8 value)
+{
     Vec<u8> bytes;
     bytes.push(value);
-    return move(bytes);
+    return bytes;
 }
 
-Vec<u8> test_key(u64 value) {
+Vec<u8> test_key(u64 value)
+{
     Vec<u8> bytes;
     BigEndian::write_u64(bytes, value);
-    return move(bytes);
+    return bytes;
 }
 
-void insert_bytes(
-    shared_ptr<Table> table,
-    Vec<u8> key,
-    Vec<u8> value) throws ValueTooLarge, stainless::IoError {
+void insert_bytes(shared_ptr<Table> table, Vec<u8> key, Vec<u8> value) throws ValueTooLarge, stainless::IoError
+{
     table.insert(move(key), move(value));
 }
 
-shared_nullptr<Value> find_bytes(
-    shared_ptr<Table> table,
-    const Vec<u8>& key) throws stainless::IoError {
+shared_nullptr<Value> find_bytes(shared_ptr<Table> table, const Vec<u8>& key) throws stainless::IoError
+{
     return table.find(key);
 }
 
-bool commit_table(shared_ptr<Table> table, u32 version)
-    throws stainless::IoError {
+bool commit_table(shared_ptr<Table> table, u32 version) throws stainless::IoError
+{
     return table.commit(version);
 }
 
-bool revert_table(shared_ptr<Table> table, u32 version)
-    throws stainless::IoError {
+bool revert_table(shared_ptr<Table> table, u32 version) throws IndexCorrupt, stainless::IoError
+{
     return table.revert(version);
 }
 
-u32 table_version(shared_ptr<Table> table) {
+u32 table_version(shared_ptr<Table> table)
+{
     return table.current_version();
 }
 
-bool value_is(shared_nullptr<Value> maybe, u8 expected) {
+bool value_is(shared_nullptr<Value> maybe, u8 expected)
+{
     if (!maybe) {
         return false;
     }
@@ -327,8 +619,8 @@ bool value_is(shared_nullptr<Value> maybe, u8 expected) {
     return value.bytes.len() == 1 && value.bytes.contains(expected);
 }
 
-void write_history(const String& path)
-    throws ValueTooLarge, stainless::IoError {
+void write_history(const String& path) throws IndexCorrupt, ValueTooLarge, stainless::IoError
+{
     shared_ptr<Table> table = open_table(path);
     table.insert(test_key(7), one_byte(10));
     table.commit(1);
@@ -337,13 +629,8 @@ void write_history(const String& path)
     table.revert(1);
 }
 
-struct ReaderState {
-    i32 successful;
-};
-
-void read_in_thread(
-    shared_ptr<Table> table,
-    shared_ptr<mutex<ReaderState>> result) {
+void read_in_thread(shared_ptr<Table> table, shared_ptr<mutex<ReaderState>> result)
+{
     try {
         if (value_is(table.find(test_key(7)), 10)) {
             auto guard = result.lock();
@@ -354,9 +641,14 @@ void read_in_thread(
 }
 
 i32 self_test(const String& path)
-    throws ValueTooLarge, stainless::IoError, stainless::ThreadError {
+    throws IndexCorrupt, ValueTooLarge, stainless::IoError, stainless::ThreadError
+{
+    String index_path = make_index_path(path);
     if (fs::exists(path)) {
         fs::remove_file(path);
+    }
+    if (fs::exists(index_path)) {
+        fs::remove_file(index_path);
     }
     write_history(path);
 
@@ -383,6 +675,7 @@ i32 self_test(const String& path)
         status = 0;
     }
     fs::remove_file(path);
+    fs::remove_file(index_path);
     return status;
 }
 

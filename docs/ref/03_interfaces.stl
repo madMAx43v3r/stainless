@@ -17,15 +17,18 @@ struct Buffer : Sized {
     void push(i32 value);
 };
 
-usize Buffer::size() const {
+usize Buffer::size() const
+{
     return values.len();
 }
 
-void Buffer::push(i32 value) {
+void Buffer::push(i32 value)
+{
     values.push(value);
 }
 
-usize chained_buffer_example() {
+usize chained_buffer_example()
+{
     Buffer buffer;
 
     // A void member call supplies a compiler-only chain receiver. It does not
@@ -50,26 +53,31 @@ public:
     String name() const;
 };
 
-i32 ConstantAnswer::value() const {
+i32 ConstantAnswer::value() const
+{
     return 42;
 }
 
-String ConstantAnswer::name() const {
+String ConstantAnswer::name() const
+{
     return "constant";
 }
 
-unique_ptr<NamedAnswer> make_answer() {
+unique_ptr<NamedAnswer> make_answer()
+{
     // Only a class may be erased to an owning interface pointer.
     return make_unique<ConstantAnswer>();
 }
 
-i32 read_answer(const NamedAnswer& answer) {
+i32 read_answer(const NamedAnswer& answer)
+{
     return answer.value();
 }
 
 } // namespace samples
 
-i32 main() {
+i32 main()
+{
     unique_ptr<samples::NamedAnswer> answer = samples::make_answer();
     return samples::read_answer(answer);
 }

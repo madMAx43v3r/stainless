@@ -56,6 +56,26 @@ fn endian_bindings_use_exact_byte_widths_and_checked_reads() {
         assert_eq!(write_u32.return_type, TypeRef::Void);
         assert_eq!(write_u32.rust_result_error, None);
 
+        let write_usize_u32 = endian
+            .find_callable(
+                CallStyle::AssociatedFunction,
+                "write_u32",
+                &[TypeRef::mutable_ref(bytes.clone()), TypeRef::Usize],
+            )
+            .unwrap();
+        assert_eq!(write_usize_u32.return_type, TypeRef::Void);
+        assert_eq!(write_usize_u32.rust_result_error, Some(io_error.clone()));
+
+        let write_usize_u64 = endian
+            .find_callable(
+                CallStyle::AssociatedFunction,
+                "write_u64",
+                &[TypeRef::mutable_ref(bytes.clone()), TypeRef::Usize],
+            )
+            .unwrap();
+        assert_eq!(write_usize_u64.return_type, TypeRef::Void);
+        assert_eq!(write_usize_u64.rust_result_error, None);
+
         for (name, result) in [
             ("read_u8", TypeRef::U8),
             ("read_u32", TypeRef::U32),
@@ -613,6 +633,20 @@ fn vec_trait_requirements_are_preserved() {
     let bindings = standard_bindings().unwrap();
     let vec_binding = bindings.type_by_path("rust::Vec").unwrap();
     let t = TypeRef::Parameter("T".to_owned());
+
+    let extend = vec_binding
+        .find_callable(
+            CallStyle::Method,
+            "extend_from_slice",
+            &[TypeRef::shared_ref(TypeRef::native(
+                "rust::Vec",
+                vec![t.clone()],
+            ))],
+        )
+        .unwrap();
+    assert_eq!(extend.receiver, Some(Receiver::Mutable));
+    assert_eq!(extend.requirements.len(), 1);
+    assert_eq!(extend.requirements[0].rust_trait, "::core::clone::Clone");
 
     let contains = vec_binding
         .find_callable(CallStyle::Method, "contains", &[TypeRef::shared_ref(t)])

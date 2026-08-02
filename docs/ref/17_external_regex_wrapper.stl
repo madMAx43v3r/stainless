@@ -7,7 +7,8 @@ use rust::regex::Regex;
 
 namespace samples {
 
-bool regex_matches(const String& text) {
+bool regex_matches(const String& text)
+{
     try {
         Regex expression = Regex::new("^stainless$").unwrap();
         return expression.is_match(text);
@@ -16,7 +17,8 @@ bool regex_matches(const String& text) {
     }
 }
 
-usize invalid_regex_message() {
+usize invalid_regex_message()
+{
     try {
         Regex expression = Regex::new("(").unwrap();
         return 0;
