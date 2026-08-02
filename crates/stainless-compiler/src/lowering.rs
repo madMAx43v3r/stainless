@@ -270,6 +270,7 @@ fn lower_function(function: &cst::Function) -> ast::Function {
     let function_span = span(function);
     ast::Function {
         is_public: true,
+        is_static: function.is_static(),
         is_async: function.is_async(),
         name: path_from_tokens(function.name_tokens()),
         owner_arguments: function

@@ -14,7 +14,7 @@ String render_line(i32 value) {
         return format!("formatting failed: {}", error.message);
     }
 
-    return move(output);
+    return output;
 }
 
 i32 main() {

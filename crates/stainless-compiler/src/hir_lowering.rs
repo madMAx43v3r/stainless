@@ -747,9 +747,8 @@ impl Lowerer<'_> {
             module_path: function_module_path(symbol, self.semantics),
             rust_name: symbol.mangled_name.clone(),
             type_parameters: symbol
-                .receiver
-                .as_ref()
-                .and_then(|receiver| self.semantics.structure(receiver.structure))
+                .owner
+                .and_then(|owner| self.semantics.structure(owner))
                 .map_or_else(Vec::new, |structure| structure.type_parameters.clone()),
             is_async: symbol.is_async,
             parameters,
@@ -3073,8 +3072,8 @@ fn user_type_path(source_path: &[String]) -> String {
 }
 
 fn function_module_path(function: &FunctionSymbol, semantics: &SemanticModel) -> Vec<String> {
-    if let Some(receiver) = &function.receiver
-        && let Some(structure) = semantics.structure(receiver.structure)
+    if let Some(owner) = function.owner
+        && let Some(structure) = semantics.structure(owner)
     {
         return structure.path[..structure.path.len().saturating_sub(1)].to_vec();
     }

@@ -80,6 +80,34 @@ u8 kind() {
 }
 
 #[test]
+fn parses_contextual_static_member_functions_losslessly() {
+    let source = r"struct Record {
+    static Record read(i32 value);
+    i32 write() const;
+};
+
+Record Record::read(i32 value) {
+    return Record{value};
+}
+";
+    let parsed = parse(source);
+    let tree = parsed.tree();
+    let functions = tree
+        .items()
+        .find_map(|item| match item {
+            Item::Struct(structure) => Some(structure.functions().collect::<Vec<_>>()),
+            _ => None,
+        })
+        .expect("record struct");
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(parsed.syntax().to_string(), source);
+    assert_eq!(functions.len(), 2);
+    assert!(functions[0].is_static());
+    assert!(!functions[1].is_static());
+}
+
+#[test]
 fn parses_classes_interfaces_inheritance_and_access_labels_losslessly() {
     let source = include_str!("../../../docs/ref/03_interfaces.stl");
     let parsed = parse(source);

@@ -40,6 +40,9 @@ i32 collection_order() {
         map_key_order = map_key_order * 10 + key;
         map_value_total += value;
     }
+    lookup.retain([](const i32& key) {
+        return key > 0;
+    });
 
     Set<i32> sorted;
     sorted.insert(3);

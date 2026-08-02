@@ -658,7 +658,7 @@ void bump(Config& config) {
 
 unique_ptr<Config> make_config(i32 version) {
     unique_ptr<Config> owner = make_unique<Config>{version};
-    return move(owner);
+    return owner;
 }
 
 i32 consume(unique_ptr<Config> owner) {
@@ -1254,7 +1254,7 @@ i32 select(i32 value) {
 }
 
 String select(String value) {
-    return move(value);
+    return value;
 }
 
 i32 example() {
@@ -1313,7 +1313,7 @@ Text copy_text(const Text& source) {
 
 Vec<i32> allocated() {
     Vec<i32> values = Vec::with_capacity(4);
-    return move(values);
+    return values;
 }
 
 namespace nested {
@@ -1321,7 +1321,7 @@ namespace nested {
 use rust::*;
 
 String identity(String value) {
-    return move(value);
+    return value;
 }
 
 }

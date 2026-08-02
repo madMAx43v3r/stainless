@@ -126,15 +126,23 @@ fn compile(options: &Options) -> ExitCode {
     if !result.analysis.diagnostics.is_empty() {
         for diagnostic in &result.analysis.diagnostics {
             eprintln!(
-                "{}:{}..{}: {} {:?}: {}",
+                "{}:{}..{}: {:?} {} {:?}: {}",
                 options.input.display(),
                 diagnostic.span.start,
                 diagnostic.span.end,
+                diagnostic.severity,
                 diagnostic.code,
                 diagnostic.phase,
                 diagnostic.message
             );
         }
+    }
+    if result
+        .analysis
+        .diagnostics
+        .iter()
+        .any(stainless_compiler::Diagnostic::is_error)
+    {
         return ExitCode::FAILURE;
     }
     if options.check {

@@ -159,7 +159,7 @@ i32 mutate_and_sum() {
 String greeting() {
     String text = "hello";
     text.push('!');
-    return move(text);
+    return text;
 }
 
 usize inspect_text(const String& text) {
@@ -643,7 +643,7 @@ i32 read_version(const Config& config) {
 
 unique_ptr<Config> make_config(i32 version) {
     unique_ptr<Config> owner = make_unique<Config>(version);
-    return move(owner);
+    return owner;
 }
 
 i32 unique_behavior() {
@@ -1929,7 +1929,7 @@ String render(i32 value) {
     } catch (const stainless::FormatError& error) {
         return format!("formatting failed: {}", error.message);
     }
-    return move(output);
+    return output;
 }
 
 void report(const String& value) {

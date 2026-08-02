@@ -70,6 +70,16 @@ fn endian_bindings_use_exact_byte_widths_and_checked_reads() {
                 .unwrap();
             assert_eq!(read.return_type, result);
             assert_eq!(read.rust_result_error, Some(io_error.clone()));
+
+            let read_at = endian
+                .find_callable(
+                    CallStyle::AssociatedFunction,
+                    &format!("{name}_at"),
+                    &[TypeRef::shared_ref(bytes.clone()), TypeRef::Usize],
+                )
+                .unwrap();
+            assert_eq!(read_at.return_type, result);
+            assert_eq!(read_at.rust_result_error, Some(io_error.clone()));
         }
     }
 }
@@ -269,6 +279,32 @@ fn ordered_map_range_and_multimap_callbacks_are_non_escaping() {
     let k = TypeRef::Parameter("K".to_owned());
     let v = TypeRef::Parameter("V".to_owned());
 
+    let first = map
+        .find_callable(
+            CallStyle::Method,
+            "with_first_in_range",
+            &[
+                TypeRef::shared_ref(k.clone()),
+                TypeRef::shared_ref(k.clone()),
+                TypeRef::callback(
+                    CallbackKind::FnOnce,
+                    stainless_compiler::interop::CallbackEscape::Call,
+                    vec![
+                        TypeRef::shared_ref(k.clone()),
+                        TypeRef::shared_ref(v.clone()),
+                    ],
+                    TypeRef::Void,
+                ),
+            ],
+        )
+        .unwrap();
+    assert_eq!(first.return_type, TypeRef::Bool);
+    assert!(matches!(
+        first.lowering,
+        RustLowering::FunctionWithReceiver { ref rust_path }
+            if rust_path == "::stainless_runtime::btree_map_with_first_in_range"
+    ));
+
     let last = map
         .find_callable(
             CallStyle::Method,
@@ -293,6 +329,24 @@ fn ordered_map_range_and_multimap_callbacks_are_non_escaping() {
         last.lowering,
         RustLowering::FunctionWithReceiver { ref rust_path }
             if rust_path == "::stainless_runtime::btree_map_with_last_in_range"
+    ));
+
+    let retain_key = map
+        .find_callable(
+            CallStyle::Method,
+            "retain",
+            &[TypeRef::callback(
+                CallbackKind::FnMut,
+                stainless_compiler::interop::CallbackEscape::Call,
+                vec![TypeRef::shared_ref(k.clone())],
+                TypeRef::Bool,
+            )],
+        )
+        .unwrap();
+    assert!(matches!(
+        retain_key.lowering,
+        RustLowering::FunctionWithReceiver { ref rust_path }
+            if rust_path == "::stainless_runtime::btree_map_retain_keys"
     ));
 
     let with = multimap
@@ -531,6 +585,27 @@ fn vec_common_methods_have_expected_receiver_effects() {
         .unwrap();
     assert_eq!(pop.receiver, Some(Receiver::Mutable));
     assert_eq!(pop.return_type, TypeRef::native("rust::Option", vec![t]));
+
+    let range_visitor = TypeRef::callback(
+        CallbackKind::FnMut,
+        stainless_compiler::interop::CallbackEscape::Call,
+        vec![TypeRef::shared_ref(TypeRef::Parameter("T".to_owned()))],
+        TypeRef::Void,
+    );
+    let with_range = vec_binding
+        .find_callable(
+            CallStyle::Method,
+            "with_range",
+            &[TypeRef::Usize, TypeRef::Usize, range_visitor],
+        )
+        .unwrap();
+    assert_eq!(with_range.receiver, Some(Receiver::Shared));
+    assert_eq!(with_range.return_type, TypeRef::Bool);
+    assert!(matches!(
+        with_range.lowering,
+        RustLowering::FunctionWithReceiver { ref rust_path }
+            if rust_path == "::stainless_runtime::vec_with_range"
+    ));
 }
 
 #[test]

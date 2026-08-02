@@ -742,7 +742,7 @@ macro_rules! function_accessors {
                     matches!(
                         token.kind(),
                         SyntaxKind::Identifier | SyntaxKind::ColonColon
-                    )
+                    ) && token.text() != "static"
                 })
             }
 
@@ -760,6 +760,15 @@ macro_rules! function_accessors {
             #[must_use]
             pub fn throws_clause(&self) -> Option<ThrowsClause> {
                 child(self.syntax())
+            }
+
+            #[must_use]
+            pub fn is_static(&self) -> bool {
+                direct_tokens(self.syntax())
+                    .find(|token| !token.kind().is_trivia())
+                    .is_some_and(|token| {
+                        token.kind() == SyntaxKind::Identifier && token.text() == "static"
+                    })
             }
 
             #[must_use]
@@ -831,6 +840,14 @@ impl Function {
         match self {
             Self::Definition(node) => node.is_const(),
             Self::Declaration(node) => node.is_const(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_static(&self) -> bool {
+        match self {
+            Self::Definition(node) => node.is_static(),
+            Self::Declaration(node) => node.is_static(),
         }
     }
 

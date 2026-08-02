@@ -175,7 +175,7 @@ void invalid() {
 fn lowers_json_literals_and_reports_json_specific_errors() {
     let source = r#"var valid() {
     var value = {name: "Stainless", values: [1, null, {}]};
-    return move(value);
+    return value;
 }
 
 struct Unsupported {
@@ -185,7 +185,7 @@ struct Unsupported {
 var invalid() {
     var duplicate = {field: 1, field: 2};
     var unsupported = [make_unique<Unsupported>(Unsupported{1})];
-    return move(duplicate);
+    return duplicate;
 }
 "#;
     let analysis = analyze(source);

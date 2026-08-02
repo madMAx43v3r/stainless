@@ -55,6 +55,12 @@ fn endian_binding(name: &str) -> NativeTypeBinding {
         ]
     };
     let read_parameters = || vec![Parameter::new("bytes", TypeRef::shared_ref(bytes.clone()))];
+    let read_at_parameters = || {
+        vec![
+            Parameter::new("bytes", TypeRef::shared_ref(bytes.clone())),
+            Parameter::new("offset", TypeRef::Usize),
+        ]
+    };
     let rust_path = format!("::stainless_runtime::{name}");
 
     NativeTypeBinding {
@@ -83,6 +89,13 @@ fn endian_binding(name: &str) -> NativeTypeBinding {
                 &format!("{rust_path}::read_u8"),
             ),
             fallible_associated(
+                "read_u8_at",
+                read_at_parameters(),
+                TypeRef::U8,
+                io_error.clone(),
+                &format!("{rust_path}::read_u8_at"),
+            ),
+            fallible_associated(
                 "read_u32",
                 read_parameters(),
                 TypeRef::U32,
@@ -90,11 +103,25 @@ fn endian_binding(name: &str) -> NativeTypeBinding {
                 &format!("{rust_path}::read_u32"),
             ),
             fallible_associated(
+                "read_u32_at",
+                read_at_parameters(),
+                TypeRef::U32,
+                io_error.clone(),
+                &format!("{rust_path}::read_u32_at"),
+            ),
+            fallible_associated(
                 "read_u64",
                 read_parameters(),
                 TypeRef::U64,
-                io_error,
+                io_error.clone(),
                 &format!("{rust_path}::read_u64"),
+            ),
+            fallible_associated(
+                "read_u64_at",
+                read_at_parameters(),
+                TypeRef::U64,
+                io_error,
+                &format!("{rust_path}::read_u64_at"),
             ),
         ],
     }
@@ -606,10 +633,34 @@ fn json_error_binding() -> NativeTypeBinding {
 fn vec_binding() -> NativeTypeBinding {
     let t = TypeRef::Parameter(T.to_owned());
     let vec_t = vec_of(t.clone());
+    let range_visitor = TypeRef::callback(
+        CallbackKind::FnMut,
+        CallbackEscape::Call,
+        vec![TypeRef::shared_ref(t.clone())],
+        TypeRef::Void,
+    );
     let mut callables = vec_construction(&vec_t);
     callables.extend(vec_capacity_methods());
     callables.extend(vec_element_methods(&t, &vec_t));
     callables.extend(vec_trait_methods(&t, &vec_t));
+    callables.push(CallableBinding {
+        source_name: "with_range".to_owned(),
+        style: CallStyle::Method,
+        receiver: Some(Receiver::Shared),
+        parameters: vec![
+            Parameter::new("begin", TypeRef::Usize),
+            Parameter::new("end", TypeRef::Usize),
+            Parameter::new("callback", range_visitor),
+        ],
+        is_async: false,
+        return_type: TypeRef::Bool,
+        rust_result_error: None,
+        return_borrow: None,
+        requirements: vec![],
+        lowering: RustLowering::FunctionWithReceiver {
+            rust_path: "::stainless_runtime::vec_with_range".to_owned(),
+        },
+    });
 
     NativeTypeBinding {
         stainless_path: "rust::Vec".to_owned(),
@@ -852,6 +903,12 @@ fn map_binding() -> NativeTypeBinding {
         ],
         TypeRef::Bool,
     );
+    let retain_key = TypeRef::callback(
+        CallbackKind::FnMut,
+        CallbackEscape::Call,
+        vec![TypeRef::shared_ref(k.clone())],
+        TypeRef::Bool,
+    );
 
     NativeTypeBinding {
         stainless_path: "rust::Map".to_owned(),
@@ -929,6 +986,24 @@ fn map_binding() -> NativeTypeBinding {
                 },
             },
             CallableBinding {
+                source_name: "with_first_in_range".to_owned(),
+                style: CallStyle::Method,
+                receiver: Some(Receiver::Shared),
+                parameters: vec![
+                    Parameter::new("lower", TypeRef::shared_ref(k.clone())),
+                    Parameter::new("upper", TypeRef::shared_ref(k.clone())),
+                    Parameter::new("callback", with_entry.clone()),
+                ],
+                is_async: false,
+                return_type: TypeRef::Bool,
+                rust_result_error: None,
+                return_borrow: None,
+                requirements: key_ord(),
+                lowering: RustLowering::FunctionWithReceiver {
+                    rust_path: "::stainless_runtime::btree_map_with_first_in_range".to_owned(),
+                },
+            },
+            CallableBinding {
                 source_name: "with_last_in_range".to_owned(),
                 style: CallStyle::Method,
                 receiver: Some(Receiver::Shared),
@@ -958,6 +1033,20 @@ fn map_binding() -> NativeTypeBinding {
                 requirements: key_ord(),
                 lowering: RustLowering::FunctionWithReceiver {
                     rust_path: "::stainless_runtime::btree_map_retain".to_owned(),
+                },
+            },
+            CallableBinding {
+                source_name: "retain".to_owned(),
+                style: CallStyle::Method,
+                receiver: Some(Receiver::Mutable),
+                parameters: vec![Parameter::new("predicate", retain_key)],
+                is_async: false,
+                return_type: TypeRef::Void,
+                rust_result_error: None,
+                return_borrow: None,
+                requirements: key_ord(),
+                lowering: RustLowering::FunctionWithReceiver {
+                    rust_path: "::stainless_runtime::btree_map_retain_keys".to_owned(),
                 },
             },
             method_with_requirements(

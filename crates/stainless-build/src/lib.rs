@@ -83,11 +83,29 @@ impl Builder {
             ))
         })?;
         let result = stainless_compiler::transpile(&source);
-        if !result.analysis.diagnostics.is_empty() {
+        for warning in result
+            .analysis
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| !diagnostic.is_error())
+        {
+            println!(
+                "cargo:warning={} {:?} at {}..{}: {}",
+                warning.code, warning.phase, warning.span.start, warning.span.end, warning.message
+            );
+        }
+        let errors = result
+            .analysis
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.is_error())
+            .collect::<Vec<_>>();
+        if !errors.is_empty() {
             let diagnostics = result
                 .analysis
                 .diagnostics
                 .iter()
+                .filter(|diagnostic| diagnostic.is_error())
                 .map(|diagnostic| {
                     format!(
                         "{} {:?} at {}..{}: {}",

@@ -33,7 +33,7 @@ String string_basics(const String& suffix) {
     }
 
     // Returning a named non-copy value uses the language's explicit move.
-    return move(text);
+    return text;
 }
 
 Vec<u8> consume_string(String text) {

@@ -495,6 +495,28 @@ types, classes, interfaces, and mutable static members are rejected. This
 narrow form is sufficient for typed wire-format discriminants without adding
 enum representation rules or mutable global state.
 
+### Static member functions
+
+Structs and classes may declare associated functions with contextual `static`:
+
+```cpp
+struct Record {
+    static Record read(const Vec<u8>& bytes) throws ParseError;
+    Vec<u8> write() const;
+};
+
+Record Record::read(const Vec<u8>& bytes) throws ParseError {
+    // implementation
+}
+
+Record record = Record::read(bytes);
+```
+
+`static` appears only on the in-body declaration, following C++ syntax. The
+out-of-body definition omits it. A static member has no `self` receiver, cannot
+have trailing `const`, and is called through `Type::function(...)`. Interfaces
+cannot declare static members.
+
 ### Declaration syntax and contextual modifiers
 
 `sealed` follows the declaration kind:
@@ -978,12 +1000,15 @@ Classes are identity-oriented and never copyable:
   shared ownership handle and continues to refer to the same immutable class
   object; it does not clone that object.
 
-A named value never moves implicitly. Passing, returning, initializing, or
-assigning from a named non-copy value requires `move(value)`. A fresh temporary
-can initialize or pass directly because it has no binding that could be used
-afterward. Using a moved binding is a compile error until it is explicitly
-reinitialized in a context where assignment is allowed. An active borrow also
-prevents moving its owner.
+A named value does not move implicitly when passed, used as an initializer, or
+assigned: those operations still require `move(value)` for a non-copy value. A
+direct local or by-value parameter returned by value is the deliberate
+exception. Because control flow ends, `return value;` moves it automatically;
+`return move(value);` is accepted but produces a non-blocking redundancy
+warning. A fresh temporary can initialize, pass, or return directly because it
+has no binding that could be used afterward. Using a moved binding is a compile
+error until it is explicitly reinitialized in a context where assignment is
+allowed. An active borrow also prevents moving its owner.
 
 `unique_ptr<T>` and `unique_nullptr<T>` are non-copyable owning values that
 transfer through `move(value)`. `shared_ptr<T>` and `shared_nullptr<T>` are
@@ -2166,7 +2191,10 @@ The compiler crate currently registers the following source-visible APIs:
 - `rust::Vec<T>`: `Vec()`, `Vec::with_capacity`, `len`, `is_empty`,
   `capacity`, `reserve`, `reserve_exact`, `shrink_to`, `shrink_to_fit`,
   `push`, `pop`, `clear`, `truncate`, `insert`, `remove`, `swap_remove`,
-  `append`, `reverse`, `clone`, `contains`, `sort`, and `dedup`.
+  `append`, `reverse`, `clone`, `contains`, `sort`, `dedup`, and the
+  non-escaping `with_range(begin, end, callback)` slice adapter. The adapter
+  visits a checked half-open range without allocating or exposing a storable
+  Rust slice and returns `false` for invalid bounds.
 - `rust::String`: `String()`, the explicit copy constructor
   `String(const String&)`, `String::with_capacity`, `clone`, `into_bytes`,
   `len`, `is_empty`, `capacity`, `reserve`, `reserve_exact`, `shrink_to`,
@@ -2185,12 +2213,16 @@ The compiler crate currently registers the following source-visible APIs:
   `clone`.
 - `rust::Map<K, V>`: an ordered map backed by Rust `BTreeMap<K, V>`, with
   `Map()`, `len`, `is_empty`, `clear`, `insert`, `remove`, `contains_key`,
-  `with`, `with_mut`, `with_last_in_range`, `retain`, `append`, `clone`, and
+  `with`, `with_mut`, `with_first_in_range`, `with_last_in_range`, `retain`,
+  `append`, `clone`, and
   key/value structured-binding range iteration. `with(key, callback)` and
   `with_mut(key, callback)` perform an O(log n) lookup and confine the borrowed
   value to one non-escaping callback, avoiding a storable `Option<&V>`.
-  `with_last_in_range(lower, upper, callback)` similarly borrows the greatest
-  entry in an inclusive range without exposing a Rust iterator.
+  `with_first_in_range(lower, upper, callback)` and
+  `with_last_in_range(lower, upper, callback)` similarly borrow the least or
+  greatest entry in an inclusive range without exposing a Rust iterator. `retain` has
+  exact predicate overloads for `(const K&, const V&)` and for `const K&`
+  alone; both still scan the complete map and are not used by kvstore revert.
 - `rust::MultiMap<K, V>`: an ordered multimap backed by the compact runtime's
   B-tree with private `List<V>` buckets. `MultiMap()`, `insert`, `len`,
   `key_len`, `is_empty`, `clear`, `contains_key`, `remove`, `remove_all`,
@@ -2444,7 +2476,9 @@ supports Rust's `read`, `write`, `append`, `truncate`, `create`, and
 `write_u64()`, and checked `read_u8()`, `read_u32()`, and `read_u64()`
 operations for binary formats. They lower to Rust's fixed-width byte-conversion
 operations rather than source-level arithmetic loops. A read with the wrong
-byte count raises `stainless::IoError` with `InvalidData`.
+byte count raises `stainless::IoError` with `InvalidData`. The corresponding
+`read_u8_at()`, `read_u32_at()`, and `read_u64_at()` forms decode directly at a
+checked `usize` offset in an existing byte vector.
 
 Cursor-based and buffered streams, rich metadata, permissions, and symlink
 operations remain for the next file-I/O layer.
@@ -2452,19 +2486,22 @@ operations remain for the next file-I/O layer.
 ### Versioned key/value store showcase
 
 `crates/stainless-kvstore` is the first substantial library implemented in
-Stainless itself. Its `.stl` implementation owns one read/write file handle and
-an internally synchronized version/index state. Inserts append checksummed log
-records at explicitly managed offsets; `commit(next)` syncs its marker before
-advancing the write epoch, and `revert(version)` syncs its marker before
-discarding indexed entries tagged at or above the boundary. Recovery replays
-only through the last valid control record and truncates incomplete or
-uncommitted tail data.
+Stainless itself. Its `.stl` implementation owns a data WAL at the requested
+path and a compact index WAL at `<path>.index`, plus internally synchronized
+version/index state. Inserts append the value record and a small index record
+at explicitly managed offsets. `commit(next)` syncs the data WAL first, then
+appends and syncs an index commit marker carrying the committed data length.
+Recovery treats that marker as authoritative and truncates incomplete or
+uncommitted tails in both files.
+The compact records have kind-specific layouts: insert records contain only
+their version, value location, and key; commit records contain only their
+version and committed data-WAL length.
 All fixed-width WAL integers use big-endian encoding. This includes record
 sizes, versions, key/value lengths, and checksums; built-in ordered integer key
 codecs use the same byte order so lexicographic bytes preserve numeric order.
 
-The index is held in RAM and rebuilt by replaying the append-only log at open.
-It is a Stainless
+The key-ordered index is held in RAM and rebuilt by replaying only the compact
+index WAL at open. It is a Stainless
 `Map<tuple<Vec<u8>, u32>, IndexEntry>`, lowering to Rust's ordered
 `BTreeMap`. The compound key is the sole version metadata: it orders every
 logical key by version, and inserting the same key again within one version
@@ -2472,7 +2509,15 @@ replaces that version's location. `find()` uses the map's non-escaping
 `with_last_in_range()` callback to select the greatest entry between `(key, 0)`
 and `(key, current_version)` in O(log n), then calls `pread_exact()` under the
 same shared `rwlock<StoreState>` guard. It never copies or scans the index.
-Commits, reverts, and recovery take an exclusive write guard.
+Recovery also builds an in-memory `Map<u32, u64>` super-index from each
+committed version to its index-WAL marker offset. `revert(version)` uses an
+exact marker or the least successor marker to seek directly to the selected
+branch boundary, then reads the discarded index-WAL suffix forward. It gathers
+those exact `(key, version)` entries, durably truncates the index, and removes
+only the gathered entries from the RAM map. It then truncates the data WAL to
+the data length recorded at that branch boundary. Revert therefore does not call
+`Map::retain()`, scan the complete key-ordered index, or perform reverse WAL
+reads. Commits, reverts, and recovery take an exclusive write guard.
 Each `IndexEntry` stores a `u32` value length. Encoded values are therefore
 limited to `u32::MAX` bytes; larger writes fail with checked
 `kvstore::ValueTooLarge` before their length is narrowed or a WAL record is

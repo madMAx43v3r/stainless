@@ -1200,14 +1200,10 @@ impl Resolver<'_> {
                 function.span,
             );
         }
-        let receiver = owner.map(|structure| StructReceiver {
-            structure,
-            mutable: !function.is_const,
-        });
-        let type_namespace = receiver.as_ref().map_or_else(
+        let type_namespace = owner.map_or_else(
             || namespace.to_vec(),
-            |receiver| {
-                let path = &self.model.structs[receiver.structure.0].path;
+            |owner| {
+                let path = &self.model.structs[owner.0].path;
                 path[..path.len().saturating_sub(1)].to_vec()
             },
         );
@@ -1232,6 +1228,56 @@ impl Resolver<'_> {
                 }
             })
             .collect::<Vec<_>>();
+        let signature = parameters
+            .iter()
+            .map(|parameter| canonical(&parameter.ty))
+            .collect::<Vec<_>>();
+        let existing_ids = self.function_sets.get(&path).cloned().unwrap_or_default();
+        let matches_static_declaration = declared_owner.is_none()
+            && owner.is_some()
+            && existing_ids.iter().any(|id| {
+                let existing = &self.model.functions[id.0];
+                existing.owner == owner
+                    && existing.receiver.is_none()
+                    && existing.has_member_declaration
+                    && existing
+                        .parameters
+                        .iter()
+                        .map(|parameter| &parameter.ty)
+                        .eq(parameters.iter().map(|parameter| &parameter.ty))
+            });
+        if function.is_static && declared_owner.is_none() {
+            self.push(
+                "RES045",
+                "`static` appears only on an in-body member declaration".to_owned(),
+                function.span,
+            );
+        }
+        let is_static = function.is_static || matches_static_declaration;
+        if is_static && function.is_const {
+            self.push(
+                "RES045",
+                "a static member function cannot have a trailing `const`".to_owned(),
+                function.span,
+            );
+        }
+        if is_static
+            && owner.is_some_and(|owner| {
+                self.model.structs[owner.0].kind == ast::UserTypeKind::Interface
+            })
+        {
+            self.push(
+                "RES045",
+                "interfaces cannot declare static member functions".to_owned(),
+                function.span,
+            );
+        }
+        let receiver = owner
+            .filter(|_| !is_static)
+            .map(|structure| StructReceiver {
+                structure,
+                mutable: !function.is_const,
+            });
         let mut return_type = self.resolve_type(
             &function.return_type,
             &type_namespace,
@@ -1269,12 +1315,6 @@ impl Resolver<'_> {
                 )),
             };
         }
-        let signature = parameters
-            .iter()
-            .map(|parameter| canonical(&parameter.ty))
-            .collect::<Vec<_>>();
-
-        let existing_ids = self.function_sets.get(&path).cloned().unwrap_or_default();
         for id in existing_ids {
             let existing = &self.model.functions[id.0];
             let existing_signature = existing
@@ -1382,6 +1422,7 @@ impl Resolver<'_> {
             parameters,
             return_type,
             throws,
+            owner,
             receiver,
             mangled_name,
             declarations: vec![function.span],
@@ -1487,7 +1528,7 @@ impl Resolver<'_> {
             }
         }
         for function in self.model.functions.clone() {
-            if function.receiver.is_some() && !function.has_member_declaration {
+            if function.owner.is_some() && !function.has_member_declaration {
                 self.push(
                     "RES051",
                     format!(
@@ -2115,10 +2156,10 @@ impl Resolver<'_> {
             return;
         };
         let symbol = self.model.functions[id.0].clone();
-        let function_namespace = symbol.receiver.as_ref().map_or_else(
+        let function_namespace = symbol.owner.map_or_else(
             || symbol.path[..symbol.path.len().saturating_sub(1)].to_vec(),
-            |receiver| {
-                let path = &self.model.structs[receiver.structure.0].path;
+            |owner| {
+                let path = &self.model.structs[owner.0].path;
                 path[..path.len().saturating_sub(1)].to_vec()
             },
         );
@@ -2138,10 +2179,8 @@ impl Resolver<'_> {
         }
         let mut context = FunctionContext {
             namespace: function_namespace,
-            type_parameters: symbol.receiver.as_ref().map_or_else(Vec::new, |receiver| {
-                self.model.structs[receiver.structure.0]
-                    .type_parameters
-                    .clone()
+            type_parameters: symbol.owner.map_or_else(Vec::new, |owner| {
+                self.model.structs[owner.0].type_parameters.clone()
             }),
             return_type: symbol.return_type,
             scopes: vec![initial_scope],
@@ -2195,6 +2234,29 @@ impl Resolver<'_> {
                     } else {
                         let actual =
                             self.resolve_expression(value, Some(&canonical(&expected)), context);
+                        if !expected.is_reference()
+                            && move_call_argument(value)
+                                .is_some_and(|source| local_return_move_source(source, context))
+                        {
+                            self.warn(
+                                "RES126",
+                                "redundant `move(...)` in return; this local is moved automatically"
+                                    .to_owned(),
+                                value.span,
+                            );
+                        }
+                        let actual = if !expected.is_reference()
+                            && !actual.ty.is_reference()
+                            && !self.is_copyable_type(&canonical(&expected))
+                            && local_return_move_source(value, context)
+                        {
+                            ExpressionInfo {
+                                ty: actual.ty,
+                                category: ValueCategory::Temporary,
+                            }
+                        } else {
+                            actual
+                        };
                         self.validate_binding(&expected, &actual, value.span, "return value");
                     }
                 } else if context.is_lambda && context.return_type != TypeRef::Void {
@@ -6899,6 +6961,17 @@ impl Resolver<'_> {
 
         let id = compatible[0];
         let symbol = self.model.functions[id.0].clone();
+        if symbol.receiver.is_some() {
+            self.push(
+                "RES127",
+                format!(
+                    "non-static member function `{}` requires an object receiver",
+                    display_path(&symbol.path)
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
         for ((parameter, argument), expression) in
             symbol.parameters.iter().zip(&actual).zip(arguments)
         {
@@ -6927,7 +7000,7 @@ impl Resolver<'_> {
         receiver: Option<(&ExpressionInfo, Span)>,
         context: &mut FunctionContext,
     ) -> (ExpressionInfo, Option<ResolvedCall>) {
-        let Some(candidates) =
+        let Some(mut candidates) =
             self.concrete_native_candidates(instance, style, name, arguments.len())
         else {
             for argument in arguments {
@@ -6970,6 +7043,34 @@ impl Resolver<'_> {
                 span,
             );
             return (error_info(), None);
+        }
+
+        let lambda_arity_candidates = candidates
+            .iter()
+            .filter(|candidate| {
+                candidate
+                    .parameter_types
+                    .iter()
+                    .zip(arguments)
+                    .all(|(expected, argument)| {
+                        let ExpressionKind::Lambda { parameters, .. } = &argument.kind else {
+                            return true;
+                        };
+                        match canonical_ref(expected) {
+                            TypeRef::Callback(callback) => {
+                                callback.parameters.len() == parameters.len()
+                            }
+                            TypeRef::Function(function) => {
+                                function.parameters.len() == parameters.len()
+                            }
+                            _ => false,
+                        }
+                    })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !lambda_arity_candidates.is_empty() {
+            candidates = lambda_arity_candidates;
         }
 
         let contextual = (candidates.len() == 1).then(|| {
@@ -8844,6 +8945,40 @@ impl Resolver<'_> {
     fn push(&mut self, code: &'static str, message: String, span: Span) {
         self.diagnostics
             .push(Diagnostic::semantic(code, message, span));
+    }
+
+    fn warn(&mut self, code: &'static str, message: String, span: Span) {
+        self.diagnostics
+            .push(Diagnostic::semantic_warning(code, message, span));
+    }
+}
+
+fn local_return_move_source(expression: &Expression, context: &FunctionContext) -> bool {
+    match &expression.kind {
+        ExpressionKind::Name(path) if path.segments.len() == 1 => context
+            .scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains_key(&path.segments[0])),
+        ExpressionKind::Parenthesized(inner) => local_return_move_source(inner, context),
+        _ => false,
+    }
+}
+
+fn move_call_argument(expression: &Expression) -> Option<&Expression> {
+    match &expression.kind {
+        ExpressionKind::Parenthesized(inner) => move_call_argument(inner),
+        ExpressionKind::Call { callee, arguments }
+            if arguments.len() == 1
+                && matches!(
+                    &callee.kind,
+                    ExpressionKind::Name(path)
+                        if matches!(path.segments.as_slice(), [name] if name == "move")
+                ) =>
+        {
+            arguments.first()
+        }
+        _ => None,
     }
 }
 

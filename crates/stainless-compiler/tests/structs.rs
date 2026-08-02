@@ -1,5 +1,46 @@
-use stainless_compiler::analyze;
 use stainless_compiler::interop::TypeRef;
+use stainless_compiler::{analyze, transpile};
+
+#[test]
+fn static_member_functions_are_called_without_an_object_receiver() {
+    let result = transpile(
+        r"struct Record {
+    i32 value;
+    static Record read(i32 value);
+    i32 write() const;
+};
+
+Record Record::read(i32 value) {
+    return Record{value};
+}
+
+i32 Record::write() const {
+    return value;
+}
+
+i32 round_trip() {
+    Record record = Record::read(7);
+    return record.write();
+}
+",
+    );
+
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:?}",
+        result.analysis.diagnostics
+    );
+    assert!(result.rust.is_some());
+    let read = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["Record", "read"])
+        .expect("static read function");
+    assert_eq!(read.owner, Some(result.analysis.semantics.structs[0].id));
+    assert!(read.receiver.is_none());
+}
 
 #[test]
 fn resolves_struct_layout_members_fields_and_data_inheritance() {

@@ -15,7 +15,7 @@ pub mod ownership;
 pub mod resolution;
 pub mod semantics;
 
-pub use diagnostic::{Diagnostic, DiagnosticPhase};
+pub use diagnostic::{Diagnostic, DiagnosticPhase, DiagnosticSeverity};
 
 /// Rust major/minor release described by the compiler-provided native bindings.
 pub const SUPPORTED_RUST_MINOR: &str = "1.97";
@@ -52,7 +52,7 @@ pub fn analyze_with_bindings(source: &str, bindings: &interop::NativeBindings) -
     let resolved = resolution::resolve(&ast, bindings);
     diagnostics.extend(resolved.diagnostics);
     let semantic_model = resolved.model;
-    if diagnostics.is_empty() {
+    if !diagnostics.iter().any(Diagnostic::is_error) {
         diagnostics.extend(ownership::validate(&ast, &semantic_model));
     }
     diagnostics.sort_by_key(|diagnostic| diagnostic.span);
@@ -127,7 +127,7 @@ pub fn transpile_with_bindings(
 }
 
 fn transpile_analysis(mut analysis: Analysis) -> TranspileResult {
-    if !analysis.diagnostics.is_empty() {
+    if analysis.diagnostics.iter().any(Diagnostic::is_error) {
         return TranspileResult {
             analysis,
             hir: None,

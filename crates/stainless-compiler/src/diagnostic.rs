@@ -15,6 +15,15 @@ pub enum DiagnosticPhase {
     Codegen,
 }
 
+/// Whether a diagnostic blocks code generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiagnosticSeverity {
+    /// Compilation cannot continue.
+    Error,
+    /// Compilation continues, but the source should be simplified or reviewed.
+    Warning,
+}
+
 /// A source diagnostic produced by the compiler.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Diagnostic {
@@ -22,6 +31,8 @@ pub struct Diagnostic {
     pub code: &'static str,
     /// Compiler phase.
     pub phase: DiagnosticPhase,
+    /// Error or non-blocking warning.
+    pub severity: DiagnosticSeverity,
     /// Human-readable explanation.
     pub message: String,
     /// Relevant source range.
@@ -33,6 +44,7 @@ impl Diagnostic {
         Self {
             code,
             phase: DiagnosticPhase::Syntax,
+            severity: DiagnosticSeverity::Error,
             message,
             span,
         }
@@ -42,6 +54,17 @@ impl Diagnostic {
         Self {
             code,
             phase: DiagnosticPhase::Semantic,
+            severity: DiagnosticSeverity::Error,
+            message,
+            span,
+        }
+    }
+
+    pub(crate) fn semantic_warning(code: &'static str, message: String, span: Span) -> Self {
+        Self {
+            code,
+            phase: DiagnosticPhase::Semantic,
+            severity: DiagnosticSeverity::Warning,
             message,
             span,
         }
@@ -51,6 +74,7 @@ impl Diagnostic {
         Self {
             code,
             phase: DiagnosticPhase::Ownership,
+            severity: DiagnosticSeverity::Error,
             message,
             span,
         }
@@ -60,6 +84,7 @@ impl Diagnostic {
         Self {
             code,
             phase: DiagnosticPhase::Hir,
+            severity: DiagnosticSeverity::Error,
             message,
             span,
         }
@@ -69,8 +94,15 @@ impl Diagnostic {
         Self {
             code,
             phase: DiagnosticPhase::Codegen,
+            severity: DiagnosticSeverity::Error,
             message,
             span,
         }
+    }
+
+    /// Returns whether this diagnostic prevents code generation.
+    #[must_use]
+    pub fn is_error(&self) -> bool {
+        self.severity == DiagnosticSeverity::Error
     }
 }

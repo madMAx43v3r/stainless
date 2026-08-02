@@ -14,7 +14,7 @@ i32 select(i32 left, i32 right) {
 // from select(i32, i32) only in value/reference passing semantics.
 
 String select(String left, String right) {
-    return move(left);
+    return left;
 }
 
 i32 inspect(const i32& value) {
@@ -37,7 +37,7 @@ i32 Selector::choose(i32 left, i32 right) const {
 }
 
 String Selector::choose(String left, String right) const {
-    return move(right);
+    return right;
 }
 
 i32 example() {

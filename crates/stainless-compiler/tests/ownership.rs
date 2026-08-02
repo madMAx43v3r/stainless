@@ -1,4 +1,46 @@
-use stainless_compiler::{DiagnosticPhase, analyze, transpile};
+use stainless_compiler::{DiagnosticPhase, DiagnosticSeverity, analyze, transpile};
+
+#[test]
+fn return_moves_owned_locals_implicitly_and_warns_for_explicit_move() {
+    let implicit = transpile(
+        r"use rust::String;
+
+String identity(String value) {
+    return value;
+}
+",
+    );
+    assert!(
+        implicit.analysis.diagnostics.is_empty(),
+        "{:?}",
+        implicit.analysis.diagnostics
+    );
+    assert!(implicit.rust.is_some());
+
+    let explicit = transpile(
+        r"use rust::String;
+
+String identity(String value) {
+    return move(value);
+}
+",
+    );
+    assert!(
+        explicit.rust.is_some(),
+        "{:?}",
+        explicit.analysis.diagnostics
+    );
+    assert!(explicit.analysis.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "RES126" && diagnostic.severity == DiagnosticSeverity::Warning
+    }));
+    assert!(
+        !explicit
+            .analysis
+            .diagnostics
+            .iter()
+            .any(stainless_compiler::Diagnostic::is_error)
+    );
+}
 
 #[test]
 fn detects_definite_and_control_flow_dependent_use_after_move() {
@@ -8,7 +50,7 @@ fn detects_definite_and_control_flow_dependent_use_after_move() {
 String invalid(String value) {
     String first = move(value);
     String second = move(value);
-    return move(second);
+    return second;
 }
 ",
     );
@@ -21,7 +63,7 @@ String invalid(String value, bool condition) {
     if (condition) {
         String consumed = move(value);
     }
-    return move(value);
+    return value;
 }
 ",
     );
@@ -51,7 +93,7 @@ String valid(String value, bool condition) {
         String consumed = move(value);
         value = "restored";
     }
-    return move(value);
+    return value;
 }
 "#;
     let result = transpile(source);
@@ -260,7 +302,7 @@ void invalid(String value) {
 Vec<i32> invalid(Vec<i32> values) {
     for (auto value : move(values)) {
     }
-    return move(values);
+    return values;
 }
 ",
     );
@@ -274,7 +316,7 @@ String invalid(String value) {
         String consumed = move(value);
         break;
     }
-    return move(value);
+    return value;
 }
 ",
     );

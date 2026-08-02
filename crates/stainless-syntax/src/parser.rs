@@ -386,6 +386,9 @@ impl Parser<'_> {
     fn parse_function(&mut self) {
         let node_kind = self.function_node_kind();
         self.start(node_kind);
+        if self.at(SyntaxKind::Identifier) && self.current_text() == Some("static") {
+            self.bump();
+        }
         self.eat(SyntaxKind::AsyncKw);
         self.parse_type(false);
         self.parse_qualified_name("expected a function name");

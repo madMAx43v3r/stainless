@@ -184,10 +184,13 @@ pub struct StaticConstant {
 }
 
 /// A function definition or declaration.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Function {
     /// Whether this member is publicly callable.
     pub is_public: bool,
+    /// Whether this is an associated function without an instance receiver.
+    pub is_static: bool,
     /// Whether calling this function produces an awaitable Rust future.
     pub is_async: bool,
     /// Possibly qualified source name.

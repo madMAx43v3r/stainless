@@ -348,9 +348,17 @@ impl Analyzer<'_> {
             }
             StatementKind::Return(value) => {
                 if let Some(value) = value {
-                    let origin = self.expression(value, Usage::Read);
-                    if self.returns_reference {
-                        self.validate_reference_return(origin, value.span);
+                    if !self.returns_reference
+                        && let Some(id) = named_binding(value, &self.state)
+                        && !self.state.bindings[id].ty.is_reference()
+                        && !is_copyable(&self.state.bindings[id].ty)
+                    {
+                        self.mark_moved(id, value.span);
+                    } else {
+                        let origin = self.expression(value, Usage::Read);
+                        if self.returns_reference {
+                            self.validate_reference_return(origin, value.span);
+                        }
                     }
                 }
                 false

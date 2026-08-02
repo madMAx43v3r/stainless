@@ -156,6 +156,8 @@ pub struct FunctionSymbol {
     pub return_type: TypeRef,
     /// Declared checked exception set.
     pub throws: Vec<StructId>,
+    /// Declaring user type, including for static associated functions.
+    pub owner: Option<StructId>,
     /// Implicit member receiver, absent for free functions.
     pub receiver: Option<StructReceiver>,
     /// Deterministic generated Rust name.
