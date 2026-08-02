@@ -1529,7 +1529,7 @@ void invalid_handler() {
 }
 
 #[test]
-fn declarations_must_agree_on_checked_exception_sets() {
+fn definitions_inherit_declared_checked_exception_sets() {
     let source = r"struct Failure : stainless::Exception {};
 
 struct Resource {
@@ -1537,12 +1537,13 @@ struct Resource {
 };
 
 Resource::Resource() {
+    throw Failure{};
 }
 
 i32 load() throws Failure;
 
 i32 load() {
-    return 1;
+    throw Failure{};
 }
 
 i32 uncaught_default_construction() {
@@ -1557,9 +1558,39 @@ i32 uncaught_default_construction() {
         .map(|diagnostic| diagnostic.code)
         .collect::<Vec<_>>();
 
+    assert!(!codes.contains(&"RES068"), "{:?}", analysis.diagnostics);
+    assert!(!codes.contains(&"RES069"), "{:?}", analysis.diagnostics);
+    assert!(codes.contains(&"RES075"), "{:?}", analysis.diagnostics);
+}
+
+#[test]
+fn explicit_definition_throws_must_match_the_declaration() {
+    let analysis = analyze(
+        r"struct Failure : stainless::Exception {};
+struct OtherFailure : stainless::Exception {};
+
+struct Resource {
+    Resource() throws Failure;
+};
+
+Resource::Resource() throws OtherFailure {
+}
+
+i32 load() throws Failure;
+
+i32 load() throws OtherFailure {
+    return 1;
+}
+",
+    );
+    let codes = analysis
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+
     assert!(codes.contains(&"RES068"), "{:?}", analysis.diagnostics);
     assert!(codes.contains(&"RES069"), "{:?}", analysis.diagnostics);
-    assert!(codes.contains(&"RES075"), "{:?}", analysis.diagnostics);
 }
 
 #[test]

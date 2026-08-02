@@ -226,7 +226,7 @@ u8 index_record_kind(const Vec<u8>& record) throws IndexCorrupt
     return decode_u8_at(record, 8);
 }
 
-InsertRecord InsertRecord::read(const Vec<u8>& record) throws IndexCorrupt
+InsertRecord InsertRecord::read(const Vec<u8>& record)
 {
     u64 record_size = u64(record.len());
     if (index_record_kind(record) != RecordKind::Insert || record_size < 37) {
@@ -256,7 +256,7 @@ InsertRecord InsertRecord::read(const Vec<u8>& record) throws IndexCorrupt
     };
 }
 
-CommitRecord CommitRecord::read(const Vec<u8>& record) throws IndexCorrupt
+CommitRecord CommitRecord::read(const Vec<u8>& record)
 {
     if (record.len() != 25 || index_record_kind(record) != RecordKind::Commit) {
         throw IndexCorrupt{
@@ -301,7 +301,7 @@ Vec<u8> read_index_record_at(
     return record;
 }
 
-Table::Table(const String& path) throws stainless::IoError
+Table::Table(const String& path)
     : data_log(open_log(path)),
       index_log(open_log(make_index_path(path))),
       state(initial_state())
@@ -309,7 +309,6 @@ Table::Table(const String& path) throws stainless::IoError
 }
 
 void Table::insert(Vec<u8> key, Vec<u8> value) const
-    throws ValueTooLarge, stainless::IoError
 {
     if (value.len() > Limits::MaxValueLength) {
         throw ValueTooLarge{
@@ -337,7 +336,7 @@ void Table::insert(Vec<u8> key, Vec<u8> value) const
         IndexEntry{insert.offset, insert.length});
 }
 
-bool Table::commit(u32 next_version) const throws stainless::IoError
+bool Table::commit(u32 next_version) const
 {
     auto guard = state.write();
     if (next_version <= guard.current_version) {
@@ -362,7 +361,6 @@ bool Table::commit(u32 next_version) const throws stainless::IoError
 }
 
 bool Table::revert(u32 version) const
-    throws IndexCorrupt, stainless::IoError
 {
     auto guard = state.write();
     if (version > guard.current_version) {
@@ -462,7 +460,7 @@ u32 Table::current_version() const
     return guard.current_version;
 }
 
-shared_nullptr<Value> Table::find(const Vec<u8>& key) const throws stainless::IoError
+shared_nullptr<Value> Table::find(const Vec<u8>& key) const
 {
     auto guard = state.read();
     bool found = false;
@@ -500,7 +498,7 @@ shared_ptr<Table> open_table(const String& path) throws stainless::IoError
     return table;
 }
 
-void Table::recover() const throws stainless::IoError
+void Table::recover() const
 {
     auto guard = state.write();
     u64 data_file_len = data_log.len();

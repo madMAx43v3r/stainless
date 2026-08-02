@@ -943,7 +943,10 @@ impl Resolver<'_> {
                 .eq(parameters.iter().map(|parameter| &parameter.ty));
             let has_definition = self.model.constructors[id.0].has_definition;
             let is_deleted = self.model.constructors[id.0].is_deleted;
-            let different_throws = self.model.constructors[id.0].throws != throws;
+            let definition_inherits_throws =
+                constructor.body.is_some() && constructor.throws.is_empty();
+            let different_throws =
+                !definition_inherits_throws && self.model.constructors[id.0].throws != throws;
             if !same_modes {
                 self.push(
                     "RES055",
@@ -1336,7 +1339,8 @@ impl Resolver<'_> {
             let different_return_type = existing.return_type != return_type;
             let duplicate_definition = existing.has_definition && function.body.is_some();
             let different_receiver = existing.receiver != receiver;
-            let different_throws = existing.throws != throws;
+            let definition_inherits_throws = function.body.is_some() && function.throws.is_empty();
+            let different_throws = !definition_inherits_throws && existing.throws != throws;
             let different_async = existing.is_async != function.is_async;
             if same_passing_modes {
                 if different_return_type {

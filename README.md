@@ -508,17 +508,17 @@ struct Record {
     Vec<u8> write() const;
 };
 
-Record Record::read(const Vec<u8>& bytes) throws ParseError {
+Record Record::read(const Vec<u8>& bytes) {
     // implementation
 }
 
 Record record = Record::read(bytes);
 ```
 
-`static` appears only on the in-body declaration, following C++ syntax. The
-out-of-body definition omits it. A static member has no `self` receiver, cannot
-have trailing `const`, and is called through `Type::function(...)`. Interfaces
-cannot declare static members.
+`static` and `throws` appear only on the in-body declaration. The out-of-body
+definition inherits both properties and omits them. A static member has no
+`self` receiver, cannot have trailing `const`, and is called through
+`Type::function(...)`. Interfaces cannot declare static members.
 
 ### Declaration syntax and contextual modifiers
 
@@ -935,7 +935,7 @@ public:
     Session(bool available) throws OpenError;
 };
 
-Session::Session(bool available) throws OpenError {
+Session::Session(bool available) {
     if (!available) {
         throw OpenError{/* ... */};
     }
@@ -945,10 +945,10 @@ Session::Session(bool available) throws OpenError {
 The `throws` clause has the same checking rules as a function's clause. Every
 checked exception raised by the constructor body, a delegated constructor, a
 struct data-base constructor, or a field initializer must be caught within the
-constructor or covered by its declared set. The declaration and out-of-type
-definition must have the same normalized set. Constructor overload selection
-continues to use only the exact canonical parameter types; `throws` does not
-distinguish overloads.
+constructor or covered by its declared set. The out-of-type definition inherits
+the declaration's normalized set, so it does not repeat `throws`. Constructor
+overload selection continues to use only the exact canonical parameter types;
+`throws` does not distinguish overloads.
 
 Construction is a throwing expression at its call site. The caller must catch
 or feed forward every declared constructor exception:
@@ -1391,19 +1391,20 @@ use rust::String;
 
 Config load(const String& path) throws IoError, ParseError;
 
-Config load(const String& path) throws IoError, ParseError {
+Config load(const String& path) {
     String source = read_file(path);
     return parse_config(move(source));
 }
 ```
 
-For a const member function, `throws` follows the C++-style member qualifier:
+For a const member-function declaration, `throws` follows the C++-style member
+qualifier:
 
 ```cpp
 Config Loader::load(const String& path) const throws IoError;
 ```
 
-Constructors place the same clause after their parameter list:
+Constructor declarations place the same clause after their parameter list:
 
 ```cpp
 Loader::Loader(const String& path) throws IoError;
@@ -1482,9 +1483,11 @@ The `throws` clause is an unordered set of canonical exception-struct types.
 Duplicate entries and entries made redundant by another listed data base are
 rejected. A declared base exception covers every exception derived from it, as
 in Java; otherwise generated ordering and diagnostics use fully qualified type
-identity so they are deterministic. Omitting `throws` means the exception set
-is empty: the function cannot allow any Stainless exception to escape.
-`noexcept` is therefore redundant and is not part of the initial syntax.
+identity so they are deterministic. Omitting `throws` from a declaration means
+the exception set is empty: the function cannot allow any Stainless exception
+to escape. A definition matched to an earlier declaration instead inherits its
+declared exception set. `noexcept` is therefore redundant and is not part of
+the initial syntax.
 
 An ordinary call keeps C++/Java syntax. There is no source-level Rust `?`
 operator:
@@ -1628,11 +1631,12 @@ checked `stainless::ThreadError`, as described below.
 
 The `throws` set is part of Stainless type checking and interface compatibility
 but not of overload identity or deterministic overload mangling. Two
-declarations cannot overload only by changing `throws`, and an out-of-type
-definition must match its declaration's normalized set. An interface
-implementation may expose a subset or derived specialization of the interface
-function's declared exceptions; generated trait code uses the same
-`__ExceptionBox` carrier at the dispatch boundary.
+declarations cannot overload only by changing `throws`. An out-of-type
+definition inherits its declaration's normalized set and does not repeat the
+clause. If a definition nevertheless spells an explicit `throws` clause, it
+must match. An interface implementation may expose a subset or derived
+specialization of the interface function's declared exceptions; generated
+trait code uses the same `__ExceptionBox` carrier at the dispatch boundary.
 
 Rust functions returning `Result<T, E>` retain that type in Stainless.
 The `unwrap()` method on native `rust::Result<T, E>` is compiler-adapted: it

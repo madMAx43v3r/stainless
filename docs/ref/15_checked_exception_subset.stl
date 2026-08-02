@@ -17,7 +17,7 @@ struct Resource {
     Resource(i32 value, bool fail) throws OpenError;
 };
 
-Resource::Resource(i32 value, bool fail) throws OpenError
+Resource::Resource(i32 value, bool fail)
     : value(value)
 {
     if (fail) {

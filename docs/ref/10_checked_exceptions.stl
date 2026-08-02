@@ -47,7 +47,7 @@ Config parse_config(String source, bool valid) throws ParseError
     return Config{1};
 }
 
-Session::Session(bool available) throws IoError
+Session::Session(bool available)
 {
     if (!available) {
         throw IoError{

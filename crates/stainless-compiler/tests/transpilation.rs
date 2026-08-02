@@ -488,7 +488,7 @@ public:
     void run() throws Failure;
 };
 
-void Worker::run() throws Failure {
+void Worker::run() {
 }
 
 i32 interface_error_behavior() {
@@ -704,7 +704,7 @@ struct Resource {
     Resource(bool fail) throws AllocationError;
 };
 
-Resource::Resource(bool fail) throws AllocationError : value(7) {
+Resource::Resource(bool fail) : value(7) {
     if (fail) {
         throw AllocationError{stainless::Exception("allocation failed")};
     }
@@ -1347,7 +1347,7 @@ struct Resource {
     Resource(i32 value, bool fail) throws OpenError;
 };
 
-Resource::Resource(i32 value, bool fail) throws OpenError
+Resource::Resource(i32 value, bool fail)
     : value(value) {
     if (fail) {
         throw OpenError{
