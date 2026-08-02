@@ -10,6 +10,12 @@ syncs an explicit commit record before advancing the version, while
 above that boundary. Startup validates record lengths and checksums, restores
 the last committed/reverted state, and truncates incomplete or uncommitted log
 tail data.
+Every fixed-width WAL integer is big-endian, including record sizes, versions,
+key/value lengths, and checksums. The Stainless implementation delegates these
+operations to Rust's optimized fixed-width byte conversions through
+`stainless::BigEndian`. WAL record discriminants are grouped as typed
+`static const u8` members of `RecordKind`, so their byte representation remains
+explicit without consuming storage in a `RecordKind` value.
 
 The store owns one read/write `File` handle. Its index and version metadata are
 kept in RAM and rebuilt from the append-only log at startup. The index is a

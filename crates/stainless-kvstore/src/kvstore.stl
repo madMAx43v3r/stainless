@@ -10,6 +10,7 @@ use rust::{Map, String, Vec};
 use rust::std::fs;
 use rust::std::fs::{File, OpenOptions};
 use rust::std::thread;
+use stainless::BigEndian;
 
 namespace kvstore {
 
@@ -22,6 +23,12 @@ struct IndexEntry {
     u32 length;
 };
 
+struct RecordKind {
+    static const u8 Insert = 0;
+    static const u8 Commit = 1;
+    static const u8 Revert = 2;
+};
+
 struct ValueTooLarge : stainless::Exception {
 };
 
@@ -30,48 +37,6 @@ struct StoreState {
     u32 current_version;
     u64 log_end;
 };
-
-void push_u32(Vec<u8>& output, u32 value) {
-    for (usize index = 0; index < 4; index += 1) {
-        output.push(u8(value % 256));
-        value /= 256;
-    }
-}
-
-void push_u64(Vec<u8>& output, u64 value) {
-    for (usize index = 0; index < 8; index += 1) {
-        output.push(u8(value % 256));
-        value /= 256;
-    }
-}
-
-u32 decode_u32(const Vec<u8>& bytes) {
-    u32 value = 0;
-    u32 factor = 1;
-    usize index = 0;
-    for (auto byte : bytes) {
-        value += u32(byte) * factor;
-        index += 1;
-        if (index < bytes.len()) {
-            factor *= 256;
-        }
-    }
-    return value;
-}
-
-u64 decode_u64(const Vec<u8>& bytes) {
-    u64 value = 0;
-    u64 factor = 1;
-    usize index = 0;
-    for (auto byte : bytes) {
-        value += u64(byte) * factor;
-        index += 1;
-        if (index < bytes.len()) {
-            factor *= 256;
-        }
-    }
-    return value;
-}
 
 u32 record_checksum(const Vec<u8>& payload) {
     u32 checksum = 1;
@@ -88,9 +53,9 @@ Vec<u8> make_record(
     const Vec<u8>& value) {
     Vec<u8> payload;
     payload.push(kind);
-    push_u32(payload, version);
-    push_u64(payload, u64(key.len()));
-    push_u32(payload, u32(value.len()));
+    BigEndian::write_u32(payload, version);
+    BigEndian::write_u64(payload, u64(key.len()));
+    BigEndian::write_u32(payload, u32(value.len()));
     for (auto byte : key) {
         payload.push(byte);
     }
@@ -100,9 +65,9 @@ Vec<u8> make_record(
 
     u32 checksum = record_checksum(payload);
     Vec<u8> record;
-    push_u64(record, u64(payload.len()) + 12);
+    BigEndian::write_u64(record, u64(payload.len()) + 12);
     record.append(payload);
-    push_u32(record, checksum);
+    BigEndian::write_u32(record, checksum);
     return move(record);
 }
 
@@ -155,7 +120,7 @@ void Table::insert(Vec<u8> key, Vec<u8> value) const
     auto guard = state.write();
     u32 version = guard.current_version;
     Vec<u8> record = make_record(
-        0,
+        RecordKind::Insert,
         version,
         key,
         value);
@@ -173,7 +138,7 @@ bool Table::commit(u32 next_version) const throws stainless::IoError {
         return false;
     }
     Vec<u8> record = make_record(
-        1,
+        RecordKind::Commit,
         next_version,
         empty_bytes(),
         empty_bytes());
@@ -190,7 +155,7 @@ bool Table::revert(u32 version) const throws stainless::IoError {
         return false;
     }
     Vec<u8> record = make_record(
-        2,
+        RecordKind::Revert,
         version,
         empty_bytes(),
         empty_bytes());
@@ -259,27 +224,27 @@ void Table::recover() const throws stainless::IoError {
     Map<tuple<Vec<u8>, u32>, IndexEntry> committed;
 
     for (; offset + 29 <= file_size;) {
-        u64 record_size = decode_u64(log.pread_exact(offset, 8));
+        u64 record_size = BigEndian::read_u64(log.pread_exact(offset, 8));
         if (record_size < 29 || record_size > file_size - offset) {
             break;
         }
         u64 payload_size = record_size - 12;
         Vec<u8> payload = log.pread_exact(offset + 8, usize(payload_size));
-        u32 expected_checksum = decode_u32(
+        u32 expected_checksum = BigEndian::read_u32(
             log.pread_exact(offset + 8 + payload_size, 4));
         if (record_checksum(payload) != expected_checksum) {
             break;
         }
 
-        u8 kind = u8(decode_u32(log.pread_exact(offset + 8, 1)));
-        u32 version = decode_u32(log.pread_exact(offset + 9, 4));
-        u64 key_length = decode_u64(log.pread_exact(offset + 13, 8));
-        u32 value_length = decode_u32(log.pread_exact(offset + 21, 4));
+        u8 kind = BigEndian::read_u8(log.pread_exact(offset + 8, 1));
+        u32 version = BigEndian::read_u32(log.pread_exact(offset + 9, 4));
+        u64 key_length = BigEndian::read_u64(log.pread_exact(offset + 13, 8));
+        u32 value_length = BigEndian::read_u32(log.pread_exact(offset + 21, 4));
         if (record_size != 29 + key_length + u64(value_length)) {
             break;
         }
 
-        if (kind == 0) {
+        if (kind == RecordKind::Insert) {
             Vec<u8> key = log.pread_exact(offset + 25, usize(key_length));
             working.insert(
                 tuple<Vec<u8>, u32>(move(key), version),
@@ -287,11 +252,11 @@ void Table::recover() const throws stainless::IoError {
                     offset + 25 + key_length,
                     value_length
                 });
-        } else if (kind == 1) {
+        } else if (kind == RecordKind::Commit) {
             committed = working.clone();
             committed_version = version;
             committed_end = offset + record_size;
-        } else if (kind == 2) {
+        } else if (kind == RecordKind::Revert) {
             working.retain(
                 [version](
                     const tuple<Vec<u8>, u32>& index_key,
@@ -323,7 +288,7 @@ Vec<u8> one_byte(u8 value) {
 
 Vec<u8> test_key(u64 value) {
     Vec<u8> bytes;
-    push_u64(bytes, value);
+    BigEndian::write_u64(bytes, value);
     return move(bytes);
 }
 
