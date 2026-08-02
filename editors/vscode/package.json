@@ -2,7 +2,7 @@
   "name": "stainless-language",
   "displayName": "Stainless Language Support",
   "description": "Syntax highlighting and basic editing support for the Stainless programming language.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "madmax43v3r",
   "license": "MIT",
   "engines": {

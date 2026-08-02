@@ -6,6 +6,8 @@
     { "include": "#strings" },
     { "include": "#reserved-identifiers" },
     { "include": "#declarations" },
+    { "include": "#generic-types" },
+    { "include": "#tuple-projections" },
     { "include": "#numbers" },
     { "include": "#constants" },
     { "include": "#primitive-types" },
@@ -107,7 +109,21 @@
     "declarations": {
       "patterns": [
         {
-          "match": "\\b(struct|class|interface)(\\s+)(?:(sealed)(\\s+))?([A-Za-z_][A-Za-z0-9_]*)",
+          "name": "meta.declaration.type.generic.stainless",
+          "begin": "\\b(struct|class|interface)(\\s+)(?:(sealed|native)(\\s+))?([A-Za-z_][A-Za-z0-9_]*)(?=\\s*<)",
+          "beginCaptures": {
+            "1": { "name": "storage.type.declaration.stainless" },
+            "3": { "name": "storage.modifier.stainless" },
+            "5": { "name": "entity.name.type.stainless" }
+          },
+          "end": "(?=\\{|:|;)",
+          "patterns": [
+            { "include": "#generic-parameters" },
+            { "include": "#comments" }
+          ]
+        },
+        {
+          "match": "\\b(struct|class|interface)(\\s+)(?:(sealed|native)(\\s+))?([A-Za-z_][A-Za-z0-9_]*)",
           "captures": {
             "1": { "name": "storage.type.declaration.stainless" },
             "3": { "name": "storage.modifier.stainless" },
@@ -119,6 +135,71 @@
           "captures": {
             "1": { "name": "keyword.other.declaration.stainless" },
             "3": { "name": "entity.name.namespace.stainless" }
+          }
+        }
+      ]
+    },
+    "generic-parameters": {
+      "patterns": [
+        {
+          "name": "meta.type.parameters.stainless",
+          "begin": "<",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.typeparameters.begin.stainless" }
+          },
+          "end": ">",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.typeparameters.end.stainless" }
+          },
+          "patterns": [
+            { "include": "#generic-parameters" },
+            {
+              "name": "entity.name.type.parameter.stainless",
+              "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+            },
+            {
+              "name": "punctuation.separator.comma.stainless",
+              "match": ","
+            }
+          ]
+        }
+      ]
+    },
+    "generic-types": {
+      "patterns": [
+        {
+          "name": "meta.type.generic.stainless",
+          "begin": "\\b(tuple|unique_ptr|unique_nullptr|shared_ptr|shared_nullptr|weak_ptr|atomic_ptr|atomic_nullptr|optional|function|function_mut|mutex|rwlock|[A-Z][A-Za-z0-9_]*)\\b(\\s*)(<)",
+          "beginCaptures": {
+            "1": { "name": "support.type.generic.stainless" },
+            "3": { "name": "punctuation.definition.typearguments.begin.stainless" }
+          },
+          "end": ">",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.typearguments.end.stainless" }
+          },
+          "patterns": [
+            { "include": "#comments" },
+            { "include": "#generic-types" },
+            { "include": "#primitive-types" },
+            { "include": "#library-types" },
+            { "include": "#namespace-paths" },
+            { "include": "#type-names" },
+            { "include": "#keywords" },
+            { "include": "#numbers" },
+            { "include": "#operators" },
+            { "include": "#punctuation" }
+          ]
+        }
+      ]
+    },
+    "tuple-projections": {
+      "patterns": [
+        {
+          "match": "(\\.)([0-9][0-9_]*)(?![A-Za-z0-9_])",
+          "captures": {
+            "1": { "name": "punctuation.accessor.stainless" },
+            "2": { "name": "variable.other.member.tuple.stainless" }
           }
         }
       ]
@@ -167,11 +248,11 @@
       "patterns": [
         {
           "name": "support.type.ownership.stainless",
-          "match": "\\b(?:unique_ptr|unique_nullptr|shared_ptr|shared_nullptr|weak_ptr|atomic_ptr|atomic_nullptr|optional|function|function_mut)\\b"
+          "match": "\\b(?:unique_ptr|unique_nullptr|shared_ptr|shared_nullptr|weak_ptr|atomic_ptr|atomic_nullptr|optional|function|function_mut|mutex|rwlock)\\b"
         },
         {
           "name": "support.type.native.stainless",
-          "match": "\\b(?:String|Vec|Option|Result)\\b"
+          "match": "\\b(?:tuple|String|Vec|List|Queue|Map|MultiMap|Set|Option|Result)\\b"
         }
       ]
     },
@@ -214,7 +295,7 @@
       "patterns": [
         {
           "name": "support.function.builtin.stainless",
-          "match": "\\b(?:require|make_unique|make_shared)(?=\\s*(?:<[^<>\\n]*>)?\\s*\\()"
+          "match": "\\b(?:require|make_unique|make_shared)(?=\\s*(?:<|\\())"
         }
       ]
     },
@@ -234,7 +315,7 @@
       "patterns": [
         {
           "name": "entity.name.function.call.stainless",
-          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*(?:<[^<>\\n]*>)?\\s*\\()"
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*(?:<|\\())"
         }
       ]
     },
