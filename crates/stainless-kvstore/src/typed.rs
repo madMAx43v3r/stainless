@@ -91,6 +91,7 @@ impl<K: OrderedKey, V: Codec> Table<K, V> {
     pub fn insert(&self, key: K, value: V) -> Result<(), Error> {
         let key = key.encode()?;
         let value = value.encode()?;
+        checked_value_length(value.len())?;
         stainless_kvstore_insert_raw(Arc::clone(&self.raw), key, value).map_err(stainless_error)
     }
 
@@ -138,6 +139,10 @@ impl<K: OrderedKey, V: Codec> Table<K, V> {
 
 fn stainless_error(error: __StainlessExceptionBox) -> Error {
     Error::new(error.to_string())
+}
+
+fn checked_value_length(length: usize) -> Result<u32, Error> {
+    u32::try_from(length).map_err(|_| Error::new("encoded value exceeds the u32 length limit"))
 }
 
 impl Codec for bool {
@@ -302,4 +307,20 @@ fn take_segment(input: &[u8], offset: &mut usize) -> Result<Vec<u8>, Error> {
         }
     }
     Err(Error::new("unterminated tuple segment"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checked_value_length;
+
+    #[test]
+    fn value_lengths_are_limited_to_u32() {
+        assert_eq!(
+            checked_value_length(u32::MAX as usize).expect("u32::MAX must fit"),
+            u32::MAX
+        );
+
+        #[cfg(target_pointer_width = "64")]
+        assert!(checked_value_length((u32::MAX as usize) + 1).is_err());
+    }
 }

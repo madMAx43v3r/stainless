@@ -17,63 +17,66 @@ struct Value {
     Vec<u8> bytes;
 };
 
-struct ValueLocation {
+struct IndexEntry {
     u64 offset;
-    usize length;
+    u32 length;
+};
+
+struct ValueTooLarge : stainless::Exception {
 };
 
 struct StoreState {
-    Map<tuple<Vec<u8>, u32>, ValueLocation> index;
+    Map<tuple<Vec<u8>, u32>, IndexEntry> index;
     u32 current_version;
     u64 log_end;
 };
 
 void push_u32(Vec<u8>& output, u32 value) {
-    for (usize index = 0usize; index < 4usize; index += 1usize) {
-        output.push(u8(value % 256u32));
-        value /= 256u32;
+    for (usize index = 0; index < 4; index += 1) {
+        output.push(u8(value % 256));
+        value /= 256;
     }
 }
 
 void push_u64(Vec<u8>& output, u64 value) {
-    for (usize index = 0usize; index < 8usize; index += 1usize) {
-        output.push(u8(value % 256u64));
-        value /= 256u64;
+    for (usize index = 0; index < 8; index += 1) {
+        output.push(u8(value % 256));
+        value /= 256;
     }
 }
 
 u32 decode_u32(const Vec<u8>& bytes) {
-    u32 value = 0u32;
-    u32 factor = 1u32;
-    usize index = 0usize;
+    u32 value = 0;
+    u32 factor = 1;
+    usize index = 0;
     for (auto byte : bytes) {
         value += u32(byte) * factor;
-        index += 1usize;
+        index += 1;
         if (index < bytes.len()) {
-            factor *= 256u32;
+            factor *= 256;
         }
     }
     return value;
 }
 
 u64 decode_u64(const Vec<u8>& bytes) {
-    u64 value = 0u64;
-    u64 factor = 1u64;
-    usize index = 0usize;
+    u64 value = 0;
+    u64 factor = 1;
+    usize index = 0;
     for (auto byte : bytes) {
         value += u64(byte) * factor;
-        index += 1usize;
+        index += 1;
         if (index < bytes.len()) {
-            factor *= 256u64;
+            factor *= 256;
         }
     }
     return value;
 }
 
 u32 record_checksum(const Vec<u8>& payload) {
-    u32 checksum = 1u32;
+    u32 checksum = 1;
     for (auto byte : payload) {
-        checksum = (checksum + u32(byte)) % 65521u32;
+        checksum = (checksum + u32(byte)) % 65521;
     }
     return checksum;
 }
@@ -87,7 +90,7 @@ Vec<u8> make_record(
     payload.push(kind);
     push_u32(payload, version);
     push_u64(payload, u64(key.len()));
-    push_u64(payload, u64(value.len()));
+    push_u32(payload, u32(value.len()));
     for (auto byte : key) {
         payload.push(byte);
     }
@@ -97,7 +100,7 @@ Vec<u8> make_record(
 
     u32 checksum = record_checksum(payload);
     Vec<u8> record;
-    push_u64(record, u64(payload.len()) + 12u64);
+    push_u64(record, u64(payload.len()) + 12);
     record.append(payload);
     push_u32(record, checksum);
     return move(record);
@@ -109,8 +112,8 @@ Vec<u8> empty_bytes() {
 }
 
 StoreState initial_state() {
-    Map<tuple<Vec<u8>, u32>, ValueLocation> index;
-    StoreState state = StoreState{move(index), 0u32, 0u64};
+    Map<tuple<Vec<u8>, u32>, IndexEntry> index;
+    StoreState state = StoreState{move(index), 0, 0};
     return state;
 }
 
@@ -130,7 +133,8 @@ public:
     Table(const String& path) throws stainless::IoError;
 
     void recover() const throws stainless::IoError;
-    void insert(Vec<u8> key, Vec<u8> value) const throws stainless::IoError;
+    void insert(Vec<u8> key, Vec<u8> value) const
+        throws ValueTooLarge, stainless::IoError;
     bool commit(u32 next_version) const throws stainless::IoError;
     bool revert(u32 version) const throws stainless::IoError;
     u32 current_version() const;
@@ -141,20 +145,26 @@ Table::Table(const String& path) throws stainless::IoError
     : log(open_log(path)), state(initial_state()) {
 }
 
-void Table::insert(Vec<u8> key, Vec<u8> value) const throws stainless::IoError {
+void Table::insert(Vec<u8> key, Vec<u8> value) const
+    throws ValueTooLarge, stainless::IoError {
+    if (value.len() > usize(4294967295u32)) {
+        throw ValueTooLarge{
+            stainless::Exception("encoded value exceeds the u32 length limit")
+        };
+    }
     auto guard = state.write();
     u32 version = guard.current_version;
     Vec<u8> record = make_record(
-        0u8,
+        0,
         version,
         key,
         value);
-    u64 value_offset = guard.log_end + 29u64 + u64(key.len());
+    u64 value_offset = guard.log_end + 25 + u64(key.len());
     log.pwrite_all(guard.log_end, record);
     guard.log_end += u64(record.len());
     guard.index.insert(
         tuple<Vec<u8>, u32>(move(key), version),
-        ValueLocation{value_offset, value.len()});
+        IndexEntry{value_offset, u32(value.len())});
 }
 
 bool Table::commit(u32 next_version) const throws stainless::IoError {
@@ -163,7 +173,7 @@ bool Table::commit(u32 next_version) const throws stainless::IoError {
         return false;
     }
     Vec<u8> record = make_record(
-        1u8,
+        1,
         next_version,
         empty_bytes(),
         empty_bytes());
@@ -180,7 +190,7 @@ bool Table::revert(u32 version) const throws stainless::IoError {
         return false;
     }
     Vec<u8> record = make_record(
-        2u8,
+        2,
         version,
         empty_bytes(),
         empty_bytes());
@@ -191,7 +201,7 @@ bool Table::revert(u32 version) const throws stainless::IoError {
     guard.index.retain(
         [version](
             const tuple<Vec<u8>, u32>& index_key,
-            const ValueLocation& _location) {
+            const IndexEntry& _location) {
             return index_key.1 < version;
         });
     guard.current_version = version;
@@ -206,11 +216,11 @@ u32 Table::current_version() const {
 shared_nullptr<Value> Table::find(const Vec<u8>& key) const throws stainless::IoError {
     auto guard = state.read();
     bool found = false;
-    u64 best_offset = 0u64;
-    usize best_length = 0usize;
+    u64 best_offset = 0;
+    u32 best_length = 0;
     u32 current_version = guard.current_version;
 
-    tuple<Vec<u8>, u32> lower = tuple<Vec<u8>, u32>(key.clone(), 0u32);
+    tuple<Vec<u8>, u32> lower = tuple<Vec<u8>, u32>(key.clone(), 0);
     tuple<Vec<u8>, u32> upper = tuple<Vec<u8>, u32>(
         key.clone(),
         current_version);
@@ -221,7 +231,7 @@ shared_nullptr<Value> Table::find(const Vec<u8>& key) const throws stainless::Io
          &best_offset,
          &best_length](
             const tuple<Vec<u8>, u32>& _index_key,
-            const ValueLocation& location) {
+            const IndexEntry& location) {
             found = true;
             best_offset = location.offset;
             best_length = location.length;
@@ -230,7 +240,7 @@ shared_nullptr<Value> Table::find(const Vec<u8>& key) const throws stainless::Io
         return nullptr;
     }
     return shared_nullptr<Value>(
-        make_shared<Value>{log.pread_exact(best_offset, best_length)});
+        make_shared<Value>{log.pread_exact(best_offset, usize(best_length))});
 }
 
 shared_ptr<Table> open_table(const String& path) throws stainless::IoError {
@@ -242,50 +252,50 @@ shared_ptr<Table> open_table(const String& path) throws stainless::IoError {
 void Table::recover() const throws stainless::IoError {
     auto guard = state.write();
     u64 file_size = log.len();
-    u64 offset = 0u64;
-    u64 committed_end = 0u64;
-    u32 committed_version = 0u32;
-    Map<tuple<Vec<u8>, u32>, ValueLocation> working;
-    Map<tuple<Vec<u8>, u32>, ValueLocation> committed;
+    u64 offset = 0;
+    u64 committed_end = 0;
+    u32 committed_version = 0;
+    Map<tuple<Vec<u8>, u32>, IndexEntry> working;
+    Map<tuple<Vec<u8>, u32>, IndexEntry> committed;
 
-    for (; offset + 33u64 <= file_size;) {
-        u64 record_size = decode_u64(log.pread_exact(offset, 8usize));
-        if (record_size < 33u64 || record_size > file_size - offset) {
+    for (; offset + 29 <= file_size;) {
+        u64 record_size = decode_u64(log.pread_exact(offset, 8));
+        if (record_size < 29 || record_size > file_size - offset) {
             break;
         }
-        u64 payload_size = record_size - 12u64;
-        Vec<u8> payload = log.pread_exact(offset + 8u64, usize(payload_size));
+        u64 payload_size = record_size - 12;
+        Vec<u8> payload = log.pread_exact(offset + 8, usize(payload_size));
         u32 expected_checksum = decode_u32(
-            log.pread_exact(offset + 8u64 + payload_size, 4usize));
+            log.pread_exact(offset + 8 + payload_size, 4));
         if (record_checksum(payload) != expected_checksum) {
             break;
         }
 
-        u8 kind = u8(decode_u32(log.pread_exact(offset + 8u64, 1usize)));
-        u32 version = decode_u32(log.pread_exact(offset + 9u64, 4usize));
-        u64 key_length = decode_u64(log.pread_exact(offset + 13u64, 8usize));
-        u64 value_length = decode_u64(log.pread_exact(offset + 21u64, 8usize));
-        if (record_size != 33u64 + key_length + value_length) {
+        u8 kind = u8(decode_u32(log.pread_exact(offset + 8, 1)));
+        u32 version = decode_u32(log.pread_exact(offset + 9, 4));
+        u64 key_length = decode_u64(log.pread_exact(offset + 13, 8));
+        u32 value_length = decode_u32(log.pread_exact(offset + 21, 4));
+        if (record_size != 29 + key_length + u64(value_length)) {
             break;
         }
 
-        if (kind == 0u8) {
-            Vec<u8> key = log.pread_exact(offset + 29u64, usize(key_length));
+        if (kind == 0) {
+            Vec<u8> key = log.pread_exact(offset + 25, usize(key_length));
             working.insert(
                 tuple<Vec<u8>, u32>(move(key), version),
-                ValueLocation{
-                    offset + 29u64 + key_length,
-                    usize(value_length)
+                IndexEntry{
+                    offset + 25 + key_length,
+                    value_length
                 });
-        } else if (kind == 1u8) {
+        } else if (kind == 1) {
             committed = working.clone();
             committed_version = version;
             committed_end = offset + record_size;
-        } else if (kind == 2u8) {
+        } else if (kind == 2) {
             working.retain(
                 [version](
                     const tuple<Vec<u8>, u32>& index_key,
-                    const ValueLocation& _location) {
+                    const IndexEntry& _location) {
                     return index_key.1 < version;
                 });
             committed = working.clone();
@@ -320,7 +330,7 @@ Vec<u8> test_key(u64 value) {
 void insert_bytes(
     shared_ptr<Table> table,
     Vec<u8> key,
-    Vec<u8> value) throws stainless::IoError {
+    Vec<u8> value) throws ValueTooLarge, stainless::IoError {
     table.insert(move(key), move(value));
 }
 
@@ -349,16 +359,17 @@ bool value_is(shared_nullptr<Value> maybe, u8 expected) {
         return false;
     }
     shared_ptr<Value> value = shared_ptr<Value>(maybe);
-    return value.bytes.len() == 1usize && value.bytes.contains(expected);
+    return value.bytes.len() == 1 && value.bytes.contains(expected);
 }
 
-void write_history(const String& path) throws stainless::IoError {
+void write_history(const String& path)
+    throws ValueTooLarge, stainless::IoError {
     shared_ptr<Table> table = open_table(path);
-    table.insert(test_key(7u64), one_byte(10u8));
-    table.commit(1u32);
-    table.insert(test_key(7u64), one_byte(20u8));
-    table.commit(2u32);
-    table.revert(1u32);
+    table.insert(test_key(7), one_byte(10));
+    table.commit(1);
+    table.insert(test_key(7), one_byte(20));
+    table.commit(2);
+    table.revert(1);
 }
 
 struct ReaderState {
@@ -369,7 +380,7 @@ void read_in_thread(
     shared_ptr<Table> table,
     shared_ptr<mutex<ReaderState>> result) {
     try {
-        if (value_is(table.find(test_key(7u64)), 10u8)) {
+        if (value_is(table.find(test_key(7)), 10)) {
             auto guard = result.lock();
             guard.successful += 1;
         }
@@ -378,15 +389,15 @@ void read_in_thread(
 }
 
 i32 self_test(const String& path)
-    throws stainless::IoError, stainless::ThreadError {
+    throws ValueTooLarge, stainless::IoError, stainless::ThreadError {
     if (fs::exists(path)) {
         fs::remove_file(path);
     }
     write_history(path);
 
     shared_ptr<Table> recovered = open_table(path);
-    if (recovered.current_version() != 1u32 ||
-        !value_is(recovered.find(test_key(7u64)), 10u8)) {
+    if (recovered.current_version() != 1 ||
+        !value_is(recovered.find(test_key(7)), 10)) {
         return 1;
     }
 

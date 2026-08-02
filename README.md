@@ -2425,7 +2425,7 @@ uncommitted tail data.
 
 The index is held in RAM and rebuilt by replaying the append-only log at open.
 It is a Stainless
-`Map<tuple<Vec<u8>, u32>, ValueLocation>`, lowering to Rust's ordered
+`Map<tuple<Vec<u8>, u32>, IndexEntry>`, lowering to Rust's ordered
 `BTreeMap`. The compound key is the sole version metadata: it orders every
 logical key by version, and inserting the same key again within one version
 replaces that version's location. `find()` uses the map's non-escaping
@@ -2433,6 +2433,10 @@ replaces that version's location. `find()` uses the map's non-escaping
 and `(key, current_version)` in O(log n), then calls `pread_exact()` under the
 same shared `rwlock<StoreState>` guard. It never copies or scans the index.
 Commits, reverts, and recovery take an exclusive write guard.
+Each `IndexEntry` stores a `u32` value length. Encoded values are therefore
+limited to `u32::MAX` bytes; larger writes fail with checked
+`kvstore::ValueTooLarge` before their length is narrowed or a WAL record is
+written.
 
 The crate exposes `Table<K, V>` to Rust projects. `K` implements
 `OrderedKey`, whose persistent encoding must preserve `Ord`, and `V` implements

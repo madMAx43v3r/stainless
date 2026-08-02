@@ -13,7 +13,7 @@ tail data.
 
 The store owns one read/write `File` handle. Its index and version metadata are
 kept in RAM and rebuilt from the append-only log at startup. The index is a
-Stainless `Map<tuple<Vec<u8>, u32>, ValueLocation>`, backed by Rust's ordered
+Stainless `Map<tuple<Vec<u8>, u32>, IndexEntry>`, backed by Rust's ordered
 `BTreeMap`. Its compound key is the sole version metadata and orders each
 logical key by version; another write to the same key in one version replaces
 that version's location. `with_last_in_range()` selects the greatest entry in
@@ -22,8 +22,10 @@ callback, so lookups neither scan nor clone the index. An internal
 `rwlock<StoreState>` lets multiple lookups run concurrently while mutations,
 commits, reverts, and recovery use an exclusive write guard.
 
-The WAL stores variable-length encoded key and value bytes. The Rust-facing
-`Table<K, V>` remains statically typed through two explicit traits:
+The WAL stores variable-length encoded key and value bytes. `IndexEntry` and
+the WAL header store value lengths as `u32`, limiting each encoded value to
+`u32::MAX` bytes. Oversized writes fail before a record is written. The
+Rust-facing `Table<K, V>` remains statically typed through two explicit traits:
 
 - `Codec` defines the stable persistent representation of a key or value.
 - `OrderedKey: Codec + Ord` additionally guarantees that encoded byte order
