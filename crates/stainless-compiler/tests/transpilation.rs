@@ -19,6 +19,15 @@ struct Pair {
     i32 right;
 };
 
+struct RecordKind {
+    static const u8 Insert = 0;
+    static const u8 Commit = 1;
+};
+
+u8 static_constant_kind() {
+    return RecordKind::Commit;
+}
+
 struct BaseValue {
     i32 value;
     i32 read() const;
@@ -560,6 +569,7 @@ fn generated_program_preserves_current_subset_behavior() {
     let fluent_member_calls = find_name("fluent_member_calls");
     let sum_skipping_two = find_name("sum_skipping_two");
     let exact_overload = find_name("exact_overload");
+    let static_constant_kind = find_name("static_constant_kind");
     let suffixed_float = find_name("suffixed_float");
     let default_float = find_name("default_float");
     let primitive_cast = find_name("primitive_cast");
@@ -580,6 +590,7 @@ fn main() {{
     assert_eq!(__stainless_namespace_samples::{fluent_member_calls}(), 6);
     assert_eq!(__stainless_namespace_samples::{sum_skipping_two}(), 8);
     assert_eq!(__stainless_namespace_samples::{exact_overload}(), 31);
+    assert_eq!(__stainless_namespace_samples::{static_constant_kind}(), 1u8);
     assert_eq!(__stainless_namespace_samples::{suffixed_float}(), 3.0f32);
     assert_eq!(__stainless_namespace_samples::{default_float}(), 2.0f64);
     assert_eq!(__stainless_namespace_samples::{primitive_cast}(7), 7u32);

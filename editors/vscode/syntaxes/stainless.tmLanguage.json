@@ -272,7 +272,7 @@
         },
         {
           "name": "storage.modifier.stainless",
-          "match": "\\b(?:async|const|mutable|public|private|sealed)\\b"
+          "match": "\\b(?:async|const|mutable|public|private|sealed|static)\\b"
         },
         {
           "name": "keyword.operator.word.stainless",

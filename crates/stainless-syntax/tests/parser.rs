@@ -44,6 +44,42 @@ fn parses_structs_members_inheritance_and_aggregates_losslessly() {
 }
 
 #[test]
+fn parses_contextual_static_struct_constants_losslessly() {
+    let source = r"struct RecordKind {
+    static const u8 Insert = 0;
+    static const u8 Commit = 1;
+};
+
+u8 kind() {
+    return RecordKind::Commit;
+}
+";
+    let parsed = parse(source);
+    let tree = parsed.tree();
+    let constants = tree
+        .items()
+        .find_map(|item| match item {
+            Item::Struct(structure) => Some(structure.fields().collect::<Vec<_>>()),
+            _ => None,
+        })
+        .expect("record kind struct");
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(parsed.syntax().to_string(), source);
+    assert_eq!(constants.len(), 2);
+    assert!(
+        constants
+            .iter()
+            .all(stainless_syntax::ast::FieldDeclaration::is_static)
+    );
+    assert_eq!(
+        constants[0].name_token().expect("constant name").text(),
+        "Insert"
+    );
+    assert!(constants[0].initializer().is_some());
+}
+
+#[test]
 fn parses_classes_interfaces_inheritance_and_access_labels_losslessly() {
     let source = include_str!("../../../docs/ref/03_interfaces.stl");
     let parsed = parse(source);

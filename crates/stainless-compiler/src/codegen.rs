@@ -253,16 +253,14 @@ impl Emitter {
             .iter()
             .map(|parameter| identifier(parameter))
             .collect::<Result<Vec<_>, _>>()?;
-        let generics = (!type_parameters.is_empty()).then(|| quote!(<#(#type_parameters),*>));
-        let fields = structure
-            .fields
-            .iter()
-            .map(|field| {
-                let name = identifier(&field.rust_name)?;
-                let ty = type_tokens(&field.ty, None)?;
-                Ok(quote!(pub #name: #ty))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+        let generics = if type_parameters.is_empty() {
+            TokenStream::new()
+        } else {
+            quote!(<#(#type_parameters),*>)
+        };
+        let fields = Self::structure_fields(&structure.fields)?;
+        let associated_constants =
+            Self::structure_static_constants(&name, &generics, &structure.static_constants)?;
         let json_conversion = Self::struct_json_conversion(
             &name,
             &structure.source_path,
@@ -344,10 +342,48 @@ impl Emitter {
             pub struct #name #generics {
                 #(#fields),*
             }
+            #associated_constants
             #json_conversion
             #exception_impl
             #(#interface_implementations)*
         })
+    }
+
+    fn structure_static_constants(
+        structure: &Ident,
+        generics: &TokenStream,
+        constants: &[hir::StaticConstant],
+    ) -> Result<TokenStream, String> {
+        let constants = constants
+            .iter()
+            .map(|constant| {
+                let name = identifier(&constant.rust_name)?;
+                let visibility = constant.is_public.then(|| quote!(pub));
+                let ty = type_tokens(&constant.ty, None)?;
+                let value = literal(LiteralKind::Integer, &constant.value)?;
+                Ok(quote!(#visibility const #name: #ty = #value;))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if constants.is_empty() {
+            return Ok(TokenStream::new());
+        }
+        Ok(quote! {
+            #[allow(non_upper_case_globals)]
+            impl #generics #structure #generics {
+                #(#constants)*
+            }
+        })
+    }
+
+    fn structure_fields(fields: &[hir::Field]) -> Result<Vec<TokenStream>, String> {
+        fields
+            .iter()
+            .map(|field| {
+                let name = identifier(&field.rust_name)?;
+                let ty = type_tokens(&field.ty, None)?;
+                Ok(quote!(pub #name: #ty))
+            })
+            .collect()
     }
 
     fn struct_json_conversion(
@@ -857,6 +893,20 @@ impl Emitter {
             hir::Expression::Name(name) => {
                 let name = identifier(name)?;
                 Ok(quote!(#name))
+            }
+            hir::Expression::StaticConstant {
+                modules,
+                structure,
+                constant,
+            } => {
+                let target = if modules.is_empty() {
+                    format!("crate::{structure}")
+                } else {
+                    format!("crate::{}::{structure}", modules.join("::"))
+                };
+                let target = path(&target)?;
+                let constant = identifier(constant)?;
+                Ok(quote!(#target::#constant))
             }
             hir::Expression::Literal { kind, text } => literal(*kind, text),
             hir::Expression::JsonNull => Ok(quote!(::stainless_runtime::Var::null())),

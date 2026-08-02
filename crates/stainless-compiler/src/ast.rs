@@ -111,6 +111,8 @@ pub struct Struct {
     pub has_access_specifier: bool,
     /// Direct data fields in declaration order.
     pub fields: Vec<Field>,
+    /// Compile-time associated integer constants with no instance storage.
+    pub static_constants: Vec<StaticConstant>,
     /// Member function declarations written inside the body.
     pub functions: Vec<Function>,
     /// Constructor declarations written inside the body.
@@ -162,6 +164,21 @@ pub struct Field {
     pub ty: Type,
     /// Source field name.
     pub name: String,
+    /// Complete declaration range.
+    pub span: Span,
+}
+
+/// One compile-time constant associated with a struct.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StaticConstant {
+    /// Whether this constant is publicly accessible.
+    pub is_public: bool,
+    /// Declared integer type.
+    pub ty: Type,
+    /// Source member name.
+    pub name: String,
+    /// Required compile-time initializer.
+    pub initializer: Expression,
     /// Complete declaration range.
     pub span: Span,
 }

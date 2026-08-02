@@ -467,6 +467,34 @@ derived struct and one of its data bases declare the same field name, the
 unqualified access is rejected and the source must use the explicit base
 qualifier.
 
+### Static struct constants
+
+A data struct may group typed compile-time integer constants without adding
+fields to any instance:
+
+```cpp
+struct RecordKind {
+    static const u8 Insert = 0;
+    static const u8 Commit = 1;
+    static const u8 Revert = 2;
+};
+
+u8 kind = RecordKind::Insert;
+```
+
+`static` is contextual in this member position and remains an ordinary
+identifier elsewhere. These declarations lower to Rust associated constants,
+have their declared integer type (`u8` above), and are accessed through the
+declaring type with `::`; they occupy no instance storage and cannot be
+mutated. Instance access such as `record.Insert` is not supported.
+
+The initial implementation permits `static const` only on non-generic
+`struct` declarations, with an explicitly named primitive integer type and an
+integer-literal initializer. Runtime expressions, floating-point or object
+types, classes, interfaces, and mutable static members are rejected. This
+narrow form is sufficient for typed wire-format discriminants without adding
+enum representation rules or mutable global state.
+
 ### Declaration syntax and contextual modifiers
 
 `sealed` follows the declaration kind:
@@ -686,7 +714,10 @@ cannot declare, overload, shadow, or replace them.
 The top-level `stainless` namespace is also reserved for compiler-provided,
 source-visible language types such as `stainless::Exception`. Project code may
 refer to documented members of that namespace but cannot declare the namespace
-or add declarations to it.
+or add declarations to it. A registered non-language facility named
+`stainless::X` lowers to `::stainless_runtime::X`. This is a facade over the
+compiler's native-binding whitelist, not open Rust lookup: an unregistered
+`stainless::X` remains a compile error.
 
 The top-level `rust` namespace is reserved for native Rust name resolution.
 Project code cannot declare, reopen, shadow, or add declarations to it. It is a
@@ -2052,7 +2083,7 @@ need to be passed as thread arguments.
 
 Every namespace-scope initializer must lower directly to a Rust const/static
 initializer. The accepted subset consists of literals, primitive const
-arithmetic, enum values, null nullable owners, and aggregate construction whose
+arithmetic, static struct constants, null nullable owners, and aggregate construction whose
 data base and fields are recursively const-evaluable. Ordinary Stainless
 function calls, user constructor bodies, heap allocation, I/O, native calls not
 verified as `const`, and any expression with a checked exception effect are
@@ -2409,6 +2440,12 @@ the preferred operations for durable record formats. `OpenOptions`
 supports Rust's `read`, `write`, `append`, `truncate`, `create`, and
 `create_new` flags followed by `open(path)`.
 
+`stainless::BigEndian` and `stainless::LittleEndian` expose `write_u32()`,
+`write_u64()`, and checked `read_u8()`, `read_u32()`, and `read_u64()`
+operations for binary formats. They lower to Rust's fixed-width byte-conversion
+operations rather than source-level arithmetic loops. A read with the wrong
+byte count raises `stainless::IoError` with `InvalidData`.
+
 Cursor-based and buffered streams, rich metadata, permissions, and symlink
 operations remain for the next file-I/O layer.
 
@@ -2422,6 +2459,9 @@ advancing the write epoch, and `revert(version)` syncs its marker before
 discarding indexed entries tagged at or above the boundary. Recovery replays
 only through the last valid control record and truncates incomplete or
 uncommitted tail data.
+All fixed-width WAL integers use big-endian encoding. This includes record
+sizes, versions, key/value lengths, and checksums; built-in ordered integer key
+codecs use the same byte order so lexicographic bytes preserve numeric order.
 
 The index is held in RAM and rebuilt by replaying the append-only log at open.
 It is a Stainless
@@ -2864,9 +2904,10 @@ The current recursive-descent grammar handles:
 - namespace blocks and losslessly retained `use` declarations;
 - function declarations and definitions, qualified names, parameters,
   reference types, generic type arguments, `const`, and `throws` clauses;
-- struct, class, and interface definitions; direct fields; data and interface
-  base lists; `public:`/`private:` labels; member declarations; qualified
-  out-of-type definitions; and struct aggregate initialization;
+- struct, class, and interface definitions; direct fields; typed `static const`
+  struct members; data and interface base lists; `public:`/`private:` labels;
+  member declarations; qualified out-of-type definitions; and struct aggregate
+  initialization;
 - constructor declarations, `= delete`, qualified out-of-type definitions,
   and C++-style data-base/member initializer lists;
 - blocks, initialized or default-constructed local declarations, `return`,
@@ -3005,9 +3046,10 @@ binding registry. If the front end reports a diagnostic, or HIR lowering
 encounters a construct without defined Rust semantics, it returns no Rust. For
 the accepted subset it now:
 
-- lowers resolved namespaces, free functions, structs/classes, interface
-  traits, static trait implementations, dynamically dispatched interface calls,
-  member functions, and constructors into a public, typed HIR;
+- lowers resolved namespaces, free functions, structs/classes, associated
+  integer constants, interface traits, static trait implementations,
+  dynamically dispatched interface calls, member functions, and constructors
+  into a public, typed HIR;
 - makes reference borrows/dereferences, exact overload targets, primitive
   casts, explicit moves, struct copies, aggregate construction, inherited-field
   paths, base-reference projections, fluent member receivers, constructor

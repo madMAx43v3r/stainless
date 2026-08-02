@@ -301,6 +301,18 @@ impl Lowerer<'_> {
             type_parameters: symbol.type_parameters.clone(),
             copyable: symbol.kind == ast::UserTypeKind::Struct,
             fields,
+            static_constants: symbol
+                .static_constants
+                .iter()
+                .filter_map(|constant| {
+                    Some(hir::StaticConstant {
+                        rust_name: constant.name.clone(),
+                        is_public: constant.is_public,
+                        ty: self.lower_type(&constant.ty, constant.span)?,
+                        value: constant.value.clone(),
+                    })
+                })
+                .collect(),
             json_fields: symbol
                 .type_parameters
                 .is_empty()
@@ -1262,6 +1274,18 @@ impl Lowerer<'_> {
 
         let lowered = match &expression.kind {
             ExpressionKind::Name(path) => {
+                if let Some(reference) = self.semantics.static_constant(expression.span) {
+                    let structure = self.semantics.structure(reference.structure)?;
+                    let constant = structure.static_constants.get(reference.constant)?;
+                    return Some(hir::Expression::StaticConstant {
+                        modules: structure.path[..structure.path.len().saturating_sub(1)]
+                            .iter()
+                            .map(|name| module_name(name))
+                            .collect(),
+                        structure: structure.path.last()?.clone(),
+                        constant: constant.name.clone(),
+                    });
+                }
                 if let Some(callback) = self.semantics.callback(expression.span)
                     && let CallbackTarget::Function(id) = callback.target
                 {

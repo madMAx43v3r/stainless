@@ -149,6 +149,8 @@ fn lower_struct_like_definition(
     constructors: Vec<(cst::Constructor, bool)>,
     definition_span: Span,
 ) -> Item {
+    let (static_constants, fields): (Vec<_>, Vec<_>) =
+        fields.into_iter().partition(|(field, _)| field.is_static());
     Item::Struct(ast::Struct {
         kind,
         name: name.map_or_else(missing_name, |token| token.text().to_owned()),
@@ -169,6 +171,25 @@ fn lower_struct_like_definition(
                         .name_token()
                         .map_or_else(missing_name, |token| token.text().to_owned()),
                     span: field_span,
+                }
+            })
+            .collect(),
+        static_constants: static_constants
+            .iter()
+            .map(|(constant, is_public)| {
+                let constant_span = span(constant);
+                ast::StaticConstant {
+                    is_public: *is_public,
+                    ty: constant
+                        .ty()
+                        .map_or_else(|| error_type(constant_span), |ty| lower_type(&ty)),
+                    name: constant
+                        .name_token()
+                        .map_or_else(missing_name, |token| token.text().to_owned()),
+                    initializer: constant
+                        .initializer()
+                        .map_or_else(|| error_expression(constant_span), lower_expression),
+                    span: constant_span,
                 }
             })
             .collect(),

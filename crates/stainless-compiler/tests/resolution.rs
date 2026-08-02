@@ -206,6 +206,59 @@ String load(const String& path) {
 }
 
 #[test]
+fn stainless_namespace_routes_only_registered_runtime_facades() {
+    let valid = analyze(
+        r"use rust::Vec;
+use stainless::{BigEndian, LittleEndian};
+
+void encode(Vec<u8>& output) {
+    BigEndian::write_u32(output, 1);
+    LittleEndian::write_u64(output, 2);
+}
+
+u32 decode(const Vec<u8>& bytes) throws stainless::IoError {
+    return BigEndian::read_u32(bytes);
+}
+",
+    );
+    assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);
+    let endian_paths = valid
+        .semantics
+        .calls
+        .iter()
+        .filter_map(|call| match &call.target {
+            CallTarget::Native(native)
+                if native.type_path.starts_with("rust::stainless_runtime::") =>
+            {
+                Some(native.type_path.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        endian_paths,
+        [
+            "rust::stainless_runtime::BigEndian",
+            "rust::stainless_runtime::LittleEndian",
+            "rust::stainless_runtime::BigEndian",
+        ]
+    );
+
+    let invalid = analyze(
+        r"use rust::Vec;
+
+void decode(const Vec<u8>& bytes) {
+    stainless::NotExposed::read_u32(bytes);
+}
+",
+    );
+    assert!(!invalid.diagnostics.is_empty());
+    assert!(!invalid.semantics.calls.iter().any(|call| {
+        matches!(&call.target, CallTarget::Native(native) if native.type_path.contains("NotExposed"))
+    }));
+}
+
+#[test]
 fn records_recursive_struct_json_conversions_and_rejects_unsupported_shapes() {
     let valid = analyze(include_str!("../../../docs/ref/21_json_support.stl"));
     assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);

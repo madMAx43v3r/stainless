@@ -287,6 +287,127 @@ impl<K: Ord, V> MultiMap<K, V> {
     }
 }
 
+/// Fixed-width big-endian integer encoding for byte vectors.
+///
+/// Stainless exposes these operations as `stainless::BigEndian`. They delegate
+/// to Rust's optimized `to_be_bytes()` and `from_be_bytes()` implementations.
+pub struct BigEndian;
+
+impl BigEndian {
+    /// Writes one `u32` in network byte order at the end of `output`.
+    pub fn write_u32(output: &mut Vec<u8>, value: u32) {
+        output.extend_from_slice(&value.to_be_bytes());
+    }
+
+    /// Writes one `u64` in network byte order at the end of `output`.
+    pub fn write_u64(output: &mut Vec<u8>, value: u64) {
+        output.extend_from_slice(&value.to_be_bytes());
+    }
+
+    /// Decodes one byte.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` unless `bytes` contains exactly one byte.
+    pub fn read_u8(bytes: &[u8]) -> std::io::Result<u8> {
+        let [value] = bytes else {
+            return Err(invalid_integer_width("big-endian", "u8", 1, bytes.len()));
+        };
+        Ok(*value)
+    }
+
+    /// Decodes one big-endian `u32`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` unless `bytes` contains exactly four bytes.
+    pub fn read_u32(bytes: &[u8]) -> std::io::Result<u32> {
+        let bytes = bytes
+            .try_into()
+            .map_err(|_| invalid_integer_width("big-endian", "u32", 4, bytes.len()))?;
+        Ok(u32::from_be_bytes(bytes))
+    }
+
+    /// Decodes one big-endian `u64`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` unless `bytes` contains exactly eight bytes.
+    pub fn read_u64(bytes: &[u8]) -> std::io::Result<u64> {
+        let bytes = bytes
+            .try_into()
+            .map_err(|_| invalid_integer_width("big-endian", "u64", 8, bytes.len()))?;
+        Ok(u64::from_be_bytes(bytes))
+    }
+}
+
+/// Fixed-width little-endian integer encoding for byte vectors.
+///
+/// Stainless exposes these operations as `stainless::LittleEndian`. They
+/// delegate to Rust's optimized `to_le_bytes()` and `from_le_bytes()`
+/// implementations.
+pub struct LittleEndian;
+
+impl LittleEndian {
+    /// Writes one `u32` in little-endian order at the end of `output`.
+    pub fn write_u32(output: &mut Vec<u8>, value: u32) {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+
+    /// Writes one `u64` in little-endian order at the end of `output`.
+    pub fn write_u64(output: &mut Vec<u8>, value: u64) {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+
+    /// Decodes one byte.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` unless `bytes` contains exactly one byte.
+    pub fn read_u8(bytes: &[u8]) -> std::io::Result<u8> {
+        let [value] = bytes else {
+            return Err(invalid_integer_width("little-endian", "u8", 1, bytes.len()));
+        };
+        Ok(*value)
+    }
+
+    /// Decodes one little-endian `u32`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` unless `bytes` contains exactly four bytes.
+    pub fn read_u32(bytes: &[u8]) -> std::io::Result<u32> {
+        let bytes = bytes
+            .try_into()
+            .map_err(|_| invalid_integer_width("little-endian", "u32", 4, bytes.len()))?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    /// Decodes one little-endian `u64`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` unless `bytes` contains exactly eight bytes.
+    pub fn read_u64(bytes: &[u8]) -> std::io::Result<u64> {
+        let bytes = bytes
+            .try_into()
+            .map_err(|_| invalid_integer_width("little-endian", "u64", 8, bytes.len()))?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+}
+
+fn invalid_integer_width(
+    byte_order: &str,
+    name: &str,
+    expected: usize,
+    actual: usize,
+) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("{byte_order} {name} requires {expected} bytes, found {actual}"),
+    )
+}
+
 /// Exact-signature facade for the Rust standard library's whole-file and
 /// directory operations exposed through Stainless `rust::std::fs` bindings.
 ///
@@ -1453,8 +1574,47 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        Fs, MultiMap, PositionedFile, Var, btree_map_retain, btree_map_with_last_in_range,
+        BigEndian, Fs, LittleEndian, MultiMap, PositionedFile, Var, btree_map_retain,
+        btree_map_with_last_in_range,
     };
+
+    #[test]
+    fn fixed_width_endian_encoding_round_trips() {
+        let mut bytes = vec![0xaa];
+        BigEndian::write_u32(&mut bytes, 0x0102_0304);
+        BigEndian::write_u64(&mut bytes, 0x0506_0708_090a_0b0c);
+        assert_eq!(
+            bytes,
+            [
+                0xaa, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+            ]
+        );
+        assert_eq!(BigEndian::read_u8(&bytes[..1]).unwrap(), 0xaa);
+        assert_eq!(BigEndian::read_u32(&bytes[1..5]).unwrap(), 0x0102_0304);
+        assert_eq!(
+            BigEndian::read_u64(&bytes[5..13]).unwrap(),
+            0x0506_0708_090a_0b0c
+        );
+        assert_eq!(
+            BigEndian::read_u32(&bytes[..3]).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        let mut little = Vec::new();
+        LittleEndian::write_u32(&mut little, 0x0102_0304);
+        LittleEndian::write_u64(&mut little, 0x0506_0708_090a_0b0c);
+        assert_eq!(
+            little,
+            [
+                0x04, 0x03, 0x02, 0x01, 0x0c, 0x0b, 0x0a, 0x09, 0x08, 0x07, 0x06, 0x05
+            ]
+        );
+        assert_eq!(LittleEndian::read_u32(&little[..4]).unwrap(), 0x0102_0304);
+        assert_eq!(
+            LittleEndian::read_u64(&little[4..12]).unwrap(),
+            0x0506_0708_090a_0b0c
+        );
+    }
 
     #[test]
     fn ordered_map_range_callback_selects_one_predecessor() {

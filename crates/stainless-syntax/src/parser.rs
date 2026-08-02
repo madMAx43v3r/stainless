@@ -205,7 +205,12 @@ impl Parser<'_> {
                 SyntaxKind::ConstKw,
                 SyntaxKind::AsyncKw,
             ]) {
-                if interface {
+                if self.at(SyntaxKind::Identifier)
+                    && self.current_text() == Some("static")
+                    && self.nth(1) == Some(SyntaxKind::ConstKw)
+                {
+                    self.parse_field_declaration();
+                } else if interface {
                     self.parse_function();
                 } else if self.looks_like_constructor() {
                     self.parse_constructor();
@@ -254,8 +259,24 @@ impl Parser<'_> {
 
     fn parse_field_declaration(&mut self) {
         self.start(SyntaxKind::FieldDeclaration);
+        let is_static = self.at(SyntaxKind::Identifier)
+            && self.current_text() == Some("static")
+            && self.nth(1) == Some(SyntaxKind::ConstKw);
+        if is_static {
+            self.bump();
+            if !self.at(SyntaxKind::ConstKw) {
+                self.error("expected `const` after `static`");
+            }
+        }
         self.parse_type(false);
         self.expect(SyntaxKind::Identifier, "expected a field name");
+        if is_static {
+            if self.eat(SyntaxKind::Eq) {
+                self.parse_expression();
+            } else {
+                self.error("expected an initializer for static constant");
+            }
+        }
         self.expect(
             SyntaxKind::Semicolon,
             "expected `;` after field declaration",

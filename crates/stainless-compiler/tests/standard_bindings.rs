@@ -24,7 +24,9 @@ fn standard_registry_contains_builtin_types_in_path_order() {
             "rust::Set",
             "rust::String",
             "rust::Vec",
+            "rust::stainless_runtime::BigEndian",
             "rust::stainless_runtime::JsonError",
+            "rust::stainless_runtime::LittleEndian",
             "rust::stainless_runtime::Var",
             "rust::std::fs",
             "rust::std::fs::File",
@@ -32,6 +34,44 @@ fn standard_registry_contains_builtin_types_in_path_order() {
             "rust::std::io::Error",
         ]
     );
+}
+
+#[test]
+fn endian_bindings_use_exact_byte_widths_and_checked_reads() {
+    let bindings = standard_bindings().unwrap();
+    let bytes = TypeRef::native("rust::Vec", vec![TypeRef::U8]);
+    let io_error = TypeRef::native("rust::std::io::Error", vec![]);
+
+    for endian_name in ["BigEndian", "LittleEndian"] {
+        let endian = bindings
+            .type_by_path(&format!("rust::stainless_runtime::{endian_name}"))
+            .unwrap();
+        let write_u32 = endian
+            .find_callable(
+                CallStyle::AssociatedFunction,
+                "write_u32",
+                &[TypeRef::mutable_ref(bytes.clone()), TypeRef::U32],
+            )
+            .unwrap();
+        assert_eq!(write_u32.return_type, TypeRef::Void);
+        assert_eq!(write_u32.rust_result_error, None);
+
+        for (name, result) in [
+            ("read_u8", TypeRef::U8),
+            ("read_u32", TypeRef::U32),
+            ("read_u64", TypeRef::U64),
+        ] {
+            let read = endian
+                .find_callable(
+                    CallStyle::AssociatedFunction,
+                    name,
+                    &[TypeRef::shared_ref(bytes.clone())],
+                )
+                .unwrap();
+            assert_eq!(read.return_type, result);
+            assert_eq!(read.rust_result_error, Some(io_error.clone()));
+        }
+    }
 }
 
 #[test]

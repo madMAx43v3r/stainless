@@ -19,6 +19,8 @@ const V: &str = "V";
 /// invariants. Such an error indicates a compiler implementation defect.
 pub fn standard_bindings() -> Result<NativeBindings, super::BindingError> {
     NativeBindings::new(vec![
+        big_endian_binding(),
+        little_endian_binding(),
         fs_binding(),
         file_binding(),
         open_options_binding(),
@@ -33,6 +35,69 @@ pub fn standard_bindings() -> Result<NativeBindings, super::BindingError> {
         var_binding(),
         vec_binding(),
     ])
+}
+
+fn big_endian_binding() -> NativeTypeBinding {
+    endian_binding("BigEndian")
+}
+
+fn little_endian_binding() -> NativeTypeBinding {
+    endian_binding("LittleEndian")
+}
+
+fn endian_binding(name: &str) -> NativeTypeBinding {
+    let bytes = vec_of(TypeRef::U8);
+    let io_error = TypeRef::native(IO_ERROR_TYPE_PATH, Vec::new());
+    let write_parameters = |value| {
+        vec![
+            Parameter::new("output", TypeRef::mutable_ref(bytes.clone())),
+            Parameter::new("value", value),
+        ]
+    };
+    let read_parameters = || vec![Parameter::new("bytes", TypeRef::shared_ref(bytes.clone()))];
+    let rust_path = format!("::stainless_runtime::{name}");
+
+    NativeTypeBinding {
+        stainless_path: format!("rust::stainless_runtime::{name}"),
+        rust_path: rust_path.clone(),
+        type_parameters: vec![],
+        error_format: None,
+        callables: vec![
+            associated(
+                "write_u32",
+                write_parameters(TypeRef::U32),
+                TypeRef::Void,
+                &format!("{rust_path}::write_u32"),
+            ),
+            associated(
+                "write_u64",
+                write_parameters(TypeRef::U64),
+                TypeRef::Void,
+                &format!("{rust_path}::write_u64"),
+            ),
+            fallible_associated(
+                "read_u8",
+                read_parameters(),
+                TypeRef::U8,
+                io_error.clone(),
+                &format!("{rust_path}::read_u8"),
+            ),
+            fallible_associated(
+                "read_u32",
+                read_parameters(),
+                TypeRef::U32,
+                io_error.clone(),
+                &format!("{rust_path}::read_u32"),
+            ),
+            fallible_associated(
+                "read_u64",
+                read_parameters(),
+                TypeRef::U64,
+                io_error,
+                &format!("{rust_path}::read_u64"),
+            ),
+        ],
+    }
 }
 
 pub(crate) const VAR_TYPE_PATH: &str = "rust::stainless_runtime::Var";
@@ -1438,7 +1503,7 @@ fn associated(
     source_name: &'static str,
     parameters: Vec<Parameter>,
     return_type: TypeRef,
-    rust_path: &'static str,
+    rust_path: &str,
 ) -> CallableBinding {
     CallableBinding {
         source_name: source_name.to_owned(),
@@ -1461,7 +1526,7 @@ fn fallible_associated(
     parameters: Vec<Parameter>,
     return_type: TypeRef,
     error_type: TypeRef,
-    rust_path: &'static str,
+    rust_path: &str,
 ) -> CallableBinding {
     CallableBinding {
         source_name: source_name.to_owned(),

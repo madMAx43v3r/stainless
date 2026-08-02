@@ -533,13 +533,32 @@ type_definition_accessors!(InterfaceDefinition);
 
 impl FieldDeclaration {
     #[must_use]
+    pub fn is_static(&self) -> bool {
+        self.syntax()
+            .children_with_tokens()
+            .find(|element| match element {
+                rowan::NodeOrToken::Node(_) => true,
+                rowan::NodeOrToken::Token(token) => !token.kind().is_trivia(),
+            })
+            .and_then(rowan::NodeOrToken::into_token)
+            .is_some_and(|token| token.kind() == SyntaxKind::Identifier && token.text() == "static")
+    }
+
+    #[must_use]
     pub fn ty(&self) -> Option<TypeReference> {
         child(self.syntax())
     }
 
     #[must_use]
     pub fn name_token(&self) -> Option<SyntaxToken> {
-        token(self.syntax(), SyntaxKind::Identifier)
+        direct_tokens(self.syntax())
+            .filter(|token| token.kind() == SyntaxKind::Identifier)
+            .last()
+    }
+
+    #[must_use]
+    pub fn initializer(&self) -> Option<Expression> {
+        expression_children(self.syntax()).next()
     }
 }
 

@@ -96,6 +96,8 @@ pub struct Struct {
     pub copyable: bool,
     /// Direct representation fields, including an optional base subobject.
     pub fields: Vec<Field>,
+    /// Associated integer constants with no instance storage.
+    pub static_constants: Vec<StaticConstant>,
     /// Flattened data fields used by automatic structural JSON conversion.
     pub json_fields: Option<Vec<JsonStructField>>,
     /// Whether this struct participates in the checked-exception hierarchy.
@@ -172,6 +174,19 @@ pub struct Field {
     pub rust_name: String,
     /// Resolved field type.
     pub ty: Type,
+}
+
+/// One generated Rust associated constant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StaticConstant {
+    /// Rust member identifier.
+    pub rust_name: String,
+    /// Whether generated Rust exposes this constant publicly.
+    pub is_public: bool,
+    /// Exact integer type.
+    pub ty: Type,
+    /// Integer literal spelling.
+    pub value: String,
 }
 
 /// One resolved function definition.
@@ -498,6 +513,15 @@ pub enum Expression {
     Tuple(Vec<Expression>),
     /// A local or parameter binding.
     Name(String),
+    /// A struct-associated compile-time constant.
+    StaticConstant {
+        /// Generated namespace modules containing the struct.
+        modules: Vec<String>,
+        /// Generated struct identifier.
+        structure: String,
+        /// Associated constant identifier.
+        constant: String,
+    },
     /// A scalar or owned string literal.
     Literal {
         /// Lexical category.

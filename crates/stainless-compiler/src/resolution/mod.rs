@@ -35,6 +35,21 @@ pub struct FieldSymbol {
     pub span: Span,
 }
 
+/// One resolved compile-time constant associated with a struct.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StaticConstantSymbol {
+    /// Source member name.
+    pub name: String,
+    /// Whether access is permitted outside the declaring struct.
+    pub is_public: bool,
+    /// Exact integer type retained by the constant.
+    pub ty: TypeRef,
+    /// Integer literal spelling used by generated Rust.
+    pub value: String,
+    /// Source range.
+    pub span: Span,
+}
+
 /// A resolved data-only struct.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StructSymbol {
@@ -54,6 +69,8 @@ pub struct StructSymbol {
     pub is_sealed: bool,
     /// Direct fields in aggregate initialization order.
     pub fields: Vec<FieldSymbol>,
+    /// Associated compile-time constants, excluded from instance layout.
+    pub static_constants: Vec<StaticConstantSymbol>,
     /// Definition source range.
     pub span: Span,
 }
@@ -194,6 +211,17 @@ pub struct ExpressionResolution {
 pub struct ResolvedField {
     /// Rust representation fields traversed from the receiver.
     pub access_path: Vec<String>,
+}
+
+/// A resolved reference to one struct-associated compile-time constant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedStaticConstant {
+    /// Reference expression source range.
+    pub span: Span,
+    /// Declaring struct.
+    pub structure: StructId,
+    /// Index within [`StructSymbol::static_constants`].
+    pub constant: usize,
 }
 
 /// A resolved local or range-loop binding.
@@ -547,6 +575,8 @@ pub struct SemanticModel {
     pub interface_implementations: Vec<InterfaceImplementation>,
     /// Expression facts in traversal order.
     pub expressions: Vec<ExpressionResolution>,
+    /// Qualified and implicit references to struct-associated constants.
+    pub static_constant_references: Vec<ResolvedStaticConstant>,
     /// Local and range-loop bindings in traversal order.
     pub bindings: Vec<BindingResolution>,
     /// Explicit and implicit calls in traversal order.
@@ -620,6 +650,14 @@ impl SemanticModel {
         self.expressions
             .iter()
             .find(|expression| expression.span == span)
+    }
+
+    /// Finds a resolved struct-associated constant reference by expression span.
+    #[must_use]
+    pub fn static_constant(&self, span: Span) -> Option<&ResolvedStaticConstant> {
+        self.static_constant_references
+            .iter()
+            .find(|constant| constant.span == span)
     }
 
     /// Finds a local or range-loop binding by its declaration span.

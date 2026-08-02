@@ -18,9 +18,9 @@ use super::{
     ConstructorSymbol, ExpressionResolution, FieldSymbol, FunctionId, FunctionSymbol,
     InterfaceImplementation, Intrinsic, LambdaCaptureMode, NativeCall, NativeCallResultAdaptation,
     NativeResultException, ParameterSymbol, Resolution, ResolvedCall, ResolvedCallback,
-    ResolvedField, ResolvedLambdaCapture, ResolvedNativeType, ResolvedTraitRequirement,
-    RustErrorMessage, RustResultAdaptation, SemanticModel, StructId, StructReceiver, StructSymbol,
-    ValueCategory,
+    ResolvedField, ResolvedLambdaCapture, ResolvedNativeType, ResolvedStaticConstant,
+    ResolvedTraitRequirement, RustErrorMessage, RustResultAdaptation, SemanticModel,
+    StaticConstantSymbol, StructId, StructReceiver, StructSymbol, ValueCategory,
 };
 
 /// Resolves names and types using an explicit native binding registry.
@@ -173,6 +173,7 @@ impl Resolver<'_> {
                 },
                 span: Span::default(),
             }],
+            static_constants: Vec::new(),
             span: Span::default(),
         });
         self.struct_by_path.insert(root_path, root);
@@ -188,6 +189,7 @@ impl Resolver<'_> {
             interfaces: Vec::new(),
             is_sealed: false,
             fields: Vec::new(),
+            static_constants: Vec::new(),
             span: Span::default(),
         });
         self.struct_by_path.insert(rust_error_path, rust_error);
@@ -203,6 +205,7 @@ impl Resolver<'_> {
             interfaces: Vec::new(),
             is_sealed: false,
             fields: Vec::new(),
+            static_constants: Vec::new(),
             span: Span::default(),
         });
         self.struct_by_path.insert(io_error_path, io_error);
@@ -218,6 +221,7 @@ impl Resolver<'_> {
             interfaces: Vec::new(),
             is_sealed: false,
             fields: Vec::new(),
+            static_constants: Vec::new(),
             span: Span::default(),
         });
         self.struct_by_path.insert(format_error_path, format_error);
@@ -233,6 +237,7 @@ impl Resolver<'_> {
             interfaces: Vec::new(),
             is_sealed: false,
             fields: Vec::new(),
+            static_constants: Vec::new(),
             span: Span::default(),
         });
         self.struct_by_path.insert(json_error_path, json_error);
@@ -248,6 +253,7 @@ impl Resolver<'_> {
             interfaces: Vec::new(),
             is_sealed: false,
             fields: Vec::new(),
+            static_constants: Vec::new(),
             span: Span::default(),
         });
         self.struct_by_path.insert(thread_error_path, thread_error);
@@ -311,6 +317,7 @@ impl Resolver<'_> {
                         interfaces: Vec::new(),
                         is_sealed: structure.is_sealed,
                         fields: Vec::new(),
+                        static_constants: Vec::new(),
                         span: structure.span,
                     });
                     self.struct_by_path.insert(path, id);
@@ -496,10 +503,103 @@ impl Resolver<'_> {
                             }
                         })
                         .collect();
+                    let static_constants = structure
+                        .static_constants
+                        .iter()
+                        .map(|constant| {
+                            if !names.insert(constant.name.clone()) {
+                                self.push(
+                                    "RES125",
+                                    format!("duplicate struct member `{}`", constant.name),
+                                    constant.span,
+                                );
+                            }
+                            if structure.kind != ast::UserTypeKind::Struct {
+                                self.push(
+                                    "RES125",
+                                    "`static const` members are supported only on structs"
+                                        .to_owned(),
+                                    constant.span,
+                                );
+                            }
+                            if !structure.type_parameters.is_empty() {
+                                self.push(
+                                    "RES125",
+                                    "`static const` members on generic structs are deferred"
+                                        .to_owned(),
+                                    constant.span,
+                                );
+                            }
+                            if !constant.ty.is_const {
+                                self.push(
+                                    "RES125",
+                                    "a static struct member must be declared `const`".to_owned(),
+                                    constant.ty.span,
+                                );
+                            }
+                            let ty = self.resolve_type(
+                                &constant.ty,
+                                namespace,
+                                &structure.type_parameters,
+                                false,
+                            );
+                            if !is_integer(&ty) && ty != TypeRef::Error {
+                                self.push(
+                                    "RES125",
+                                    format!(
+                                        "a static struct constant requires an integer type, found `{}`",
+                                        display_type(&ty)
+                                    ),
+                                    constant.ty.span,
+                                );
+                            }
+                            let value = if let ExpressionKind::Literal(literal) =
+                                &constant.initializer.kind
+                                && literal.kind == LiteralKind::Integer
+                            {
+                                let actual = literal_type(
+                                    literal.kind,
+                                    &literal.text,
+                                    Some(&ty),
+                                );
+                                if is_integer(&ty)
+                                    && actual != ty
+                                    && actual != TypeRef::Error
+                                {
+                                    self.push(
+                                        "RES125",
+                                        format!(
+                                            "static constant initializer has type `{}`, expected `{}`",
+                                            display_type(&actual),
+                                            display_type(&ty)
+                                        ),
+                                        constant.initializer.span,
+                                    );
+                                }
+                                literal.text.clone()
+                            } else {
+                                self.push(
+                                    "RES125",
+                                    "a static struct constant currently requires an integer literal initializer"
+                                        .to_owned(),
+                                    constant.initializer.span,
+                                );
+                                "0".to_owned()
+                            };
+                            StaticConstantSymbol {
+                                name: constant.name.clone(),
+                                is_public: constant.is_public,
+                                ty,
+                                value,
+                                span: constant.span,
+                            }
+                        })
+                        .collect();
                     let symbol = &mut self.model.structs[id.0];
                     symbol.base = base;
                     symbol.interfaces = interfaces;
                     symbol.fields = fields;
+                    symbol.static_constants = static_constants;
                 }
                 Item::Use(_) | Item::Constructor(_) | Item::Function(_) => {}
             }
@@ -3175,6 +3275,26 @@ impl Resolver<'_> {
                 );
             }
         }
+        if let Some((structure, constant)) = self.lookup_static_constant(path, context) {
+            let symbol = &self.model.structs[structure.0].static_constants[constant];
+            let is_public = symbol.is_public;
+            let ty = symbol.ty.clone();
+            if !Self::member_is_accessible(structure, is_public, context) {
+                self.push(
+                    "RES121",
+                    format!("static constant `{}` is private", path.display()),
+                    span,
+                );
+            }
+            self.model
+                .static_constant_references
+                .push(ResolvedStaticConstant {
+                    span,
+                    structure,
+                    constant,
+                });
+            return (temporary(ty), None);
+        }
         self.push(
             "RES012",
             format!("unresolved value name `{}`", path.display()),
@@ -3184,6 +3304,9 @@ impl Resolver<'_> {
     }
 
     fn value_name_resolves(&self, path: &ast::Path, context: &FunctionContext) -> bool {
+        if self.lookup_static_constant(path, context).is_some() {
+            return true;
+        }
         if path.segments.len() != 1 {
             return false;
         }
@@ -3206,6 +3329,25 @@ impl Resolver<'_> {
                 )
                 .is_some()
             })
+    }
+
+    fn lookup_static_constant(
+        &self,
+        path: &ast::Path,
+        context: &FunctionContext,
+    ) -> Option<(StructId, usize)> {
+        let (structure, name) = if let Some((name, owner)) = path.segments.split_last()
+            && !owner.is_empty()
+        {
+            (self.lookup_struct_path(owner, &context.namespace)?, name)
+        } else {
+            (context.receiver.as_ref()?.structure, path.segments.first()?)
+        };
+        self.model.structs[structure.0]
+            .static_constants
+            .iter()
+            .position(|constant| constant.name == *name)
+            .map(|constant| (structure, constant))
     }
 
     fn resolve_callback_function_name(
@@ -7947,7 +8089,10 @@ impl Resolver<'_> {
         if matches!(segments, [name] if name == "var") {
             return Some(VAR_TYPE_PATH.to_owned());
         }
-        let candidates = if segments.first().is_some_and(|segment| segment == "rust") {
+        let candidates = if segments
+            .first()
+            .is_some_and(|segment| segment == "rust" || segment == "stainless")
+        {
             vec![segments.to_vec()]
         } else if segments.len() == 1 {
             self.imports.candidates(namespace, &segments[0])
@@ -9145,7 +9290,11 @@ fn integer_suffix(text: &str) -> Option<TypeRef> {
 }
 
 fn known_native_path(segments: &[String], bindings: &NativeBindings) -> Option<String> {
-    let path = segments.join("::");
+    let path = if matches!(segments.first().map(String::as_str), Some("stainless")) {
+        format!("rust::stainless_runtime::{}", segments[1..].join("::"))
+    } else {
+        segments.join("::")
+    };
     bindings
         .type_by_path(&path)
         .map(|binding| binding.stainless_path.clone())

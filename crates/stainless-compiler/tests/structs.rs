@@ -48,6 +48,74 @@ fn resolves_struct_layout_members_fields_and_data_inheritance() {
 }
 
 #[test]
+fn resolves_typed_static_struct_constants_without_instance_storage() {
+    let analysis = analyze(
+        r"struct RecordKind {
+    static const u8 Insert = 0;
+    static const u8 Commit = 1;
+};
+
+u8 kind() {
+    return RecordKind::Commit;
+}
+",
+    );
+
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+    let structure = analysis
+        .semantics
+        .structs
+        .iter()
+        .find(|structure| structure.path == ["RecordKind"])
+        .expect("RecordKind symbol");
+    assert!(structure.fields.is_empty());
+    assert_eq!(structure.static_constants.len(), 2);
+    assert_eq!(structure.static_constants[1].name, "Commit");
+    assert_eq!(structure.static_constants[1].ty, TypeRef::U8);
+    assert_eq!(structure.static_constants[1].value, "1");
+    assert_eq!(analysis.semantics.static_constant_references.len(), 1);
+}
+
+#[test]
+fn diagnoses_invalid_static_struct_constant_forms() {
+    let analysis = analyze(
+        r"struct WrongType {
+    static const f32 Value = 1;
+};
+
+struct RuntimeExpression {
+    static const u8 Value = 1 + 2;
+};
+
+class WrongOwner {
+public:
+    static const u8 Value = 1;
+};
+
+struct Generic<T> {
+    static const u8 Value = 1;
+    T data;
+};
+",
+    );
+
+    assert_eq!(
+        analysis
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "RES125")
+            .count(),
+        4,
+        "{:#?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
 fn diagnoses_invalid_struct_layout_and_member_forms() {
     let source = r"struct Base {
     i32 value;
