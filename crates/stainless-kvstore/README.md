@@ -77,6 +77,11 @@ slices. The built-in unsigned fixed-width key codecs use the exact-type
 `stainless::BigEndian::write()` and `read()` overloads, so byte order preserves
 unsigned integer order.
 
+`codecs::string_key()` encodes Rust `String` values as self-delimiting UTF-8.
+Its zero-byte escaping preserves normal string ordering, including prefixes
+and embedded NUL characters, and lets strings safely occupy any position in a
+compound key. Decoding rejects invalid UTF-8 as an ordinary codec failure.
+
 Calling `vec()` on any `KeyCodec<T>` derives a `KeyCodec<Vec<T>>`:
 
 ```cpp

@@ -1137,6 +1137,66 @@ KeyCodec<u8> u8_key()
     };
 }
 
+KeyCodec<String> string_key()
+{
+    return KeyCodec<String>{
+        [](const String& value) {
+            String copy = String(value);
+            Vec<u8> utf8 = move(copy).into_bytes();
+            Vec<u8> bytes;
+            for (const u8& byte : utf8) {
+                if (byte == 0) {
+                    bytes.push(0);
+                    bytes.push(255);
+                } else {
+                    bytes.push(byte);
+                }
+            }
+            bytes.push(0);
+            bytes.push(0);
+            return Encoded{true, move(bytes)};
+        },
+        [](const Vec<u8>& bytes, usize offset) {
+            usize position = 0;
+            usize next = offset;
+            bool escaped = false;
+            bool finished = false;
+            bool valid = true;
+            Vec<u8> utf8;
+            for (const u8& byte : bytes) {
+                if (position >= offset && !finished && valid) {
+                    next = position + 1;
+                    if (!escaped) {
+                        if (byte == 0) {
+                            escaped = true;
+                        } else {
+                            utf8.push(byte);
+                        }
+                    } else {
+                        escaped = false;
+                        if (byte == 255) {
+                            utf8.push(0);
+                        } else if (byte == 0) {
+                            finished = true;
+                        } else {
+                            valid = false;
+                        }
+                    }
+                }
+                position += 1;
+            }
+            if (valid && finished) {
+                try {
+                    String value = String::from_utf8(move(utf8));
+                    return DecodedAt<String>{true, next, move(value)};
+                } catch (const stainless::RustError& _error) {
+                }
+            }
+            return DecodedAt<String>{false, offset, String()};
+        }
+    };
+}
+
 Encoded encode_u16(const u16& value)
 {
     Vec<u8> bytes;

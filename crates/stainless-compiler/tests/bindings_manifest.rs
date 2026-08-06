@@ -101,6 +101,7 @@ fn package_loader_merges_optional_manifest_with_compiler_builtins() {
             "rust::std::fs::File",
             "rust::std::fs::OpenOptions",
             "rust::std::io::Error",
+            "rust::std::string::FromUtf8Error",
         ]
     );
 }

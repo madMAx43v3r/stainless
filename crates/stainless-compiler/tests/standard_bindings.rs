@@ -32,6 +32,7 @@ fn standard_registry_contains_builtin_types_in_path_order() {
             "rust::std::fs::File",
             "rust::std::fs::OpenOptions",
             "rust::std::io::Error",
+            "rust::std::string::FromUtf8Error",
         ]
     );
 }
@@ -904,6 +905,38 @@ fn string_into_bytes_consumes_the_receiver() {
     assert_eq!(
         into_bytes.return_type,
         TypeRef::native("rust::Vec", vec![TypeRef::U8])
+    );
+}
+
+#[test]
+fn string_from_utf8_consumes_bytes_and_preserves_display_errors() {
+    let bindings = standard_bindings().unwrap();
+    let string_binding = bindings.type_by_path("rust::String").unwrap();
+    let bytes = TypeRef::native("rust::Vec", vec![TypeRef::U8]);
+    let string = TypeRef::native("rust::String", vec![]);
+    let utf8_error = TypeRef::native("rust::std::string::FromUtf8Error", vec![]);
+
+    let from_utf8 = string_binding
+        .find_callable(
+            CallStyle::AssociatedFunction,
+            "from_utf8",
+            std::slice::from_ref(&bytes),
+        )
+        .unwrap();
+    assert_eq!(from_utf8.return_type, string);
+    assert_eq!(from_utf8.rust_result_error, Some(utf8_error.clone()));
+    assert_eq!(
+        from_utf8.lowering,
+        RustLowering::AssociatedFunction {
+            rust_path: "::std::string::String::from_utf8".to_owned(),
+        }
+    );
+    assert_eq!(
+        bindings
+            .type_by_path("rust::std::string::FromUtf8Error")
+            .unwrap()
+            .error_format,
+        Some(NativeErrorFormat::Display)
     );
 }
 

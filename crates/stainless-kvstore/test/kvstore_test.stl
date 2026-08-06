@@ -160,10 +160,78 @@ i32 self_test(const String& path)
         status = 7;
     }
 
+    KeyCodec<String> string_codec = codecs::string_key();
+    String empty_text;
+    String prefix_text = "a";
+    String zero_text = "a";
+    zero_text.push('\0');
+    String extension_text = "aa";
+    String unicode_text = "é";
+    Encoded empty_text_bytes = string_codec.encode(empty_text);
+    Encoded prefix_text_bytes = string_codec.encode(prefix_text);
+    Encoded zero_text_bytes = string_codec.encode(zero_text);
+    Encoded extension_text_bytes = string_codec.encode(extension_text);
+    Encoded unicode_text_bytes = string_codec.encode(unicode_text);
+    if (!empty_text_bytes.valid || !prefix_text_bytes.valid || !zero_text_bytes.valid ||
+        !extension_text_bytes.valid || !unicode_text_bytes.valid ||
+        !(empty_text_bytes.bytes < prefix_text_bytes.bytes) ||
+        !(prefix_text_bytes.bytes < zero_text_bytes.bytes) ||
+        !(zero_text_bytes.bytes < extension_text_bytes.bytes) ||
+        !(extension_text_bytes.bytes < unicode_text_bytes.bytes)) {
+        status = 8;
+    }
+    DecodedAt<String> decoded_text = string_codec.decode(zero_text_bytes.bytes, 0);
+    if (!decoded_text.valid ||
+        decoded_text.offset != zero_text_bytes.bytes.len() ||
+        decoded_text.value != zero_text) {
+        status = 9;
+    }
+
+    KeyCodec<u32> number_codec = codecs::u32_key();
+    Encoded number_bytes = number_codec.encode(42);
+    Vec<u8> compound_bytes = unicode_text_bytes.bytes.clone();
+    compound_bytes.append(number_bytes.bytes);
+    DecodedAt<String> compound_text = string_codec.decode(compound_bytes, 0);
+    DecodedAt<u32> compound_number = number_codec.decode(compound_bytes, compound_text.offset);
+    if (!compound_text.valid || compound_text.value != unicode_text ||
+        !compound_number.valid || compound_number.value != 42 ||
+        compound_number.offset != compound_bytes.len()) {
+        status = 10;
+    }
+
+    Vec<u8> invalid_utf8;
+    invalid_utf8.push(255);
+    invalid_utf8.push(0);
+    invalid_utf8.push(0);
+    if (string_codec.decode(invalid_utf8, 0).valid) {
+        status = 11;
+    }
+
+    String string_path = path.clone();
+    string_path.push_str(".strings");
+    String string_index_path = detail::make_index_path(string_path);
+    if (fs::exists(string_path)) {
+        fs::remove_file(string_path);
+    }
+    if (fs::exists(string_index_path)) {
+        fs::remove_file(string_index_path);
+    }
+    JsonTable1<String> string_table = JsonTable1<String>(string_path, codecs::string_key());
+    var string_value = "string key value";
+    string_table.insert("alpha", string_value);
+    string_table.commit(1);
+    var found_string_value = var();
+    if (!string_table.find("alpha", found_string_value) ||
+        String(found_string_value) != "string key value") {
+        status = 12;
+    }
+
     fs::remove_file(path);
     fs::remove_file(index_path);
     fs::remove_file(json_path);
     fs::remove_file(json_index_path);
+    fs::remove_file(string_path);
+    fs::remove_file(string_index_path);
     return status;
 }
 

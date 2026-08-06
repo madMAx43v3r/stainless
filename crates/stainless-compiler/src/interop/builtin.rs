@@ -32,6 +32,7 @@ pub fn standard_bindings() -> Result<NativeBindings, super::BindingError> {
         queue_binding(),
         set_binding(),
         string_binding(),
+        string_from_utf8_error_binding(),
         var_binding(),
         vec_binding(),
     ])
@@ -1594,6 +1595,16 @@ fn string_binding() -> NativeTypeBinding {
     }
 }
 
+fn string_from_utf8_error_binding() -> NativeTypeBinding {
+    NativeTypeBinding {
+        stainless_path: "rust::std::string::FromUtf8Error".to_owned(),
+        rust_path: "::std::string::FromUtf8Error".to_owned(),
+        type_parameters: vec![],
+        error_format: Some(NativeErrorFormat::Display),
+        callables: vec![],
+    }
+}
+
 fn string_construction(string: &TypeRef, string_ref: &TypeRef) -> Vec<CallableBinding> {
     vec![
         constructor(
@@ -1615,6 +1626,13 @@ fn string_construction(string: &TypeRef, string_ref: &TypeRef) -> Vec<CallableBi
             vec![Parameter::new("capacity", TypeRef::Usize)],
             string.clone(),
             "::std::string::String::with_capacity",
+        ),
+        fallible_associated(
+            "from_utf8",
+            vec![Parameter::new("bytes", vec_of(TypeRef::U8))],
+            string.clone(),
+            TypeRef::native("rust::std::string::FromUtf8Error", vec![]),
+            "::std::string::String::from_utf8",
         ),
         method("clone", Receiver::Shared, vec![], string.clone()),
         method("into_bytes", Receiver::Value, vec![], vec_of(TypeRef::U8)),
