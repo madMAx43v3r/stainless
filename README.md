@@ -2564,6 +2564,15 @@ limited to `u32::MAX` bytes; larger writes fail with checked
 written. Both WALs use a big-endian `u32` record-size header; file offsets and
 committed file lengths remain `u64`.
 
+A Stainless `Database` can register multiple heterogeneous `RawTable`
+instances and coordinate `commit(version)` and `revert(version)` across them.
+Database commits are serialized but cannot be one atomic filesystem operation
+across independent WAL files. After opening every table on startup,
+`Database::recover()` selects the minimum durable table version and reverts any
+table ahead of it, safely resolving a process stop between table commits.
+Multi-table reads that must observe one logical version are externally
+synchronized with database commit, revert, and recovery.
+
 Within Stainless, the byte/WAL engine is explicitly named `RawTable`.
 Application serialization is layered on top of it in Stainless rather than in
 compiler-generated Rust. `Table<K, V>` stores four callbacks: key encode/key
@@ -2588,14 +2597,9 @@ ordering; a length prefix would incorrectly order vectors by length first.
 The operation composes recursively, so `codecs::u32_key().vec().vec()` encodes
 `Vec<Vec<u32>>` keys.
 
-The crate separately exposes `Table<K, V>` to Rust projects. `K` implements
-`OrderedKey`, whose persistent encoding must preserve `Ord`, and `V` implements
-`Codec`. Built-in codecs cover booleans, fixed-width integers, strings, byte
-vectors, and two-/three-element Rust tuples. Tuple key components use escaped,
-self-delimiting segments so encoded byte order remains lexicographic. User
-structs can implement `Codec`; a user key implements `OrderedKey` only when its
-encoding preserves its declared ordering. This explicit contract avoids
-guessing an unstable representation for arbitrary generic values.
+The kvstore's typed tables, codecs, and multi-table Database coordinator stay
+in Stainless. The crate packages their generated Rust output and does not
+maintain a second hand-written Rust storage API.
 
 Each Stainless compiler release supports one stable Rust minor release. The
 build helper compares `rustc -Vv` with the metadata version and rejects a

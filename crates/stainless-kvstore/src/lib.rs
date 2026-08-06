@@ -12,10 +12,6 @@
 
 include!(concat!(env!("OUT_DIR"), "/kvstore.stainless.rs"));
 
-mod typed;
-
-pub use typed::{Codec, Error, OrderedKey, Table};
-
 /// Runs the end-to-end Stainless store showcase at `path`.
 ///
 /// # Errors

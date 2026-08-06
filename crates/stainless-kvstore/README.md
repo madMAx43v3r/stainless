@@ -94,6 +94,46 @@ vector terminators. This keeps the encoding self-delimiting for compound keys
 while preserving lexicographic `Vec<T>` order, including empty vectors,
 prefixes, and nested vectors.
 
+## Multiple tables
+
+`Database` coordinates versions across heterogeneous tables by retaining their
+shared `RawTable` owners. Database-aware table constructors open and register a
+table in one operation:
+
+```cpp
+shared_ptr<Database> database = make_shared<Database>();
+JsonTable1<String> users(
+    database,
+    "users.db",
+    codecs::string_key());
+JsonTable1<u32> heights(
+    database,
+    "heights.db",
+    codecs::u32_key());
+
+// Open every existing table before recovery. A prior process may have stopped
+// after only some table commit records became durable.
+database.recover();
+
+users.insert("alice", {active: true});
+heights.insert(7, "block metadata");
+database.commit(1);
+```
+
+`commit(version)` first requires every table to have the same current version,
+then commits them in registration order. It is intentionally not presented as
+one atomic filesystem transaction: an I/O failure or process stop can occur
+between table commit records. On restart, opening every table followed by
+`recover()` finds their minimum durable version and reverts any table ahead of
+it. `revert(version)` similarly applies one branch rollback to every table.
+`current_version()` reports the minimum registered-table version and returns
+zero for an empty database.
+
+The Database mutex serializes database-level commit, revert, recovery, and
+registration. Individual table reads retain their existing per-table read
+locks, so an application that needs one logical read spanning several tables
+must ensure it does not overlap a database version change.
+
 For example, this Stainless code creates a two-part key with JSON values:
 
 ```cpp
@@ -116,39 +156,14 @@ Supplying all four callbacks to `Table<K, V>` selects a custom persistent
 representation for both keys and values; the compiler does not synthesize
 serialization code for the table.
 
-The Rust-facing `Table<K, V>` remains statically typed through two explicit traits:
-
-- `Codec` defines the stable persistent representation of a key or value.
-- `OrderedKey: Codec + Ord` additionally guarantees that encoded byte order
-  preserves the source key order.
-
-Built-in implementations cover booleans, fixed-width integers, `String`,
-`Vec<u8>`, and two-/three-element tuples. Applications can implement `Codec`
-for their own structs. Compound tuple keys use escaped, self-delimiting
-segments so their encoded order is lexicographic.
-
-Keys and application values cross the persistence boundary as bytes because
-arbitrary Rust `Codec` implementations can fail. The Rust `Table<K, V>` facade
-performs that fallible conversion and keeps the Stainless WAL engine
-independent of application-specific codecs.
-
-```rust
-use stainless_kvstore::Table;
-
-let store = Table::<(u32, String), String>::open("users.db")?;
-store.insert((7, "alice".into()), "active".into())?;
-store.commit(1)?;
-assert_eq!(store.find(&(7, "alice".into()))?, Some("active".into()));
-let rows = store.find_range(&(7, "a".into()), &(7, "z".into()))?;
-let first_rows = store.find_range_first(&(7, "a".into()), &(7, "z".into()), 10)?;
-let last_rows = store.find_range_last(&(7, "a".into()), &(7, "z".into()), 10)?;
-# Ok::<(), stainless_kvstore::Error>(())
-```
+The typed tables, codecs, and Database coordinator are all implemented in
+Stainless. This crate does not maintain a parallel hand-written Rust storage
+API; Cargo only packages the Rust generated from those Stainless sources.
 
 Multiple threads can read values concurrently from the same open file handle
 without sharing a cursor or reopening the path.
 
-Run the end-to-end showcase with:
+Run the Stainless end-to-end showcase through its minimal Rust test harness:
 
 ```sh
 cargo test -p stainless-kvstore

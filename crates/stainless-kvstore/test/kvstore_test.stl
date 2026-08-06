@@ -226,12 +226,78 @@ i32 self_test(const String& path)
         status = 12;
     }
 
+    String database_first_path = path.clone();
+    database_first_path.push_str(".database-first");
+    String database_first_index_path = detail::make_index_path(database_first_path);
+    String database_second_path = path.clone();
+    database_second_path.push_str(".database-second");
+    String database_second_index_path = detail::make_index_path(database_second_path);
+    if (fs::exists(database_first_path)) {
+        fs::remove_file(database_first_path);
+    }
+    if (fs::exists(database_first_index_path)) {
+        fs::remove_file(database_first_index_path);
+    }
+    if (fs::exists(database_second_path)) {
+        fs::remove_file(database_second_path);
+    }
+    if (fs::exists(database_second_index_path)) {
+        fs::remove_file(database_second_index_path);
+    }
+    shared_ptr<Database> database = make_shared<Database>();
+    JsonTable1<String> database_first = JsonTable1<String>(
+        database,
+        database_first_path,
+        codecs::string_key());
+    JsonTable1<u32> database_second = JsonTable1<u32>(
+        database,
+        database_second_path,
+        codecs::u32_key());
+    var first_database_value = "first table";
+    var second_database_value = "second table";
+    database_first.insert("key", first_database_value);
+    database_second.insert(7, second_database_value);
+    if (!database.commit(1) || database.current_version() != 1) {
+        status = 13;
+    }
+    var found_first_database_value = var();
+    var found_second_database_value = var();
+    if (!database_first.find("key", found_first_database_value) ||
+        !database_second.find(7, found_second_database_value) ||
+        String(found_first_database_value) != "first table" ||
+        String(found_second_database_value) != "second table") {
+        status = 14;
+    }
+
+    var interrupted_database_value = "interrupted table commit";
+    database_first.insert("key", interrupted_database_value);
+    if (!database_first.commit(2) || database.current_version() != 1 || database.commit(3)) {
+        status = 15;
+    }
+    if (database.recover() != 1 ||
+        database_first.current_version() != 1 ||
+        database_second.current_version() != 1) {
+        status = 16;
+    }
+    if (!database_first.find("key", found_first_database_value) ||
+        String(found_first_database_value) != "first table") {
+        status = 17;
+    }
+    if (!database.revert(0) || database_first.find("key", found_first_database_value) ||
+        database_second.find(7, found_second_database_value)) {
+        status = 18;
+    }
+
     fs::remove_file(path);
     fs::remove_file(index_path);
     fs::remove_file(json_path);
     fs::remove_file(json_index_path);
     fs::remove_file(string_path);
     fs::remove_file(string_index_path);
+    fs::remove_file(database_first_path);
+    fs::remove_file(database_first_index_path);
+    fs::remove_file(database_second_path);
+    fs::remove_file(database_second_index_path);
     return status;
 }
 
