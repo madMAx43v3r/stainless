@@ -105,6 +105,58 @@ fn endian_bindings_use_exact_byte_widths_and_checked_reads() {
 }
 
 #[test]
+fn big_endian_has_exact_type_cursor_overloads() {
+    let bindings = standard_bindings().unwrap();
+    let bytes = TypeRef::native("rust::Vec", vec![TypeRef::U8]);
+    let io_error = TypeRef::native("rust::std::io::Error", vec![]);
+
+    let big_endian = bindings
+        .type_by_path("rust::stainless_runtime::BigEndian")
+        .unwrap();
+    for integer in [
+        TypeRef::U8,
+        TypeRef::U16,
+        TypeRef::U32,
+        TypeRef::U64,
+        TypeRef::U128,
+    ] {
+        let write = big_endian
+            .find_callable(
+                CallStyle::AssociatedFunction,
+                "write",
+                &[TypeRef::mutable_ref(bytes.clone()), integer.clone()],
+            )
+            .unwrap();
+        assert_eq!(write.return_type, TypeRef::Void);
+        assert_eq!(write.rust_result_error, None);
+
+        let read = big_endian
+            .find_callable(
+                CallStyle::AssociatedFunction,
+                "read",
+                &[
+                    TypeRef::shared_ref(bytes.clone()),
+                    TypeRef::mutable_ref(TypeRef::Usize),
+                    TypeRef::mutable_ref(integer),
+                ],
+            )
+            .unwrap();
+        assert_eq!(read.return_type, TypeRef::Void);
+        assert_eq!(read.rust_result_error, Some(io_error.clone()));
+    }
+    assert!(
+        big_endian
+            .find_callable(
+                CallStyle::AssociatedFunction,
+                "write",
+                &[TypeRef::mutable_ref(bytes), TypeRef::Usize],
+            )
+            .is_none(),
+        "an overloaded write must never choose a platform-dependent usize width"
+    );
+}
+
+#[test]
 fn positioned_file_binding_uses_one_shared_cursor_free_handle() {
     let bindings = standard_bindings().unwrap();
     let file = bindings.type_by_path("rust::std::fs::File").unwrap();
@@ -909,6 +961,21 @@ fn var_exposes_checked_shared_mutation_methods() {
         &set_field.lowering,
         RustLowering::Method { rust_name } if rust_name == "set_field"
     ));
+
+    let bytes_ref = TypeRef::shared_ref(TypeRef::native("rust::Vec", vec![TypeRef::U8]));
+    let parse_bytes = var_binding
+        .find_callable(CallStyle::AssociatedFunction, "parse_bytes", &[bytes_ref])
+        .expect("var exposes zero-copy JSON parsing from a byte vector");
+    assert_eq!(
+        parse_bytes.return_type,
+        TypeRef::native(
+            "rust::Result",
+            vec![
+                TypeRef::native("rust::stainless_runtime::Var", vec![]),
+                TypeRef::native("rust::stainless_runtime::JsonError", vec![]),
+            ]
+        )
+    );
 }
 
 #[test]

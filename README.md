@@ -2505,6 +2505,13 @@ allowing `BigEndian::write_u32(output, values.len())` without a redundant cast.
 Conversion to `u64` is lossless on every supported Rust target; conversion to
 `u32` is checked and raises `stainless::IoError` instead of truncating.
 
+`BigEndian` additionally provides exact-type `write(output, value)` and
+`read(bytes, offset, value)` overloads for `u8`, `u16`, `u32`, `u64`, and
+`u128`. The latter decodes into `value` and advances the mutable `usize`
+offset, allowing compound ordered keys to be encoded and decoded without
+temporary slices or repeated casts. Overload resolution uses the exact integer
+type; there is intentionally no platform-dependent `usize` overload.
+
 Cursor-based and buffered streams, rich metadata, permissions, and symlink
 operations remain for the next file-I/O layer.
 
@@ -2557,7 +2564,31 @@ limited to `u32::MAX` bytes; larger writes fail with checked
 written. Both WALs use a big-endian `u32` record-size header; file offsets and
 committed file lengths remain `u64`.
 
-The crate exposes `Table<K, V>` to Rust projects. `K` implements
+Within Stainless, the byte/WAL engine is explicitly named `RawTable`.
+Application serialization is layered on top of it in Stainless rather than in
+compiler-generated Rust. `Table<K, V>` stores four callbacks: key encode/key
+decode and value encode/value decode. Each callback returns a checked
+`Encoded` or `Decoded<T>` result, and a failed callback becomes checked
+`kvstore::CodecError`.
+
+`JsonTable<K>` supplies the value callbacks automatically: values are `var`
+and are persisted as compact JSON. `JsonTable1<K>`, `JsonTable2<K1, K2>`, and
+`JsonTable3<K1, K2, K3>` compose one to three ordered key components. A
+`KeyCodec<T>` contains an encoder and an offset-aware decoder so compound keys
+can be concatenated without allocating nested containers. The initial
+`codecs::u8_key()`, `u16_key()`, `u32_key()`, `u64_key()`, and `u128_key()`
+implementations use the `BigEndian::write()` / `BigEndian::read()` overloads.
+Applications can supply their own order-preserving key codecs or use
+`Table<K, V>` when values should have a non-JSON representation.
+
+Every `KeyCodec<T>` also provides `vec()`, producing a `KeyCodec<Vec<T>>` from
+the element codec. Vector elements and the vector terminator use an escaped,
+self-delimiting byte framing that preserves Rust's lexicographic `Vec<T>`
+ordering; a length prefix would incorrectly order vectors by length first.
+The operation composes recursively, so `codecs::u32_key().vec().vec()` encodes
+`Vec<Vec<u32>>` keys.
+
+The crate separately exposes `Table<K, V>` to Rust projects. `K` implements
 `OrderedKey`, whose persistent encoding must preserve `Ord`, and `V` implements
 `Codec`. Built-in codecs cover booleans, fixed-width integers, strings, byte
 vectors, and two-/three-element Rust tuples. Tuple key components use escaped,
@@ -3235,6 +3266,7 @@ stainless-build = { path = "../../crates/stainless-build" }
 // build.rs
 fn main() {
     stainless_build::Builder::new("src/lib.stl")
+        .add_source("test/lib_test.stl")
         .output_name("stainless.rs")
         .export("app::run", "stainless_run")
         .compile()
@@ -3242,9 +3274,12 @@ fn main() {
 }
 ```
 
-The builder resolves the source relative to `CARGO_MANIFEST_DIR`, writes the
-generated file beneath Cargo's `OUT_DIR`, emits `cargo:rerun-if-changed`, and
-can re-export an exact non-overloaded free function under a stable Rust name.
+The builder resolves each source relative to `CARGO_MANIFEST_DIR`, concatenates
+sources added with `add_source()` into one translation unit in call order,
+writes the generated file beneath Cargo's `OUT_DIR`, emits
+`cargo:rerun-if-changed`, and can re-export an exact non-overloaded free
+function under a stable Rust name. This lets a package keep its Stainless tests
+in a sibling `test` directory while sharing private implementation details.
 The Rust crate includes the requested output at crate root:
 
 ```rust
@@ -3256,8 +3291,9 @@ Including at crate root preserves Stainless `crate::` paths and permits direct
 calls between generated and hand-written Rust modules. A duplicate Rust and
 Stainless item name is a normal compile error unless one side is placed in a
 module. Generated files are rebuildable artifacts and are never written into
-`src`. Multi-file compilation, binding-manifest selection through the builder,
-overload-signature export selectors, and runtime ABI versioning are deferred.
+`src`. Module-aware multi-file compilation, binding-manifest selection through
+the builder, overload-signature export selectors, and runtime ABI versioning
+are deferred.
 
 Standalone Stainless programs need only a `.stl` source file with one root,
 non-overloaded `i32 main()` function. They do not need a Rust package,

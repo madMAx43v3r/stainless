@@ -45,6 +45,7 @@ fn little_endian_binding() -> NativeTypeBinding {
     endian_binding("LittleEndian")
 }
 
+#[allow(clippy::too_many_lines)]
 fn endian_binding(name: &str) -> NativeTypeBinding {
     let bytes = vec_of(TypeRef::U8);
     let io_error = TypeRef::native(IO_ERROR_TYPE_PATH, Vec::new());
@@ -61,82 +62,148 @@ fn endian_binding(name: &str) -> NativeTypeBinding {
             Parameter::new("offset", TypeRef::Usize),
         ]
     };
+    let read_advance_parameters = |value| {
+        vec![
+            Parameter::new("bytes", TypeRef::shared_ref(bytes.clone())),
+            Parameter::new("offset", TypeRef::mutable_ref(TypeRef::Usize)),
+            Parameter::new("value", TypeRef::mutable_ref(value)),
+        ]
+    };
     let rust_path = format!("::stainless_runtime::{name}");
+    let mut callables = vec![
+        associated(
+            "write_u32",
+            write_parameters(TypeRef::U32),
+            TypeRef::Void,
+            &format!("{rust_path}::write_u32"),
+        ),
+        associated(
+            "write_u64",
+            write_parameters(TypeRef::U64),
+            TypeRef::Void,
+            &format!("{rust_path}::write_u64"),
+        ),
+        fallible_associated(
+            "write_u32",
+            write_parameters(TypeRef::Usize),
+            TypeRef::Void,
+            io_error.clone(),
+            &format!("{rust_path}::write_usize_u32"),
+        ),
+        associated(
+            "write_u64",
+            write_parameters(TypeRef::Usize),
+            TypeRef::Void,
+            &format!("{rust_path}::write_usize_u64"),
+        ),
+        fallible_associated(
+            "read_u8",
+            read_parameters(),
+            TypeRef::U8,
+            io_error.clone(),
+            &format!("{rust_path}::read_u8"),
+        ),
+        fallible_associated(
+            "read_u8_at",
+            read_at_parameters(),
+            TypeRef::U8,
+            io_error.clone(),
+            &format!("{rust_path}::read_u8_at"),
+        ),
+        fallible_associated(
+            "read_u32",
+            read_parameters(),
+            TypeRef::U32,
+            io_error.clone(),
+            &format!("{rust_path}::read_u32"),
+        ),
+        fallible_associated(
+            "read_u32_at",
+            read_at_parameters(),
+            TypeRef::U32,
+            io_error.clone(),
+            &format!("{rust_path}::read_u32_at"),
+        ),
+        fallible_associated(
+            "read_u64",
+            read_parameters(),
+            TypeRef::U64,
+            io_error.clone(),
+            &format!("{rust_path}::read_u64"),
+        ),
+        fallible_associated(
+            "read_u64_at",
+            read_at_parameters(),
+            TypeRef::U64,
+            io_error.clone(),
+            &format!("{rust_path}::read_u64_at"),
+        ),
+    ];
+    if name == "BigEndian" {
+        for (source_name, ty, rust_name) in [
+            ("write_u8", TypeRef::U8, "write_u8"),
+            ("write_u16", TypeRef::U16, "write_u16"),
+            ("write_u128", TypeRef::U128, "write_u128"),
+            ("write", TypeRef::U8, "write_u8"),
+            ("write", TypeRef::U16, "write_u16"),
+            ("write", TypeRef::U32, "write_u32"),
+            ("write", TypeRef::U64, "write_u64"),
+            ("write", TypeRef::U128, "write_u128"),
+        ] {
+            callables.push(associated(
+                source_name,
+                write_parameters(ty),
+                TypeRef::Void,
+                &format!("{rust_path}::{rust_name}"),
+            ));
+        }
+        for (source_name, ty, rust_name) in [
+            ("read_u16", TypeRef::U16, "read_u16"),
+            ("read_u128", TypeRef::U128, "read_u128"),
+        ] {
+            callables.push(fallible_associated(
+                source_name,
+                read_parameters(),
+                ty,
+                io_error.clone(),
+                &format!("{rust_path}::{rust_name}"),
+            ));
+        }
+        for (source_name, ty, rust_name) in [
+            ("read_u16_at", TypeRef::U16, "read_u16_at"),
+            ("read_u128_at", TypeRef::U128, "read_u128_at"),
+        ] {
+            callables.push(fallible_associated(
+                source_name,
+                read_at_parameters(),
+                ty,
+                io_error.clone(),
+                &format!("{rust_path}::{rust_name}"),
+            ));
+        }
+        for (ty, rust_name) in [
+            (TypeRef::U8, "read_u8_advance"),
+            (TypeRef::U16, "read_u16_advance"),
+            (TypeRef::U32, "read_u32_advance"),
+            (TypeRef::U64, "read_u64_advance"),
+            (TypeRef::U128, "read_u128_advance"),
+        ] {
+            callables.push(fallible_associated(
+                "read",
+                read_advance_parameters(ty),
+                TypeRef::Void,
+                io_error.clone(),
+                &format!("{rust_path}::{rust_name}"),
+            ));
+        }
+    }
 
     NativeTypeBinding {
         stainless_path: format!("rust::stainless_runtime::{name}"),
         rust_path: rust_path.clone(),
         type_parameters: vec![],
         error_format: None,
-        callables: vec![
-            associated(
-                "write_u32",
-                write_parameters(TypeRef::U32),
-                TypeRef::Void,
-                &format!("{rust_path}::write_u32"),
-            ),
-            associated(
-                "write_u64",
-                write_parameters(TypeRef::U64),
-                TypeRef::Void,
-                &format!("{rust_path}::write_u64"),
-            ),
-            fallible_associated(
-                "write_u32",
-                write_parameters(TypeRef::Usize),
-                TypeRef::Void,
-                io_error.clone(),
-                &format!("{rust_path}::write_usize_u32"),
-            ),
-            associated(
-                "write_u64",
-                write_parameters(TypeRef::Usize),
-                TypeRef::Void,
-                &format!("{rust_path}::write_usize_u64"),
-            ),
-            fallible_associated(
-                "read_u8",
-                read_parameters(),
-                TypeRef::U8,
-                io_error.clone(),
-                &format!("{rust_path}::read_u8"),
-            ),
-            fallible_associated(
-                "read_u8_at",
-                read_at_parameters(),
-                TypeRef::U8,
-                io_error.clone(),
-                &format!("{rust_path}::read_u8_at"),
-            ),
-            fallible_associated(
-                "read_u32",
-                read_parameters(),
-                TypeRef::U32,
-                io_error.clone(),
-                &format!("{rust_path}::read_u32"),
-            ),
-            fallible_associated(
-                "read_u32_at",
-                read_at_parameters(),
-                TypeRef::U32,
-                io_error.clone(),
-                &format!("{rust_path}::read_u32_at"),
-            ),
-            fallible_associated(
-                "read_u64",
-                read_parameters(),
-                TypeRef::U64,
-                io_error.clone(),
-                &format!("{rust_path}::read_u64"),
-            ),
-            fallible_associated(
-                "read_u64_at",
-                read_at_parameters(),
-                TypeRef::U64,
-                io_error,
-                &format!("{rust_path}::read_u64_at"),
-            ),
-        ],
+        callables,
     }
 }
 
@@ -472,6 +539,7 @@ fn var_binding() -> NativeTypeBinding {
     let var = TypeRef::native(VAR_TYPE_PATH, Vec::new());
     let string = string_type();
     let string_ref = TypeRef::shared_ref(string.clone());
+    let bytes_ref = TypeRef::shared_ref(vec_of(TypeRef::U8));
     let json_error = TypeRef::native(JSON_ERROR_TYPE_PATH, Vec::new());
     let result_var = TypeRef::native("rust::Result", vec![var.clone(), json_error.clone()]);
 
@@ -505,6 +573,20 @@ fn var_binding() -> NativeTypeBinding {
                 requirements: vec![],
                 lowering: RustLowering::AssociatedFunction {
                     rust_path: "::stainless_runtime::Var::parse".to_owned(),
+                },
+            },
+            CallableBinding {
+                source_name: "parse_bytes".to_owned(),
+                style: CallStyle::AssociatedFunction,
+                receiver: None,
+                parameters: vec![Parameter::new("source", bytes_ref)],
+                is_async: false,
+                return_type: result_var.clone(),
+                rust_result_error: None,
+                return_borrow: None,
+                requirements: vec![],
+                lowering: RustLowering::AssociatedFunction {
+                    rust_path: "::stainless_runtime::Var::parse_bytes".to_owned(),
                 },
             },
             CallableBinding {

@@ -1,5 +1,6 @@
 fn main() {
     stainless_build::Builder::new("src/kvstore.stl")
+        .add_source("test/kvstore_test.stl")
         .output_name("kvstore.stainless.rs")
         .export("kvstore::open_table", "stainless_kvstore_open_raw")
         .export("kvstore::insert_bytes", "stainless_kvstore_insert_raw")

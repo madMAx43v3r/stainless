@@ -1177,6 +1177,38 @@ i32 generic_result() {
 }
 
 #[test]
+fn generic_stored_function_adapters_emit_static_owned_type_parameters() {
+    let source = r"struct Codec<T> {
+    function<i32(const T&)> inspect;
+};
+
+class Adapter<T> {
+    Adapter(Codec<T> codec);
+private:
+    function<i32(const T&)> inspect;
+};
+
+Adapter<T>::Adapter(Codec<T> codec)
+    : inspect([callback = codec.inspect](const T& value) {
+          return callback(value);
+      })
+{
+}
+";
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let rust = result
+        .rust
+        .expect("generic callback adapter should emit Rust");
+    assert!(rust.contains("T: 'static"), "{rust}");
+    compile_rust("generic-stored-function-adapter", &rust, CrateKind::Library);
+}
+
+#[test]
 fn checked_exceptions_propagate_and_match_typed_catches() {
     let source = r#"namespace samples {
 

@@ -344,6 +344,88 @@ void decode(const Vec<u8>& bytes) {
 }
 
 #[test]
+fn big_endian_overloads_resolve_by_exact_integer_type() {
+    let analysis = analyze(
+        r"use rust::Vec;
+use stainless::BigEndian;
+
+void encode(Vec<u8>& bytes) {
+    u8 byte = 1;
+    u16 short = 2;
+    u32 word = 3;
+    u64 long = 4;
+    u128 wide = 5;
+    BigEndian::write(bytes, byte);
+    BigEndian::write(bytes, short);
+    BigEndian::write(bytes, word);
+    BigEndian::write(bytes, long);
+    BigEndian::write(bytes, wide);
+}
+
+void decode(const Vec<u8>& bytes) throws stainless::IoError {
+    usize offset = 0;
+    u8 byte = 0;
+    u16 short = 0;
+    u32 word = 0;
+    u64 long = 0;
+    u128 wide = 0;
+    BigEndian::read(bytes, offset, byte);
+    BigEndian::read(bytes, offset, short);
+    BigEndian::read(bytes, offset, word);
+    BigEndian::read(bytes, offset, long);
+    BigEndian::read(bytes, offset, wide);
+}
+",
+    );
+
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+    assert_eq!(
+        analysis
+            .semantics
+            .calls
+            .iter()
+            .filter(|call| {
+                matches!(
+                    &call.target,
+                    CallTarget::Native(native)
+                        if native.type_path == "rust::stainless_runtime::BigEndian"
+                )
+            })
+            .count(),
+        10
+    );
+}
+
+#[test]
+fn constructor_initializers_accept_existing_shared_owners() {
+    let analysis = analyze(
+        r"struct State {
+    i32 value;
+};
+
+class Holder {
+    Holder(shared_ptr<State> state);
+private:
+    shared_ptr<State> state;
+};
+
+Holder::Holder(shared_ptr<State> state) : state(state) {
+}
+",
+    );
+
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
 fn records_recursive_struct_json_conversions_and_rejects_unsupported_shapes() {
     let valid = analyze(include_str!("../../../docs/ref/21_json_support.stl"));
     assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);

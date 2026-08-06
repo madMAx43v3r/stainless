@@ -426,6 +426,16 @@ const _: () = assert!(std::mem::size_of::<usize>() <= std::mem::size_of::<u64>()
 pub struct BigEndian;
 
 impl BigEndian {
+    /// Writes one byte at the end of `output`.
+    pub fn write_u8(output: &mut Vec<u8>, value: u8) {
+        output.push(value);
+    }
+
+    /// Writes one `u16` in network byte order at the end of `output`.
+    pub fn write_u16(output: &mut Vec<u8>, value: u16) {
+        output.extend_from_slice(&value.to_be_bytes());
+    }
+
     /// Writes one `u32` in network byte order at the end of `output`.
     pub fn write_u32(output: &mut Vec<u8>, value: u32) {
         output.extend_from_slice(&value.to_be_bytes());
@@ -433,6 +443,11 @@ impl BigEndian {
 
     /// Writes one `u64` in network byte order at the end of `output`.
     pub fn write_u64(output: &mut Vec<u8>, value: u64) {
+        output.extend_from_slice(&value.to_be_bytes());
+    }
+
+    /// Writes one `u128` in network byte order at the end of `output`.
+    pub fn write_u128(output: &mut Vec<u8>, value: u128) {
         output.extend_from_slice(&value.to_be_bytes());
     }
 
@@ -479,6 +494,34 @@ impl BigEndian {
             .get(offset)
             .copied()
             .ok_or_else(|| invalid_integer_offset("big-endian", "u8", offset, 1, bytes.len()))
+    }
+
+    /// Decodes one big-endian `u16`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` unless `bytes` contains exactly two bytes.
+    pub fn read_u16(bytes: &[u8]) -> std::io::Result<u16> {
+        let bytes = bytes
+            .try_into()
+            .map_err(|_| invalid_integer_width("big-endian", "u16", 2, bytes.len()))?;
+        Ok(u16::from_be_bytes(bytes))
+    }
+
+    /// Decodes one big-endian `u16` at `offset`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` when two bytes are not available at `offset`.
+    pub fn read_u16_at(bytes: &[u8], offset: usize) -> std::io::Result<u16> {
+        let end = offset
+            .checked_add(2)
+            .ok_or_else(|| invalid_integer_offset("big-endian", "u16", offset, 2, bytes.len()))?;
+        Self::read_u16(
+            bytes.get(offset..end).ok_or_else(|| {
+                invalid_integer_offset("big-endian", "u16", offset, 2, bytes.len())
+            })?,
+        )
     }
 
     /// Decodes one big-endian `u32`.
@@ -535,6 +578,109 @@ impl BigEndian {
                 invalid_integer_offset("big-endian", "u64", offset, 8, bytes.len())
             })?,
         )
+    }
+
+    /// Decodes one big-endian `u128`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` unless `bytes` contains exactly sixteen bytes.
+    pub fn read_u128(bytes: &[u8]) -> std::io::Result<u128> {
+        let bytes = bytes
+            .try_into()
+            .map_err(|_| invalid_integer_width("big-endian", "u128", 16, bytes.len()))?;
+        Ok(u128::from_be_bytes(bytes))
+    }
+
+    /// Decodes one big-endian `u128` at `offset`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` when sixteen bytes are not available at `offset`.
+    pub fn read_u128_at(bytes: &[u8], offset: usize) -> std::io::Result<u128> {
+        let end = offset
+            .checked_add(16)
+            .ok_or_else(|| invalid_integer_offset("big-endian", "u128", offset, 16, bytes.len()))?;
+        Self::read_u128(
+            bytes.get(offset..end).ok_or_else(|| {
+                invalid_integer_offset("big-endian", "u128", offset, 16, bytes.len())
+            })?,
+        )
+    }
+
+    /// Reads one byte into `output` and advances `offset`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` when no byte is available at `offset`.
+    pub fn read_u8_advance(
+        bytes: &[u8],
+        offset: &mut usize,
+        output: &mut u8,
+    ) -> std::io::Result<()> {
+        *output = Self::read_u8_at(bytes, *offset)?;
+        *offset += 1;
+        Ok(())
+    }
+
+    /// Reads one big-endian `u16` into `output` and advances `offset`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` when two bytes are not available at `offset`.
+    pub fn read_u16_advance(
+        bytes: &[u8],
+        offset: &mut usize,
+        output: &mut u16,
+    ) -> std::io::Result<()> {
+        *output = Self::read_u16_at(bytes, *offset)?;
+        *offset += 2;
+        Ok(())
+    }
+
+    /// Reads one big-endian `u32` into `output` and advances `offset`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` when four bytes are not available at `offset`.
+    pub fn read_u32_advance(
+        bytes: &[u8],
+        offset: &mut usize,
+        output: &mut u32,
+    ) -> std::io::Result<()> {
+        *output = Self::read_u32_at(bytes, *offset)?;
+        *offset += 4;
+        Ok(())
+    }
+
+    /// Reads one big-endian `u64` into `output` and advances `offset`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` when eight bytes are not available at `offset`.
+    pub fn read_u64_advance(
+        bytes: &[u8],
+        offset: &mut usize,
+        output: &mut u64,
+    ) -> std::io::Result<()> {
+        *output = Self::read_u64_at(bytes, *offset)?;
+        *offset += 8;
+        Ok(())
+    }
+
+    /// Reads one big-endian `u128` into `output` and advances `offset`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` when sixteen bytes are not available at `offset`.
+    pub fn read_u128_advance(
+        bytes: &[u8],
+        offset: &mut usize,
+        output: &mut u128,
+    ) -> std::io::Result<()> {
+        *output = Self::read_u128_at(bytes, *offset)?;
+        *offset += 16;
+        Ok(())
     }
 }
 
@@ -1134,6 +1280,17 @@ impl Var {
     /// Returns [`JsonError`] when `source` is not valid JSON.
     pub fn parse(source: &str) -> Result<Self, JsonError> {
         serde_json::from_str(source)
+            .map(Self::from_value)
+            .map_err(JsonError::parse)
+    }
+
+    /// Parses one complete UTF-8 JSON document from bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonError`] when `source` is not valid UTF-8 JSON.
+    pub fn parse_bytes(source: &[u8]) -> Result<Self, JsonError> {
+        serde_json::from_slice(source)
             .map(Self::from_value)
             .map_err(JsonError::parse)
     }
@@ -1866,8 +2023,10 @@ mod tests {
     #[test]
     fn fixed_width_endian_encoding_round_trips() {
         let mut bytes = vec![0xaa];
+        BigEndian::write_u16(&mut bytes, 0xbbcc);
         BigEndian::write_u32(&mut bytes, 0x0102_0304);
         BigEndian::write_u64(&mut bytes, 0x0506_0708_090a_0b0c);
+        BigEndian::write_u128(&mut bytes, 0x0d0e_0f10_1112_1314_1516_1718_191a_1b1c);
         let mut length_bytes = Vec::new();
         BigEndian::write_usize_u32(&mut length_bytes, 4).unwrap();
         BigEndian::write_usize_u64(&mut length_bytes, 8);
@@ -1876,20 +2035,55 @@ mod tests {
         assert_eq!(
             bytes,
             [
-                0xaa, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+                0xaa, 0xbb, 0xcc, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b,
+                0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19,
+                0x1a, 0x1b, 0x1c,
             ]
         );
         assert_eq!(BigEndian::read_u8(&bytes[..1]).unwrap(), 0xaa);
-        assert_eq!(BigEndian::read_u32(&bytes[1..5]).unwrap(), 0x0102_0304);
+        assert_eq!(BigEndian::read_u16(&bytes[1..3]).unwrap(), 0xbbcc);
+        assert_eq!(BigEndian::read_u32(&bytes[3..7]).unwrap(), 0x0102_0304);
         assert_eq!(
-            BigEndian::read_u64(&bytes[5..13]).unwrap(),
+            BigEndian::read_u64(&bytes[7..15]).unwrap(),
             0x0506_0708_090a_0b0c
         );
-        assert_eq!(BigEndian::read_u8_at(&bytes, 0).unwrap(), 0xaa);
-        assert_eq!(BigEndian::read_u32_at(&bytes, 1).unwrap(), 0x0102_0304);
         assert_eq!(
-            BigEndian::read_u64_at(&bytes, 5).unwrap(),
+            BigEndian::read_u128(&bytes[15..31]).unwrap(),
+            0x0d0e_0f10_1112_1314_1516_1718_191a_1b1c
+        );
+        assert_eq!(BigEndian::read_u8_at(&bytes, 0).unwrap(), 0xaa);
+        assert_eq!(BigEndian::read_u16_at(&bytes, 1).unwrap(), 0xbbcc);
+        assert_eq!(BigEndian::read_u32_at(&bytes, 3).unwrap(), 0x0102_0304);
+        assert_eq!(
+            BigEndian::read_u64_at(&bytes, 7).unwrap(),
             0x0506_0708_090a_0b0c
+        );
+        assert_eq!(
+            BigEndian::read_u128_at(&bytes, 15).unwrap(),
+            0x0d0e_0f10_1112_1314_1516_1718_191a_1b1c
+        );
+
+        let mut offset = 0;
+        let mut byte = 0;
+        let mut short = 0;
+        let mut word = 0;
+        let mut long = 0;
+        let mut wide = 0;
+        BigEndian::read_u8_advance(&bytes, &mut offset, &mut byte).unwrap();
+        BigEndian::read_u16_advance(&bytes, &mut offset, &mut short).unwrap();
+        BigEndian::read_u32_advance(&bytes, &mut offset, &mut word).unwrap();
+        BigEndian::read_u64_advance(&bytes, &mut offset, &mut long).unwrap();
+        BigEndian::read_u128_advance(&bytes, &mut offset, &mut wide).unwrap();
+        assert_eq!(
+            (offset, byte, short, word, long, wide),
+            (
+                bytes.len(),
+                0xaa,
+                0xbbcc,
+                0x0102_0304,
+                0x0506_0708_090a_0b0c,
+                0x0d0e_0f10_1112_1314_1516_1718_191a_1b1c,
+            )
         );
         assert_eq!(
             BigEndian::read_u32(&bytes[..3]).unwrap_err().kind(),
@@ -2106,8 +2300,11 @@ mod tests {
     #[test]
     fn parses_and_serializes_json() {
         let value = Var::parse(r#"{"name":"Stainless","values":[1,null]}"#).expect("valid JSON");
+        let bytes = Var::parse_bytes(br#"{"name":"Stainless","values":[1,null]}"#)
+            .expect("valid JSON bytes");
 
         assert_eq!(value.field("name"), Var::from("Stainless"));
+        assert_eq!(bytes.to_json(), value.to_json());
         assert_eq!(value.to_json(), r#"{"name":"Stainless","values":[1,null]}"#);
     }
 

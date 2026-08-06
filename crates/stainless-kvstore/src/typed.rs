@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
 
-use super::__stainless_namespace_kvstore::Table as RawTable;
+use super::__stainless_namespace_kvstore::RawTable;
 use super::{
     __StainlessExceptionBox, stainless_kvstore_commit_raw, stainless_kvstore_find_range_first_raw,
     stainless_kvstore_find_range_last_raw, stainless_kvstore_find_range_raw,

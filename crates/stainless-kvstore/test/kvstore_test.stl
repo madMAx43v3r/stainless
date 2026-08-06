@@ -1,0 +1,170 @@
+// End-to-end tests for the Stainless kvstore implementation.
+
+use rust::std::fs;
+use rust::std::thread;
+
+namespace kvstore {
+
+struct ReaderState {
+    i32 successful;
+};
+
+namespace test_detail {
+
+Vec<u8> one_byte(u8 value)
+{
+    Vec<u8> bytes;
+    bytes.push(value);
+    return bytes;
+}
+
+Vec<u8> test_key(u64 value)
+{
+    Vec<u8> bytes;
+    BigEndian::write_u64(bytes, value);
+    return bytes;
+}
+
+bool value_is(shared_nullptr<Value> maybe, u8 expected)
+{
+    if (!maybe) {
+        return false;
+    }
+    shared_ptr<Value> value = shared_ptr<Value>(maybe);
+    return value.bytes.len() == 1 && value.bytes.contains(expected);
+}
+
+void write_history(const String& path) throws IndexCorrupt, ValueTooLarge, stainless::IoError
+{
+    shared_ptr<RawTable> table = open_table(path);
+    table.insert(test_key(7), one_byte(10));
+    table.commit(1);
+    table.insert(test_key(7), one_byte(20));
+    table.commit(2);
+    table.revert(1);
+}
+
+void read_in_thread(shared_ptr<RawTable> table, shared_ptr<mutex<ReaderState>> result)
+{
+    try {
+        if (value_is(table.find(test_key(7)), 10)) {
+            auto guard = result.lock();
+            guard.successful += 1;
+        }
+    } catch (const stainless::IoError& _error) {
+    }
+}
+
+} // namespace test_detail
+
+i32 self_test(const String& path)
+    throws CodecError, IndexCorrupt, ValueTooLarge, stainless::IoError, stainless::ThreadError
+{
+    String index_path = detail::make_index_path(path);
+    if (fs::exists(path)) {
+        fs::remove_file(path);
+    }
+    if (fs::exists(index_path)) {
+        fs::remove_file(index_path);
+    }
+    test_detail::write_history(path);
+
+    shared_ptr<RawTable> recovered = open_table(path);
+    if (recovered.current_version() != 1 ||
+        !test_detail::value_is(recovered.find(test_detail::test_key(7)), 10)) {
+        return 1;
+    }
+
+    shared_ptr<mutex<ReaderState>> result =
+        make_shared<mutex<ReaderState>>{0};
+    auto first = thread::spawn([recovered, result]() {
+        test_detail::read_in_thread(recovered, result);
+    });
+    auto second = thread::spawn([recovered, result]() {
+        test_detail::read_in_thread(recovered, result);
+    });
+    first.join();
+    second.join();
+
+    auto guard = result.lock();
+    i32 status = 2;
+    if (guard.successful == 2) {
+        status = 0;
+    }
+
+    String json_path = path.clone();
+    json_path.push_str(".json");
+    String json_index_path = detail::make_index_path(json_path);
+    if (fs::exists(json_path)) {
+        fs::remove_file(json_path);
+    }
+    if (fs::exists(json_index_path)) {
+        fs::remove_file(json_index_path);
+    }
+    JsonTable2<u32, u64> json_table = JsonTable2<u32, u64>(
+        json_path,
+        codecs::u32_key(),
+        codecs::u64_key());
+    var stored = "typed value";
+    json_table.insert(7, 9, stored);
+    json_table.commit(1);
+    var decoded = var();
+    if (!json_table.find(7, 9, decoded) || String(decoded) != "typed value") {
+        status = 3;
+    }
+
+    KeyCodec<Vec<u8>> vector_codec = codecs::u8_key().vec();
+    Vec<u8> empty;
+    Vec<u8> zero;
+    zero.push(0);
+    Vec<u8> zero_max = zero.clone();
+    zero_max.push(255);
+    Vec<u8> one;
+    one.push(1);
+    Encoded empty_bytes = vector_codec.encode(empty);
+    Encoded zero_bytes = vector_codec.encode(zero);
+    Encoded zero_max_bytes = vector_codec.encode(zero_max);
+    Encoded one_bytes = vector_codec.encode(one);
+    if (!empty_bytes.valid || !zero_bytes.valid || !zero_max_bytes.valid || !one_bytes.valid ||
+        !(empty_bytes.bytes < zero_bytes.bytes) ||
+        !(zero_bytes.bytes < zero_max_bytes.bytes) ||
+        !(zero_max_bytes.bytes < one_bytes.bytes)) {
+        status = 4;
+    }
+    DecodedAt<Vec<u8>> decoded_vector = vector_codec.decode(zero_max_bytes.bytes, 0);
+    if (!decoded_vector.valid ||
+        decoded_vector.offset != zero_max_bytes.bytes.len() ||
+        decoded_vector.value != zero_max) {
+        status = 5;
+    }
+    Vec<u8> framed;
+    framed.push(99);
+    Vec<u8> framed_vector = zero_max_bytes.bytes.clone();
+    framed.append(framed_vector);
+    framed.push(100);
+    DecodedAt<Vec<u8>> decoded_at = vector_codec.decode(framed, 1);
+    if (!decoded_at.valid || decoded_at.offset + 1 != framed.len() || decoded_at.value != zero_max) {
+        status = 6;
+    }
+
+    KeyCodec<Vec<Vec<u8>>> nested_codec = vector_codec.vec();
+    Vec<Vec<u8>> nested;
+    nested.push(move(zero));
+    nested.push(move(zero_max));
+    Encoded nested_bytes = nested_codec.encode(nested);
+    DecodedAt<Vec<Vec<u8>>> decoded_nested = nested_codec.decode(nested_bytes.bytes, 0);
+    if (!nested_bytes.valid ||
+        !decoded_nested.valid ||
+        decoded_nested.offset != nested_bytes.bytes.len() ||
+        decoded_nested.value != nested) {
+        status = 7;
+    }
+
+    fs::remove_file(path);
+    fs::remove_file(index_path);
+    fs::remove_file(json_path);
+    fs::remove_file(json_index_path);
+    return status;
+}
+
+} // namespace kvstore

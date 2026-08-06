@@ -1780,13 +1780,19 @@ impl Resolver<'_> {
                 );
                 None
             }
-            TypeRef::Pointer { .. } => {
+            TypeRef::Pointer { .. } | TypeRef::Parameter(_) if arguments.len() == 1 => {
+                self.resolve_direct_initialization(target, &arguments[0], span, context)
+            }
+            TypeRef::Pointer { kind, .. } => {
                 for argument in arguments {
                     self.resolve_expression(argument, None, context);
                 }
                 self.push(
                     "RES106",
-                    "constructing a nested `unique_ptr` pointee is not implemented".to_owned(),
+                    format!(
+                        "`{}<T>` field initialization expects exactly one owner value",
+                        pointer_name(*kind)
+                    ),
                     span,
                 );
                 None
@@ -1834,9 +1840,6 @@ impl Resolver<'_> {
                     context,
                 );
                 call
-            }
-            TypeRef::Parameter(_) if arguments.len() == 1 => {
-                self.resolve_direct_initialization(target, &arguments[0], span, context)
             }
             TypeRef::Reference { .. } | TypeRef::Void | TypeRef::Error | TypeRef::Parameter(_) => {
                 for argument in arguments {

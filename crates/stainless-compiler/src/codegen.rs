@@ -567,11 +567,19 @@ impl Emitter {
             .iter()
             .map(|parameter| identifier(parameter))
             .collect::<Result<Vec<_>, _>>()?;
+        // Stainless generic arguments are owned value types: references cannot
+        // be stored in fields or nested inside a generic argument. Reflect that
+        // invariant in Rust so a generic value may safely appear in an escaping
+        // `function` / `function_mut` closure.
+        let bounded_type_parameters = type_parameters
+            .iter()
+            .map(|parameter| quote!(#parameter: 'static))
+            .collect::<Vec<_>>();
         let generics = match (explicit_lifetime, type_parameters.is_empty()) {
             (false, true) => None,
             (true, true) => Some(quote!(<'__stainless_borrow>)),
-            (false, false) => Some(quote!(<#(#type_parameters),*>)),
-            (true, false) => Some(quote!(<'__stainless_borrow, #(#type_parameters),*>)),
+            (false, false) => Some(quote!(<#(#bounded_type_parameters),*>)),
+            (true, false) => Some(quote!(<'__stainless_borrow, #(#bounded_type_parameters),*>)),
         };
         let asyncness = function.is_async.then(|| quote!(async));
         Ok(quote! {

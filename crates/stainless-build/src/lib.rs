@@ -8,10 +8,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Configures one Stainless source file compiled by a Cargo build script.
+/// Configures Stainless source files compiled as one translation unit by a
+/// Cargo build script.
 #[derive(Clone, Debug)]
 pub struct Builder {
-    source: PathBuf,
+    sources: Vec<PathBuf>,
     output_name: Option<String>,
     exports: Vec<Export>,
 }
@@ -27,10 +28,21 @@ impl Builder {
     #[must_use]
     pub fn new(source: impl Into<PathBuf>) -> Self {
         Self {
-            source: source.into(),
+            sources: vec![source.into()],
             output_name: None,
             exports: Vec::new(),
         }
+    }
+
+    /// Adds another source fragment to the same Stainless translation unit.
+    ///
+    /// Sources are concatenated in call order with a newline boundary. This is
+    /// useful for separating tests or generated declarations without creating
+    /// a Stainless module boundary.
+    #[must_use]
+    pub fn add_source(mut self, source: impl Into<PathBuf>) -> Self {
+        self.sources.push(source.into());
+        self
     }
 
     /// Overrides the generated filename written beneath Cargo's `OUT_DIR`.
@@ -66,22 +78,7 @@ impl Builder {
     /// ambiguous exports, an invalid Rust export name, or a missing `OUT_DIR`.
     pub fn compile(&self) -> Result<PathBuf, BuildError> {
         verify_rustc_version()?;
-        let source_path = if self.source.is_absolute() {
-            self.source.clone()
-        } else {
-            PathBuf::from(
-                env::var_os("CARGO_MANIFEST_DIR")
-                    .ok_or_else(|| BuildError::new("Cargo did not set CARGO_MANIFEST_DIR"))?,
-            )
-            .join(&self.source)
-        };
-        println!("cargo:rerun-if-changed={}", source_path.display());
-        let source = fs::read_to_string(&source_path).map_err(|error| {
-            BuildError::new(format!(
-                "failed to read Stainless source `{}`: {error}",
-                source_path.display()
-            ))
-        })?;
+        let (source_paths, source) = load_sources(&self.sources)?;
         let result = stainless_compiler::transpile(&source);
         for warning in result
             .analysis
@@ -119,8 +116,8 @@ impl Builder {
                 .collect::<Vec<_>>()
                 .join("\n");
             return Err(BuildError::new(format!(
-                "Stainless compilation failed for `{}`:\n{diagnostics}",
-                source_path.display()
+                "Stainless compilation failed for {}:\n{diagnostics}",
+                display_source_paths(&source_paths)
             )));
         }
 
@@ -134,7 +131,7 @@ impl Builder {
         let output_name = self
             .output_name
             .clone()
-            .unwrap_or_else(|| default_output_name(&self.source));
+            .unwrap_or_else(|| default_output_name(&self.sources[0]));
         if Path::new(&output_name)
             .file_name()
             .and_then(|name| name.to_str())
@@ -156,6 +153,46 @@ impl Builder {
         })?;
         Ok(output)
     }
+}
+
+fn load_sources(sources: &[PathBuf]) -> Result<(Vec<PathBuf>, String), BuildError> {
+    let package_root = PathBuf::from(
+        env::var_os("CARGO_MANIFEST_DIR")
+            .ok_or_else(|| BuildError::new("Cargo did not set CARGO_MANIFEST_DIR"))?,
+    );
+    let source_paths = sources
+        .iter()
+        .map(|source| {
+            if source.is_absolute() {
+                source.clone()
+            } else {
+                package_root.join(source)
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut combined = String::new();
+    for source_path in &source_paths {
+        println!("cargo:rerun-if-changed={}", source_path.display());
+        let fragment = fs::read_to_string(source_path).map_err(|error| {
+            BuildError::new(format!(
+                "failed to read Stainless source `{}`: {error}",
+                source_path.display()
+            ))
+        })?;
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(&fragment);
+    }
+    Ok((source_paths, combined))
+}
+
+fn display_source_paths(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| format!("`{}`", path.display()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn verify_rustc_version() -> Result<(), BuildError> {
@@ -284,14 +321,34 @@ impl Error for BuildError {}
 
 #[cfg(test)]
 mod tests {
-    use super::default_output_name;
-    use std::path::Path;
+    use super::{Builder, default_output_name, display_source_paths};
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn derives_a_generated_output_name() {
         assert_eq!(
             default_output_name(Path::new("src/application.stl")),
             "application.stainless.rs"
+        );
+    }
+
+    #[test]
+    fn preserves_additional_source_order() {
+        let builder = Builder::new("src/library.stl")
+            .add_source("src/generated.stl")
+            .add_source("tests/library_test.stl");
+
+        assert_eq!(
+            builder.sources,
+            [
+                PathBuf::from("src/library.stl"),
+                PathBuf::from("src/generated.stl"),
+                PathBuf::from("tests/library_test.stl"),
+            ]
+        );
+        assert_eq!(
+            display_source_paths(&builder.sources),
+            "`src/library.stl`, `src/generated.stl`, `tests/library_test.stl`"
         );
     }
 }

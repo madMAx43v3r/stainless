@@ -2,7 +2,8 @@
 
 This crate is the first nontrivial Stainless showcase: an append-only,
 versioned key/value store whose implementation lives in
-[`src/kvstore.stl`](src/kvstore.stl).
+[`src/kvstore.stl`](src/kvstore.stl). Its end-to-end Stainless tests live
+separately in [`test/kvstore_test.stl`](test/kvstore_test.stl).
 
 Every inserted value is tagged with the current write version. The requested
 path stores the data WAL and `<path>.index` stores a separate compact index
@@ -58,7 +59,59 @@ recovery use an exclusive write guard.
 The data WAL stores variable-length encoded key and value bytes. `IndexEntry`
 and the WAL headers store value lengths as `u32`, limiting each encoded value to
 `u32::MAX` bytes. Oversized writes fail before a record is written. The
-Rust-facing `Table<K, V>` remains statically typed through two explicit traits:
+storage layers implemented in `kvstore.stl` are:
+
+- `RawTable`, the byte-oriented WAL and ordered-index engine.
+- `Table<K, V>`, a typed Stainless layer initialized with key/value encode and
+  decode callbacks.
+- `JsonTable<K>`, which uses the same callbacks for keys and stores `var`
+  values as compact JSON by default.
+- `JsonTable1<K>`, `JsonTable2<K1, K2>`, and `JsonTable3<K1, K2, K3>`, which
+  compose one, two, or three ordered key codecs.
+
+The callback result structs carry an explicit validity bit. A codec failure is
+reported as checked `kvstore::CodecError`; it is never silently replaced with
+a default value. `KeyCodec<T>` decoders accept an offset and return the next
+offset, allowing composite keys to be concatenated without intermediate
+slices. The built-in unsigned fixed-width key codecs use the exact-type
+`stainless::BigEndian::write()` and `read()` overloads, so byte order preserves
+unsigned integer order.
+
+Calling `vec()` on any `KeyCodec<T>` derives a `KeyCodec<Vec<T>>`:
+
+```cpp
+KeyCodec<Vec<u32>> path_codec = codecs::u32_key().vec();
+KeyCodec<Vec<Vec<u32>>> nested_path_codec = path_codec.vec();
+```
+
+The vector codec escapes reserved zero bytes and writes distinct element and
+vector terminators. This keeps the encoding self-delimiting for compound keys
+while preserving lexicographic `Vec<T>` order, including empty vectors,
+prefixes, and nested vectors.
+
+For example, this Stainless code creates a two-part key with JSON values:
+
+```cpp
+JsonTable2<u32, u64> users = JsonTable2<u32, u64>(
+    "users.db",
+    codecs::u32_key(),
+    codecs::u64_key());
+
+var profile = {name: "alice", active: true};
+users.insert(7, 42, profile);
+users.commit(1);
+
+var loaded = var();
+if (users.find(7, 42, loaded)) {
+    println!("{}", loaded.to_json());
+}
+```
+
+Supplying all four callbacks to `Table<K, V>` selects a custom persistent
+representation for both keys and values; the compiler does not synthesize
+serialization code for the table.
+
+The Rust-facing `Table<K, V>` remains statically typed through two explicit traits:
 
 - `Codec` defines the stable persistent representation of a key or value.
 - `OrderedKey: Codec + Ord` additionally guarantees that encoded byte order
