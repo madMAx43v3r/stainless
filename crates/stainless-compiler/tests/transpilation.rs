@@ -782,7 +782,9 @@ fn main() {{
 #[test]
 #[allow(clippy::too_many_lines)]
 fn pointer_family_lowers_to_rust_owners_and_preserves_runtime_behavior() {
-    let source = r"struct Config { i32 version; };
+    let source = r"use rust::Vec;
+
+struct Config { i32 version; };
 
 shared_ptr<Config> load_slot(const atomic_ptr<Config>& slot) {
     return slot.__load();
@@ -826,6 +828,14 @@ i32 pointer_behavior() {
     shared_ptr<Config> through_reference = load_slot(slot);
     store_slot(slot, recovered);
 
+    Vec<shared_ptr<Config>> shared_values;
+    shared_values.push(first);
+    shared_values.push(copied);
+    i32 shared_sum = 0;
+    for (auto value : shared_values) {
+        shared_sum += value.version;
+    }
+
     atomic_nullptr<Config> initialized_optional =
         atomic_nullptr<Config>(snapshot);
     shared_nullptr<Config> initialized_snapshot =
@@ -853,7 +863,7 @@ i32 pointer_behavior() {
     }
     return unique.version + snapshot.version + previous.version
         + installed.version + through_reference.version
-        + initialized_snapshot.version + promoted_version;
+        + initialized_snapshot.version + promoted_version + shared_sum;
 }
 ";
     let result = transpile(source);
@@ -880,7 +890,7 @@ i32 pointer_behavior() {
         rust,
         r"
 fn main() {{
-    assert_eq!({function}(), 35);
+    assert_eq!({function}(), 45);
 }}
 "
     )

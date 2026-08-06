@@ -1033,7 +1033,7 @@ impl Lowerer<'_> {
                     hir::RangeMode::Move
                 } else if structured {
                     hir::RangeMode::MapClone
-                } else if matches!(bindings[0].0, TypeRef::Struct { .. }) {
+                } else if is_implicitly_cloned_range_type(&bindings[0].0) {
                     hir::RangeMode::Clone
                 } else {
                     hir::RangeMode::Copy
@@ -2986,6 +2986,17 @@ fn canonical_ref(ty: &TypeRef) -> &TypeRef {
         TypeRef::Reference { target, .. } => target,
         _ => ty,
     }
+}
+
+fn is_implicitly_cloned_range_type(ty: &TypeRef) -> bool {
+    matches!(
+        canonical_ref(ty),
+        TypeRef::Struct { .. }
+            | TypeRef::Pointer {
+                kind: PointerKind::Shared | PointerKind::SharedNullable | PointerKind::Weak,
+                ..
+            }
+    )
 }
 
 fn is_json_type(ty: &TypeRef) -> bool {
