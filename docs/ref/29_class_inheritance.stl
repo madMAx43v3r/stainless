@@ -1,0 +1,73 @@
+// Classes may use one public class base. Concrete methods remain static:
+// declaring a name in the derived class hides the complete base overload set.
+
+namespace samples {
+
+class Counter {
+    Counter(i32 value);
+    void increment();
+    i32 read(i32 offset) const;
+    i32 inherited() const;
+
+private:
+    i32 value;
+};
+
+Counter::Counter(i32 value) : value(value)
+{
+}
+
+void Counter::increment()
+{
+    value += 1;
+}
+
+i32 Counter::read(i32 offset) const
+{
+    return value + offset;
+}
+
+i32 Counter::inherited() const
+{
+    return value;
+}
+
+class TaggedCounter<T> : public Counter {
+    TaggedCounter(i32 value, T tag);
+
+    // This hides every Counter::read overload for unqualified lookup.
+    i32 read(u32 offset) const;
+    i32 base_read(i32 offset) const;
+
+private:
+    T tag;
+};
+
+TaggedCounter<T>::TaggedCounter(i32 value, T tag)
+    : Counter(value), tag(move(tag))
+{
+    Counter::increment();
+}
+
+i32 TaggedCounter<T>::read(u32 offset) const
+{
+    return this.inherited() + i32(offset);
+}
+
+i32 TaggedCounter<T>::base_read(i32 offset) const
+{
+    return Counter::read(offset);
+}
+
+i32 inspect(shared_ptr<Counter> value)
+{
+    return value.inherited();
+}
+
+i32 class_inheritance_result()
+{
+    shared_ptr<TaggedCounter<i32>> value = make_shared<TaggedCounter<i32>>(7, 9);
+    return inspect(value) + value.read(1) + value.base_read(2);
+}
+
+} // namespace samples

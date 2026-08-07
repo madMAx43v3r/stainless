@@ -72,7 +72,7 @@ fn records_interface_conformance_and_dynamic_calls() {
 }
 
 #[test]
-fn diagnoses_invalid_inheritance_missing_contracts_and_class_copies() {
+fn diagnoses_missing_interface_contracts_and_class_copies() {
     let analysis = analyze(
         r"interface Contract {
     i32 evaluate(i32 value) const;
@@ -111,7 +111,7 @@ void copy_class() {
         .map(|diagnostic| diagnostic.code)
         .collect::<Vec<_>>();
 
-    for expected in ["RES118", "RES119", "RES120"] {
+    for expected in ["RES119", "RES120"] {
         assert!(
             codes.contains(&expected),
             "missing {expected}: {:#?}",
@@ -181,14 +181,127 @@ i32 expose() {
 }
 
 #[test]
-fn rejects_access_labels_in_interfaces_and_redundant_sealed_classes() {
+fn single_class_inheritance_hides_base_overloads_and_upcasts_shared_owners() {
+    let analysis = analyze(
+        r"class Base {
+    Base(i32 value);
+    i32 read(i32 offset) const;
+    i32 inherited() const;
+    i32 value;
+};
+
+Base::Base(i32 value) : value(value) {
+}
+
+i32 Base::read(i32 offset) const {
+    return value + offset;
+}
+
+i32 Base::inherited() const {
+    return value;
+}
+
+class Derived<T> : Base {
+    Derived(i32 value, T extra);
+    i32 read(u32 offset) const;
+    i32 base_read(i32 offset) const;
+    T extra;
+};
+
+Derived<T>::Derived(i32 value, T extra) : Base(value), extra(move(extra)) {
+}
+
+i32 Derived<T>::read(u32 offset) const {
+    return this.inherited() + i32(offset);
+}
+
+i32 Derived<T>::base_read(i32 offset) const {
+    return Base::read(offset);
+}
+
+void retain(shared_ptr<Base> value) {
+    value.inherited();
+}
+
+void check() {
+    shared_ptr<Derived<i32>> value = make_shared<Derived<i32>>(7, 9);
+    retain(value);
+    value.read(1);
+    value.base_read(2);
+}
+",
+    );
+
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+    let read_targets = analysis
+        .semantics
+        .calls
+        .iter()
+        .filter_map(|call| match call.target {
+            CallTarget::Stainless(id) => analysis.semantics.function(id),
+            _ => None,
+        })
+        .filter(|function| function.path.last().is_some_and(|name| name == "read"))
+        .map(|function| function.path.clone())
+        .collect::<Vec<_>>();
+    assert!(read_targets.iter().any(|path| path == &["Base", "read"]));
+    assert!(read_targets.iter().any(|path| path == &["Derived", "read"]));
+}
+
+#[test]
+fn derived_function_name_hides_the_complete_base_overload_set() {
+    let analysis = analyze(
+        r"class Base {
+    i32 read(i32 value) const;
+};
+
+i32 Base::read(i32 value) const {
+    return value;
+}
+
+class Derived : Base {
+    i32 read(u32 value) const;
+};
+
+i32 Derived::read(u32 value) const {
+    return i32(value);
+}
+
+i32 invalid() {
+    Derived value;
+    return value.read(i32(1));
+}
+",
+    );
+
+    assert!(
+        analysis
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "RES019"),
+        "{:#?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
+fn rejects_interface_access_labels_and_out_of_module_sealed_class_bases() {
     let analysis = analyze(
         r"interface Invalid {
 public:
     i32 value() const;
 };
 
-class sealed Redundant {
+namespace hidden {
+class sealed Closed {
+};
+}
+
+class InvalidDerived : hidden::Closed {
 };
 ",
     );
@@ -198,8 +311,8 @@ class sealed Redundant {
         .map(|diagnostic| diagnostic.code)
         .collect::<Vec<_>>();
 
-    assert!(codes.contains(&"SEM014"), "{:#?}", analysis.diagnostics);
     assert!(codes.contains(&"SEM015"), "{:#?}", analysis.diagnostics);
+    assert!(codes.contains(&"RES118"), "{:#?}", analysis.diagnostics);
 }
 
 #[test]

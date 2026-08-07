@@ -121,6 +121,32 @@ fn parses_classes_interfaces_inheritance_and_access_labels_losslessly() {
 }
 
 #[test]
+fn parses_public_generic_class_inheritance_losslessly() {
+    let source = include_str!("../../../docs/ref/29_class_inheritance.stl");
+    let parsed = parse(source);
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(parsed.syntax().to_string(), source);
+    assert_eq!(count_kind(&parsed.syntax(), SyntaxKind::ClassDefinition), 2);
+}
+
+#[test]
+fn rejects_private_class_inheritance() {
+    let source = "class Base {}; class Derived : private Base {};";
+    let parsed = parse(source);
+
+    assert_eq!(parsed.syntax().to_string(), source);
+    assert!(
+        parsed
+            .errors()
+            .iter()
+            .any(|error| error.message.contains("inheritance is always public")),
+        "{:?}",
+        parsed.errors()
+    );
+}
+
+#[test]
 fn parses_braced_owner_allocation_with_nested_generic_targets() {
     let source = "void allocate() {\n    auto shared = make_shared<mutex<State>>{false, 0};\n    auto unique = make_unique<State>{true, 1};\n}\n";
     let parsed = parse(source);

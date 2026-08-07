@@ -246,6 +246,10 @@ fn transpiles_and_compiles_resolved_reference_programs() {
             "generic-types",
             include_str!("../../../docs/ref/28_generic_types.stl"),
         ),
+        (
+            "class-inheritance",
+            include_str!("../../../docs/ref/29_class_inheritance.stl"),
+        ),
     ] {
         let result = transpile(source);
         assert!(
@@ -948,7 +952,7 @@ fn mutex_and_condition_lower_to_thread_safe_rust_and_wake_waiters() {
     let new_condition = function(&["new_condition"]);
     let wait = function(&["wait_for_value"]);
     let publish = function(&["publish_value"]);
-    let new_rw_state = function(&["new_rw_state"]);
+    let new_shared_mutex_state = function(&["new_shared_mutex_state"]);
     let read_value = function(&["read_value"]);
     let write_value = function(&["write_value"]);
     write!(
@@ -963,7 +967,7 @@ fn main() {{
     ::std::thread::sleep(::std::time::Duration::from_millis(10));
     {publish}(state, changed, 42);
     assert_eq!(waiter.join().expect("waiter panicked"), 42);
-    let rw_state = {new_rw_state}();
+    let rw_state = {new_shared_mutex_state}();
     assert_eq!({read_value}(::std::sync::Arc::clone(&rw_state)), 7);
     {write_value}(::std::sync::Arc::clone(&rw_state), 9);
     assert_eq!({read_value}(rw_state), 9);
@@ -1184,6 +1188,97 @@ i32 generic_result() {
         String::from_utf8_lossy(&output.stderr)
     );
     remove_temporary_parent(&binary);
+}
+
+#[test]
+fn class_inheritance_constructs_calls_and_upcasts_shared_owners() {
+    let source = r"namespace samples {
+
+class Base {
+    Base(i32 value);
+    void increment();
+    i32 read(i32 offset) const;
+    i32 inherited() const;
+    i32 value;
+};
+
+Base::Base(i32 value) : value(value) {
+}
+
+void Base::increment() {
+    value += 1;
+}
+
+i32 Base::read(i32 offset) const {
+    return value + offset;
+}
+
+i32 Base::inherited() const {
+    return value;
+}
+
+class Derived<T> : Base {
+    Derived(i32 value, T extra);
+    i32 read(u32 offset) const;
+    i32 base_read(i32 offset) const;
+    T extra;
+};
+
+Derived<T>::Derived(i32 value, T extra) : Base(value), extra(move(extra)) {
+    this.Base::increment();
+}
+
+i32 Derived<T>::read(u32 offset) const {
+    return this.inherited() + i32(offset);
+}
+
+i32 Derived<T>::base_read(i32 offset) const {
+    return Base::read(offset);
+}
+
+i32 consume(shared_ptr<Base> value) {
+    return value.inherited();
+}
+
+i32 result() {
+    shared_ptr<Derived<i32>> value = make_shared<Derived<i32>>(7, 9);
+    return consume(value) + value.read(1) + value.base_read(2);
+}
+
+}
+";
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let function = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "result"])
+        .expect("result function")
+        .mangled_name
+        .clone();
+    let mut rust = result.rust.expect("class inheritance should emit Rust");
+    write!(
+        rust,
+        "\nfn main() {{ assert_eq!(__stainless_namespace_samples::{function}(), 27); }}\n"
+    )
+    .expect("writing to a String cannot fail");
+    let directory = write_runtime_cargo_fixture("class-inheritance", &rust);
+    let output = run_fixture_cargo(&directory, "run");
+    assert!(
+        output.status.success(),
+        "status: {}\nstdout:\n{}\nstderr:\n{}\ngenerated:\n{rust}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(&directory)
+        .unwrap_or_else(|error| panic!("failed to remove {}: {error}", directory.display()));
 }
 
 #[test]

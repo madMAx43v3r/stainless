@@ -51,7 +51,7 @@ pub enum Item {
 pub enum UserTypeKind {
     /// Copy-oriented data type with optional single data inheritance.
     Struct,
-    /// Move-only identity type that may implement interfaces.
+    /// Move-only identity type with optional single class inheritance.
     Class,
     /// Behavior-only contract lowered to a Rust trait.
     Interface,
@@ -94,7 +94,7 @@ pub struct UseDeclaration {
     pub span: Span,
 }
 
-/// A data-only struct with optional single data inheritance.
+/// A user-defined struct, class, or interface.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Struct {
     /// Struct, class, or interface semantics.
@@ -103,7 +103,7 @@ pub struct Struct {
     pub name: String,
     /// Invariant generic type parameters in declaration order.
     pub type_parameters: Vec<String>,
-    /// Direct data-base or interface declarations in source order.
+    /// Direct data/class-base or interface declarations in source order.
     pub bases: Vec<Type>,
     /// Whether inheritance/implementation is restricted to this module.
     pub is_sealed: bool,

@@ -14,6 +14,43 @@ use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuar
 
 use serde_json::{Number, Value};
 
+/// Compiler-owned storage for one embedded Stainless class base.
+///
+/// The base has one owner while the complete derived value is mutably
+/// accessible. A derived-to-base shared-owner conversion clones the inner
+/// [`Arc`], after which Stainless permits only shared access to the derived
+/// object as well.
+#[doc(hidden)]
+pub struct ClassBase<T>(Arc<T>);
+
+impl<T> ClassBase<T> {
+    /// Creates one independently owned base subobject.
+    pub fn new(value: T) -> Self {
+        Self(Arc::new(value))
+    }
+
+    /// Produces the representation of `shared_ptr<Base>`.
+    #[must_use]
+    pub fn share(&self) -> Arc<T> {
+        Arc::clone(&self.0)
+    }
+}
+
+impl<T> std::ops::Deref for ClassBase<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> std::ops::DerefMut for ClassBase<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Arc::get_mut(&mut self.0)
+            .expect("a mutably borrowed derived class cannot have an aliased base subobject")
+    }
+}
+
 /// Runtime crate source directory used by `stainlessc` for its hidden Cargo
 /// build. Packaged tools fall back to the crates.io version if this directory
 /// is no longer present.

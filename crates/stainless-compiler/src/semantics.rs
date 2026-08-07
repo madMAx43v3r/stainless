@@ -37,14 +37,6 @@ impl Validator {
             match item {
                 Item::Namespace(namespace) => self.items(&namespace.items),
                 Item::Struct(structure) => {
-                    if structure.kind == UserTypeKind::Class && structure.is_sealed {
-                        self.push(
-                            "SEM014",
-                            "`class sealed` is redundant because classes cannot be inherited"
-                                .to_owned(),
-                            structure.span,
-                        );
-                    }
                     if structure.kind == UserTypeKind::Interface && structure.has_access_specifier {
                         self.push(
                             "SEM015",

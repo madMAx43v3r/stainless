@@ -183,6 +183,11 @@ impl Parser<'_> {
         }
         if self.eat(SyntaxKind::Colon) {
             loop {
+                if self.eat(SyntaxKind::PrivateKw) {
+                    self.error("Stainless class and data inheritance is always public");
+                } else {
+                    self.eat(SyntaxKind::PublicKw);
+                }
                 self.parse_type(false);
                 if !self.eat(SyntaxKind::Comma) {
                     break;

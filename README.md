@@ -210,8 +210,8 @@ constructs with direct Rust equivalents:
   methods;
 - namespaces/modules and explicit imports rather than textual inclusion;
 - vtable-free structs with data-only inheritance implemented as composition;
-- non-inheritable classes that can implement interfaces but cannot inherit
-  structs or other classes;
+- move-only classes with optional single public class inheritance and interface
+  implementation; classes cannot inherit structs;
 - interfaces and interface inheritance implemented as Rust traits,
   supertraits, and trait objects where dynamic dispatch is required;
 - Stainless ownership types with deliberately restricted Rust lowerings,
@@ -239,9 +239,9 @@ The following C++ features should not be accepted in the initial language
 because they have no direct, general safe-Rust translation:
 
 - the preprocessor, textual `#include`, and C/C++ macros;
-- behavioral/class implementation inheritance, virtual concrete-class methods
-  outside interface contracts, method overriding between classes, virtual
-  inheritance, and C++ RTTI;
+- multiple, private, protected, and virtual class inheritance; virtual
+  concrete-class methods outside interface contracts; method overriding
+  between classes; and C++ RTTI;
 - default arguments and C++'s general implicit-conversion sequences; only the
   narrow reference, pointer, and interface bindings explicitly specified below
   are permitted;
@@ -273,15 +273,14 @@ The first compiler uses the following conservative grammar policy:
   conditional derived `Clone` implementation, so a concrete instance has
   Stainless struct-copy semantics only when all of its stored concrete values
   can be cloned. Classes remain move-only for every instantiation.
-- Generic interfaces, inheritance or interface implementation by a generic
-  type, default type arguments, non-type parameters, specialization, generic
-  free functions, and user-written trait bounds are deferred. Compiler
-  metadata may still expose supported generic Rust types and methods such as
-  `Vec<T>`.
+- Generic single data/class bases may use the derived declaration's type
+  parameters. Generic interfaces, interface implementation by a generic type,
+  default type arguments, non-type parameters, specialization, generic free
+  functions, and user-written trait bounds are deferred. Compiler metadata may
+  still expose supported generic Rust types and methods such as `Vec<T>`.
 - `sealed` is valid after `interface` and prevents inheritance or
-  implementation outside the module. It is also valid after `struct` and
-  prevents use as a data base outside the module. Every class already forbids
-  class inheritance, so `class sealed` is redundant and rejected. `native` is
+  implementation outside the module. It is also valid after `struct` or
+  `class` and prevents use as a data/class base outside the module. `native` is
   not a declaration modifier.
 - Lambdas require an explicit capture list. `[value]` copies a copyable value,
   `[name = expression]` creates a new owned capture using normal initialization
@@ -361,19 +360,32 @@ A `struct` has a data-only representation:
   generated Rust uses an ordinary trait implementation with static dispatch,
   and Stainless prohibits creating a `dyn Interface` from the struct.
 
-A `class` combines data with behavior but is sealed against class inheritance:
+A `class` combines move-only identity with behavior and optional single class
+inheritance:
 
 - A class may declare its own fields, member functions, and implementations of
   interface methods. As with a struct, only declarations appear inside the
   class; function bodies are defined outside it.
-- A class cannot inherit from another class or from a struct. Data reuse must
-  use fields and composition.
-- A class may implement interfaces, but there is no class method inheritance or
-  overriding. Only calls made through an interface participate in virtual
-  dispatch.
+- A class may publicly inherit one class and may additionally implement
+  interfaces. It cannot inherit a struct. Multiple, private, protected, and
+  virtual class inheritance are rejected.
+- Concrete class methods are inherited with C++ name lookup: if a derived class
+  declares any function with a given name, that declaration hides the complete
+  same-named base overload set. It does not override a base function. When the
+  derived class declares no such name, lookup continues through the single base
+  chain.
+- A base implementation can be selected explicitly as
+  `Base::function(arguments...)`. The equivalent
+  `this.Base::function(arguments...)` form is also accepted. Calls remain
+  statically dispatched; only interface calls participate in virtual dispatch.
 - An ordinary class method is statically dispatched and cannot be marked
   `virtual`. An interface method implementation supplies behavior for its
   interface slot; it does not override a method inherited from another class.
+- A class base is represented by a compiler-owned reference-counted base
+  subobject. This permits safe derived-to-base references and `shared_ptr`
+  conversions without unsafe alias pointers. Stainless has no class downcast
+  or user destructor, so retaining the base subobject independently does not
+  expose a different lifetime or destruction order.
 - Classes may therefore require vtable-based dispatch, while structs are
   guaranteed never to do so.
 
@@ -2141,6 +2153,15 @@ corresponding owner of an implemented interface. These lower to
 coercion, they apply only after a target type or function has been selected and
 do not make an overload candidate match.
 
+A `shared_ptr<Derived>` or `shared_nullptr<Derived>` may also convert to the
+corresponding owner of any public class base. The conversion retains the
+compiler-owned base subobject and may traverse the complete single-inheritance
+chain. Derived-to-base class references use the same projected chain. These
+specific class-base conversions may make an otherwise unique function or
+method candidate viable after C++ name hiding has selected the declaring
+overload set; exact candidates still win. Unique-owner class-base conversion is
+deferred because it needs a separate consuming representation rule.
+
 For example:
 
 ```cpp
@@ -2564,8 +2585,12 @@ limited to `u32::MAX` bytes; larger writes fail with checked
 written. Both WALs use a big-endian `u32` record-size header; file offsets and
 committed file lengths remain `u64`.
 
-A Stainless `Database` can register multiple heterogeneous `RawTable`
-instances and coordinate `commit(version)` and `revert(version)` across them.
+A Stainless `Database` sits above the table classes. `Table<K, V>` publicly
+inherits `RawTable`, and each JSON table publicly continues that single class
+chain. A shared typed table therefore converts to `shared_ptr<RawTable>` when
+explicitly registered with the coordinator. The database can register multiple
+heterogeneous tables and coordinate `commit(version)` and `revert(version)`
+across them.
 Database commits are serialized but cannot be one atomic filesystem operation
 across independent WAL files. After opening every table on startup,
 `Database::recover()` selects the minimum durable table version and reverts any

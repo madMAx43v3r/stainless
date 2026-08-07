@@ -112,6 +112,7 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
         include_str!("../../../docs/ref/26_file_io.stl"),
         include_str!("../../../docs/ref/27_tuples.stl"),
         include_str!("../../../docs/ref/28_generic_types.stl"),
+        include_str!("../../../docs/ref/29_class_inheritance.stl"),
     ] {
         let analysis = analyze(source);
 
@@ -703,7 +704,7 @@ void invalid_sync() {
 }
 
 #[test]
-fn rwlock_read_guards_reject_mutation() {
+fn shared_mutex_read_guards_reject_mutation() {
     let analysis = analyze(
         r"struct State {
     i32 value;
@@ -720,6 +721,28 @@ void invalid_read_mutation(const shared_mutex<State>& state) {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "RES013"),
+        "{:#?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
+fn old_rwlock_surface_name_is_rejected() {
+    let analysis = analyze(
+        r"struct State {
+    i32 value;
+};
+
+void invalid() {
+    rwlock<State> state = rwlock<State>(State{0});
+}
+",
+    );
+    assert!(
+        analysis
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "RES037"),
         "{:#?}",
         analysis.diagnostics
     );

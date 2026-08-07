@@ -1123,20 +1123,32 @@ impl Analyzer<'_> {
                 let mut receiver_origin = None;
                 if let Some(receiver) = &function.receiver
                     && let ExpressionKind::Call { callee, .. } = &expression.kind
-                    && let ExpressionKind::Field {
-                        receiver: syntax_receiver,
-                        ..
-                    } = &callee.kind
                 {
                     let usage = if receiver.mutable {
                         Usage::BorrowMutable
                     } else {
                         Usage::BorrowShared
                     };
-                    let origin = self.expression(syntax_receiver, usage);
+                    let (origin, receiver_span) = match &callee.kind {
+                        ExpressionKind::Field {
+                            receiver: syntax_receiver,
+                            ..
+                        } => (
+                            self.expression(syntax_receiver, usage),
+                            syntax_receiver.span,
+                        ),
+                        ExpressionKind::Name(path) if path.segments.len() > 1 => {
+                            let origin = self.receiver_binding;
+                            if let Some(origin) = origin {
+                                self.check_usage(origin, usage, callee.span);
+                            }
+                            (origin, callee.span)
+                        }
+                        _ => (None, callee.span),
+                    };
                     receiver_origin = origin;
                     receiver_loan =
-                        self.acquire_temporary_loan(origin, receiver.mutable, syntax_receiver.span);
+                        self.acquire_temporary_loan(origin, receiver.mutable, receiver_span);
                 }
                 let origins = self.call_arguments(
                     arguments,

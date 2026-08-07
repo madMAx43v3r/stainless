@@ -243,6 +243,8 @@ pub enum Type {
         /// Concrete type arguments.
         arguments: Vec<Type>,
     },
+    /// Compiler-owned reference-counted storage for a class base subobject.
+    ClassBase(Box<Type>),
     /// A contextual callback used only as a generated-wrapper parameter.
     Callback {
         /// Whether invocation returns a future.
@@ -628,6 +630,17 @@ pub enum Expression {
         /// Concrete class owner being erased.
         value: Box<Expression>,
     },
+    /// Project a shared derived owner to one independently retained class base.
+    ClassSharedOwnerCoercion {
+        /// Derived-to-base representation fields in traversal order.
+        projection: Vec<String>,
+        /// Whether both source and target owners are nullable.
+        nullable: bool,
+        /// Concrete derived owner expression.
+        value: Box<Expression>,
+    },
+    /// Wrap a constructed class value as an embedded base subobject.
+    ClassBaseNew(Box<Expression>),
     /// Demote an `Arc<T>` to `Weak<T>`.
     DowngradeShared(Box<Expression>),
     /// Promote `Weak<T>` to `Option<Arc<T>>`.

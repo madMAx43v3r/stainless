@@ -111,7 +111,6 @@ class Database {
     Database();
 
     void add(shared_ptr<RawTable> table) const;
-    shared_ptr<RawTable> open_table(const String& path) const throws stainless::IoError;
     bool commit(u32 next_version) const throws stainless::IoError;
     bool revert(u32 version) const throws IndexCorrupt, stainless::IoError;
     u32 recover() const throws IndexCorrupt, stainless::IoError;
@@ -122,15 +121,8 @@ private:
     mutex<DatabaseState> state;
 };
 
-class Table<K, V> {
+class Table<K, V> : public RawTable {
     Table(
-        const String& path,
-        function<Encoded(const K&)> encode_key,
-        function<Decoded<K>(const Vec<u8>&)> decode_key,
-        function<Encoded(const V&)> encode_value,
-        function<Decoded<V>(const Vec<u8>&)> decode_value) throws stainless::IoError;
-    Table(
-        shared_ptr<Database> database,
         const String& path,
         function<Encoded(const K&)> encode_key,
         function<Decoded<K>(const Vec<u8>&)> decode_key,
@@ -148,70 +140,27 @@ class Table<K, V> {
     Vec<tuple<K, V>> find_range_last(const K& lower, const K& upper, usize count) const
         throws CodecError, stainless::IoError;
     
-    bool commit(u32 next_version) const throws stainless::IoError;
-    bool revert(u32 version) const throws IndexCorrupt, stainless::IoError;
-    
-    u32 current_version() const;
-
 private:
-    shared_ptr<RawTable> raw;
     function<Encoded(const K&)> encode_key;
     function<Decoded<K>(const Vec<u8>&)> decode_key;
     function<Encoded(const V&)> encode_value;
     function<Decoded<V>(const Vec<u8>&)> decode_value;
 };
 
-class JsonTable<K> {
+class JsonTable<K> : public Table<K, var> {
     JsonTable(
         const String& path,
         function<Encoded(const K&)> encode_key,
         function<Decoded<K>(const Vec<u8>&)> decode_key) throws stainless::IoError;
-    JsonTable(
-        shared_ptr<Database> database,
-        const String& path,
-        function<Encoded(const K&)> encode_key,
-        function<Decoded<K>(const Vec<u8>&)> decode_key) throws stainless::IoError;
 
-    void insert(K key, var value) const throws CodecError, ValueTooLarge, stainless::IoError;
-    bool find(const K& key, var& value) const throws CodecError, stainless::IoError;
-    Vec<tuple<K, var>> find_range(const K& lower, const K& upper) const
-        throws CodecError, stainless::IoError;
-    Vec<tuple<K, var>> find_range_first(const K& lower, const K& upper, usize count) const
-        throws CodecError, stainless::IoError;
-    Vec<tuple<K, var>> find_range_last(const K& lower, const K& upper, usize count) const
-        throws CodecError, stainless::IoError;
-    bool commit(u32 next_version) const throws stainless::IoError;
-    bool revert(u32 version) const throws IndexCorrupt, stainless::IoError;
-    u32 current_version() const;
-
-private:
-    Table<K, var> table;
 };
 
-class JsonTable1<K> {
+class JsonTable1<K> : public JsonTable<K> {
     JsonTable1(const String& path, KeyCodec<K> key_codec) throws stainless::IoError;
-    JsonTable1(
-        shared_ptr<Database> database,
-        const String& path,
-        KeyCodec<K> key_codec) throws stainless::IoError;
-
-    void insert(K key, var value) const throws CodecError, ValueTooLarge, stainless::IoError;
-    bool find(const K& key, var& value) const throws CodecError, stainless::IoError;
-    bool commit(u32 next_version) const throws stainless::IoError;
-    bool revert(u32 version) const throws IndexCorrupt, stainless::IoError;
-    u32 current_version() const;
-
-private:
-    JsonTable<K> table;
 };
 
-class JsonTable2<K1, K2> {
+class JsonTable2<K1, K2> : public JsonTable<tuple<K1, K2>> {
     JsonTable2(
-        const String& path,
-        KeyCodec<K1> first_codec,
-        KeyCodec<K2> second_codec) throws stainless::IoError;
-    JsonTable2(
-        shared_ptr<Database> database,
         const String& path,
         KeyCodec<K1> first_codec,
         KeyCodec<K2> second_codec) throws stainless::IoError;
@@ -220,22 +169,10 @@ class JsonTable2<K1, K2> {
         throws CodecError, ValueTooLarge, stainless::IoError;
     bool find(K1 first, K2 second, var& value) const
         throws CodecError, stainless::IoError;
-    bool commit(u32 next_version) const throws stainless::IoError;
-    bool revert(u32 version) const throws IndexCorrupt, stainless::IoError;
-    u32 current_version() const;
-
-private:
-    JsonTable<tuple<K1, K2>> table;
 };
 
-class JsonTable3<K1, K2, K3> {
+class JsonTable3<K1, K2, K3> : public JsonTable<tuple<K1, K2, K3>> {
     JsonTable3(
-        const String& path,
-        KeyCodec<K1> first_codec,
-        KeyCodec<K2> second_codec,
-        KeyCodec<K3> third_codec) throws stainless::IoError;
-    JsonTable3(
-        shared_ptr<Database> database,
         const String& path,
         KeyCodec<K1> first_codec,
         KeyCodec<K2> second_codec,
@@ -245,12 +182,6 @@ class JsonTable3<K1, K2, K3> {
         throws CodecError, ValueTooLarge, stainless::IoError;
     bool find(K1 first, K2 second, K3 third, var& value) const
         throws CodecError, stainless::IoError;
-    bool commit(u32 next_version) const throws stainless::IoError;
-    bool revert(u32 version) const throws IndexCorrupt, stainless::IoError;
-    u32 current_version() const;
-
-private:
-    JsonTable<tuple<K1, K2, K3>> table;
 };
 
 KeyCodec<Vec<T>> KeyCodec<T>::vec() const
@@ -329,6 +260,7 @@ RawTable::RawTable(const String& path)
       index_log(detail::open_log(detail::make_index_path(path))),
       state(detail::initial_state())
 {
+    this.recover();
 }
 
 void RawTable::insert(Vec<u8> key, Vec<u8> value) const
@@ -660,9 +592,7 @@ Vec<KeyValue> RawTable::find_range_first(
 
 shared_ptr<RawTable> open_table(const String& path) throws stainless::IoError
 {
-    shared_ptr<RawTable> table = make_shared<RawTable>(path);
-    table.recover();
-    return table;
+    return make_shared<RawTable>(path);
 }
 
 void RawTable::recover() const
@@ -745,14 +675,6 @@ void Database::add(shared_ptr<RawTable> table) const
 {
     auto guard = state.lock();
     guard.tables.push(table);
-}
-
-shared_ptr<RawTable> Database::open_table(const String& path) const
-{
-    shared_ptr<RawTable> table = kvstore::open_table(path);
-    auto guard = state.lock();
-    guard.tables.push(table);
-    return table;
 }
 
 bool Database::commit(u32 next_version) const
@@ -845,22 +767,7 @@ Table<K, V>::Table(
     function<Decoded<K>(const Vec<u8>&)> decode_key,
     function<Encoded(const V&)> encode_value,
     function<Decoded<V>(const Vec<u8>&)> decode_value)
-    : raw(open_table(path)),
-      encode_key(encode_key),
-      decode_key(decode_key),
-      encode_value(encode_value),
-      decode_value(decode_value)
-{
-}
-
-Table<K, V>::Table(
-    shared_ptr<Database> database,
-    const String& path,
-    function<Encoded(const K&)> encode_key,
-    function<Decoded<K>(const Vec<u8>&)> decode_key,
-    function<Encoded(const V&)> encode_value,
-    function<Decoded<V>(const Vec<u8>&)> decode_value)
-    : raw(database.open_table(path)),
+    : RawTable(path),
       encode_key(encode_key),
       decode_key(decode_key),
       encode_value(encode_value),
@@ -878,7 +785,7 @@ void Table<K, V>::insert(K key, V value) const
     if (!value_bytes.valid) {
         throw CodecError{stainless::Exception("value encoding failed")};
     }
-    raw.insert(move(key_bytes.bytes), move(value_bytes.bytes));
+    RawTable::insert(move(key_bytes.bytes), move(value_bytes.bytes));
 }
 
 bool Table<K, V>::find(const K& key, V& value) const
@@ -887,7 +794,7 @@ bool Table<K, V>::find(const K& key, V& value) const
     if (!key_bytes.valid) {
         throw CodecError{stainless::Exception("key encoding failed")};
     }
-    shared_nullptr<Value> stored = raw.find(key_bytes.bytes);
+    shared_nullptr<Value> stored = RawTable::find(key_bytes.bytes);
     if (!stored) {
         return false;
     }
@@ -907,7 +814,7 @@ Vec<tuple<K, V>> Table<K, V>::find_range(const K& lower, const K& upper) const
     if (!lower_bytes.valid || !upper_bytes.valid) {
         throw CodecError{stainless::Exception("range key encoding failed")};
     }
-    Vec<KeyValue> entries = raw.find_range(lower_bytes.bytes, upper_bytes.bytes);
+    Vec<KeyValue> entries = RawTable::find_range(lower_bytes.bytes, upper_bytes.bytes);
     Vec<tuple<K, V>> result;
     for (const auto& entry : entries) {
         Decoded<K> decoded_key = decode_key(entry.key);
@@ -930,7 +837,10 @@ Vec<tuple<K, V>> Table<K, V>::find_range_first(
     if (!lower_bytes.valid || !upper_bytes.valid) {
         throw CodecError{stainless::Exception("range key encoding failed")};
     }
-    Vec<KeyValue> entries = raw.find_range_first(lower_bytes.bytes, upper_bytes.bytes, count);
+    Vec<KeyValue> entries = RawTable::find_range_first(
+        lower_bytes.bytes,
+        upper_bytes.bytes,
+        count);
     Vec<tuple<K, V>> result;
     for (const auto& entry : entries) {
         Decoded<K> decoded_key = decode_key(entry.key);
@@ -953,7 +863,10 @@ Vec<tuple<K, V>> Table<K, V>::find_range_last(
     if (!lower_bytes.valid || !upper_bytes.valid) {
         throw CodecError{stainless::Exception("range key encoding failed")};
     }
-    Vec<KeyValue> entries = raw.find_range_last(lower_bytes.bytes, upper_bytes.bytes, count);
+    Vec<KeyValue> entries = RawTable::find_range_last(
+        lower_bytes.bytes,
+        upper_bytes.bytes,
+        count);
     Vec<tuple<K, V>> result;
     for (const auto& entry : entries) {
         Decoded<K> decoded_key = decode_key(entry.key);
@@ -966,86 +879,16 @@ Vec<tuple<K, V>> Table<K, V>::find_range_last(
     return result;
 }
 
-bool Table<K, V>::commit(u32 next_version) const
-{
-    return raw.commit(next_version);
-}
-
-bool Table<K, V>::revert(u32 version) const
-{
-    return raw.revert(version);
-}
-
-u32 Table<K, V>::current_version() const
-{
-    return raw.current_version();
-}
-
 JsonTable<K>::JsonTable(
     const String& path,
     function<Encoded(const K&)> encode_key,
     function<Decoded<K>(const Vec<u8>&)> decode_key)
-    : table(path, encode_key, decode_key, codecs::encode_json, codecs::decode_json)
+    : Table<K, var>(path, encode_key, decode_key, codecs::encode_json, codecs::decode_json)
 {
-}
-
-JsonTable<K>::JsonTable(
-    shared_ptr<Database> database,
-    const String& path,
-    function<Encoded(const K&)> encode_key,
-    function<Decoded<K>(const Vec<u8>&)> decode_key)
-    : table(database, path, encode_key, decode_key, codecs::encode_json, codecs::decode_json)
-{
-}
-
-void JsonTable<K>::insert(K key, var value) const
-{
-    table.insert(move(key), move(value));
-}
-
-bool JsonTable<K>::find(const K& key, var& value) const
-{
-    return table.find(key, value);
-}
-
-Vec<tuple<K, var>> JsonTable<K>::find_range(const K& lower, const K& upper) const
-{
-    return table.find_range(lower, upper);
-}
-
-Vec<tuple<K, var>> JsonTable<K>::find_range_first(
-    const K& lower,
-    const K& upper,
-    usize count) const
-{
-    return table.find_range_first(lower, upper, count);
-}
-
-Vec<tuple<K, var>> JsonTable<K>::find_range_last(
-    const K& lower,
-    const K& upper,
-    usize count) const
-{
-    return table.find_range_last(lower, upper, count);
-}
-
-bool JsonTable<K>::commit(u32 next_version) const
-{
-    return table.commit(next_version);
-}
-
-bool JsonTable<K>::revert(u32 version) const
-{
-    return table.revert(version);
-}
-
-u32 JsonTable<K>::current_version() const
-{
-    return table.current_version();
 }
 
 JsonTable1<K>::JsonTable1(const String& path, KeyCodec<K> key_codec)
-    : table(
+    : JsonTable(
           path,
           key_codec.encode,
           [decode = key_codec.decode](const Vec<u8>& bytes) {
@@ -1058,84 +901,11 @@ JsonTable1<K>::JsonTable1(const String& path, KeyCodec<K> key_codec)
 {
 }
 
-JsonTable1<K>::JsonTable1(
-    shared_ptr<Database> database,
-    const String& path,
-    KeyCodec<K> key_codec)
-    : table(
-          database,
-          path,
-          key_codec.encode,
-          [decode = key_codec.decode](const Vec<u8>& bytes) {
-              DecodedAt<K> decoded = decode(bytes, 0);
-              return Decoded<K>{
-                  decoded.valid && decoded.offset == bytes.len(),
-                  move(decoded.value)
-              };
-          })
-{
-}
-
-void JsonTable1<K>::insert(K key, var value) const
-{
-    table.insert(move(key), move(value));
-}
-
-bool JsonTable1<K>::find(const K& key, var& value) const
-{
-    return table.find(key, value);
-}
-
-bool JsonTable1<K>::commit(u32 next_version) const
-{
-    return table.commit(next_version);
-}
-
-bool JsonTable1<K>::revert(u32 version) const
-{
-    return table.revert(version);
-}
-
-u32 JsonTable1<K>::current_version() const
-{
-    return table.current_version();
-}
-
 JsonTable2<K1, K2>::JsonTable2(
     const String& path,
     KeyCodec<K1> first_codec,
     KeyCodec<K2> second_codec)
-    : table(
-          path,
-          [encode_first = first_codec.encode,
-           encode_second = second_codec.encode](const tuple<K1, K2>& key) {
-              Encoded first = encode_first(key.0);
-              Encoded second = encode_second(key.1);
-              if (!first.valid || !second.valid) {
-                  return Encoded{false, Vec<u8>()};
-              }
-              first.bytes.append(second.bytes);
-              return Encoded{true, move(first.bytes)};
-          },
-          [decode_first = first_codec.decode,
-           decode_second = second_codec.decode](const Vec<u8>& bytes) {
-              DecodedAt<K1> first = decode_first(bytes, 0);
-              DecodedAt<K2> second = decode_second(bytes, first.offset);
-              return Decoded<tuple<K1, K2>>{
-                  first.valid && second.valid && second.offset == bytes.len(),
-                  tuple<K1, K2>(move(first.value), move(second.value))
-              };
-          })
-{
-}
-
-JsonTable2<K1, K2>::JsonTable2(
-    shared_ptr<Database> database,
-    const String& path,
-    KeyCodec<K1> first_codec,
-    KeyCodec<K2> second_codec)
-    : table(
-          database,
+    : JsonTable(
           path,
           [encode_first = first_codec.encode,
            encode_second = second_codec.encode](const tuple<K1, K2>& key) {
@@ -1161,28 +931,15 @@ JsonTable2<K1, K2>::JsonTable2(
 
 void JsonTable2<K1, K2>::insert(K1 first, K2 second, var value) const
 {
-    table.insert(tuple<K1, K2>(move(first), move(second)), move(value));
+    JsonTable::insert(
+        tuple<K1, K2>(move(first), move(second)),
+        move(value));
 }
 
 bool JsonTable2<K1, K2>::find(K1 first, K2 second, var& value) const
 {
     tuple<K1, K2> key = tuple<K1, K2>(move(first), move(second));
-    return table.find(key, value);
-}
-
-bool JsonTable2<K1, K2>::commit(u32 next_version) const
-{
-    return table.commit(next_version);
-}
-
-bool JsonTable2<K1, K2>::revert(u32 version) const
-{
-    return table.revert(version);
-}
-
-u32 JsonTable2<K1, K2>::current_version() const
-{
-    return table.current_version();
+    return JsonTable::find(key, value);
 }
 
 JsonTable3<K1, K2, K3>::JsonTable3(
@@ -1190,43 +947,7 @@ JsonTable3<K1, K2, K3>::JsonTable3(
     KeyCodec<K1> first_codec,
     KeyCodec<K2> second_codec,
     KeyCodec<K3> third_codec)
-    : table(
-          path,
-          [encode_first = first_codec.encode,
-           encode_second = second_codec.encode,
-           encode_third = third_codec.encode](const tuple<K1, K2, K3>& key) {
-              Encoded first = encode_first(key.0);
-              Encoded second = encode_second(key.1);
-              Encoded third = encode_third(key.2);
-              if (!first.valid || !second.valid || !third.valid) {
-                  return Encoded{false, Vec<u8>()};
-              }
-              first.bytes.append(second.bytes);
-              first.bytes.append(third.bytes);
-              return Encoded{true, move(first.bytes)};
-          },
-          [decode_first = first_codec.decode,
-           decode_second = second_codec.decode,
-           decode_third = third_codec.decode](const Vec<u8>& bytes) {
-              DecodedAt<K1> first = decode_first(bytes, 0);
-              DecodedAt<K2> second = decode_second(bytes, first.offset);
-              DecodedAt<K3> third = decode_third(bytes, second.offset);
-              return Decoded<tuple<K1, K2, K3>>{
-                  first.valid && second.valid && third.valid && third.offset == bytes.len(),
-                  tuple<K1, K2, K3>(move(first.value), move(second.value), move(third.value))
-              };
-          })
-{
-}
-
-JsonTable3<K1, K2, K3>::JsonTable3(
-    shared_ptr<Database> database,
-    const String& path,
-    KeyCodec<K1> first_codec,
-    KeyCodec<K2> second_codec,
-    KeyCodec<K3> third_codec)
-    : table(
-          database,
+    : JsonTable(
           path,
           [encode_first = first_codec.encode,
            encode_second = second_codec.encode,
@@ -1257,7 +978,7 @@ JsonTable3<K1, K2, K3>::JsonTable3(
 
 void JsonTable3<K1, K2, K3>::insert(K1 first, K2 second, K3 third, var value) const
 {
-    table.insert(
+    JsonTable::insert(
         tuple<K1, K2, K3>(move(first), move(second), move(third)),
         move(value));
 }
@@ -1272,22 +993,7 @@ bool JsonTable3<K1, K2, K3>::find(
         move(first),
         move(second),
         move(third));
-    return table.find(key, value);
-}
-
-bool JsonTable3<K1, K2, K3>::commit(u32 next_version) const
-{
-    return table.commit(next_version);
-}
-
-bool JsonTable3<K1, K2, K3>::revert(u32 version) const
-{
-    return table.revert(version);
-}
-
-u32 JsonTable3<K1, K2, K3>::current_version() const
-{
-    return table.current_version();
+    return JsonTable::find(key, value);
 }
 
 void insert_bytes(shared_ptr<RawTable> table, Vec<u8> key, Vec<u8> value)

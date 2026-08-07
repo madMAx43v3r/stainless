@@ -58,7 +58,10 @@ fn resolves_struct_layout_members_fields_and_data_inheritance() {
     let point3 = &analysis.semantics.structs[1];
     assert_eq!(point2.path, ["samples", "Point2"]);
     assert_eq!(point2.fields.len(), 2);
-    assert_eq!(point3.base, Some(point2.id));
+    assert_eq!(
+        point3.base.as_ref().map(|base| base.structure),
+        Some(point2.id)
+    );
     assert_eq!(point3.fields.len(), 1);
 
     let methods = analysis

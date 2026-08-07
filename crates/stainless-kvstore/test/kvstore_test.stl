@@ -244,15 +244,15 @@ i32 self_test(const String& path)
     if (fs::exists(database_second_index_path)) {
         fs::remove_file(database_second_index_path);
     }
-    shared_ptr<Database> database = make_shared<Database>();
-    JsonTable1<String> database_first = JsonTable1<String>(
-        database,
+    Database database;
+    shared_ptr<JsonTable1<String>> database_first = make_shared<JsonTable1<String>>(
         database_first_path,
         codecs::string_key());
-    JsonTable1<u32> database_second = JsonTable1<u32>(
-        database,
+    shared_ptr<JsonTable1<u32>> database_second = make_shared<JsonTable1<u32>>(
         database_second_path,
         codecs::u32_key());
+    database.add(database_first);
+    database.add(database_second);
     var first_database_value = "first table";
     var second_database_value = "second table";
     database_first.insert("key", first_database_value);

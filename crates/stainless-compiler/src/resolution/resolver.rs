@@ -20,7 +20,7 @@ use super::{
     NativeResultException, ParameterSymbol, Resolution, ResolvedCall, ResolvedCallback,
     ResolvedField, ResolvedLambdaCapture, ResolvedNativeType, ResolvedStaticConstant,
     ResolvedTraitRequirement, RustErrorMessage, RustResultAdaptation, SemanticModel,
-    StaticConstantSymbol, StructId, StructReceiver, StructSymbol, ValueCategory,
+    StaticConstantSymbol, StructId, StructReceiver, StructSymbol, UserTypeBase, ValueCategory,
 };
 
 /// Resolves names and types using an explicit native binding registry.
@@ -180,85 +180,32 @@ impl Resolver<'_> {
         });
         self.struct_by_path.insert(root_path, root);
 
-        let rust_error = StructId(self.model.structs.len());
-        let rust_error_path = vec!["stainless".to_owned(), "RustError".to_owned()];
-        self.model.structs.push(StructSymbol {
-            id: rust_error,
-            path: rust_error_path.clone(),
-            type_parameters: Vec::new(),
-            kind: ast::UserTypeKind::Struct,
-            base: Some(root),
-            interfaces: Vec::new(),
-            is_sealed: false,
-            fields: Vec::new(),
-            static_constants: Vec::new(),
-            span: Span::default(),
-        });
-        self.struct_by_path.insert(rust_error_path, rust_error);
+        self.install_exception_builtin(root, "RustError");
+        self.install_exception_builtin(root, "IoError");
+        self.install_exception_builtin(root, "FormatError");
+        self.install_exception_builtin(root, "JsonError");
+        self.install_exception_builtin(root, "ThreadError");
+    }
 
-        let io_error = StructId(self.model.structs.len());
-        let io_error_path = vec!["stainless".to_owned(), "IoError".to_owned()];
+    fn install_exception_builtin(&mut self, root: StructId, name: &str) {
+        let id = StructId(self.model.structs.len());
+        let path = vec!["stainless".to_owned(), name.to_owned()];
         self.model.structs.push(StructSymbol {
-            id: io_error,
-            path: io_error_path.clone(),
+            id,
+            path: path.clone(),
             type_parameters: Vec::new(),
             kind: ast::UserTypeKind::Struct,
-            base: Some(root),
+            base: Some(UserTypeBase {
+                structure: root,
+                arguments: Vec::new(),
+            }),
             interfaces: Vec::new(),
             is_sealed: false,
             fields: Vec::new(),
             static_constants: Vec::new(),
             span: Span::default(),
         });
-        self.struct_by_path.insert(io_error_path, io_error);
-
-        let format_error = StructId(self.model.structs.len());
-        let format_error_path = vec!["stainless".to_owned(), "FormatError".to_owned()];
-        self.model.structs.push(StructSymbol {
-            id: format_error,
-            path: format_error_path.clone(),
-            type_parameters: Vec::new(),
-            kind: ast::UserTypeKind::Struct,
-            base: Some(root),
-            interfaces: Vec::new(),
-            is_sealed: false,
-            fields: Vec::new(),
-            static_constants: Vec::new(),
-            span: Span::default(),
-        });
-        self.struct_by_path.insert(format_error_path, format_error);
-
-        let json_error = StructId(self.model.structs.len());
-        let json_error_path = vec!["stainless".to_owned(), "JsonError".to_owned()];
-        self.model.structs.push(StructSymbol {
-            id: json_error,
-            path: json_error_path.clone(),
-            type_parameters: Vec::new(),
-            kind: ast::UserTypeKind::Struct,
-            base: Some(root),
-            interfaces: Vec::new(),
-            is_sealed: false,
-            fields: Vec::new(),
-            static_constants: Vec::new(),
-            span: Span::default(),
-        });
-        self.struct_by_path.insert(json_error_path, json_error);
-
-        let thread_error = StructId(self.model.structs.len());
-        let thread_error_path = vec!["stainless".to_owned(), "ThreadError".to_owned()];
-        self.model.structs.push(StructSymbol {
-            id: thread_error,
-            path: thread_error_path.clone(),
-            type_parameters: Vec::new(),
-            kind: ast::UserTypeKind::Struct,
-            base: Some(root),
-            interfaces: Vec::new(),
-            is_sealed: false,
-            fields: Vec::new(),
-            static_constants: Vec::new(),
-            span: Span::default(),
-        });
-        self.struct_by_path.insert(thread_error_path, thread_error);
+        self.struct_by_path.insert(path, id);
     }
 
     fn collect_struct_names(&mut self, items: &[Item], namespace: &mut Vec<String>) {
@@ -345,43 +292,41 @@ impl Resolver<'_> {
                     };
                     let mut base = None;
                     let mut interfaces = Vec::new();
-                    if !structure.type_parameters.is_empty() && !structure.bases.is_empty() {
-                        self.push(
-                            "RES124",
-                            "inheritance and interface implementation on generic types are deferred"
-                                .to_owned(),
-                            structure.span,
-                        );
-                    }
                     for base_syntax in &structure.bases {
-                        if !structure.type_parameters.is_empty() {
-                            continue;
-                        }
-                        let TypeKind::Named(named) = &base_syntax.kind else {
+                        if base_syntax.is_const || base_syntax.is_reference {
                             self.push(
                                 "RES040",
-                                "a base declaration must name a user-defined type".to_owned(),
+                                "base declarations cannot be const or references".to_owned(),
                                 base_syntax.span,
                             );
                             continue;
+                        }
+                        let resolved = self.resolve_type(
+                            base_syntax,
+                            namespace,
+                            &structure.type_parameters,
+                            false,
+                        );
+                        let (found_path, arguments) = match canonical_ref(&resolved) {
+                            TypeRef::Struct { path, arguments }
+                            | TypeRef::Class { path, arguments }
+                            | TypeRef::Interface { path, arguments } => {
+                                (path.clone(), arguments.clone())
+                            }
+                            TypeRef::Error => continue,
+                            _ => {
+                                self.push(
+                                    "RES040",
+                                    "a base declaration must name a user-defined type".to_owned(),
+                                    base_syntax.span,
+                                );
+                                continue;
+                            }
                         };
-                        if base_syntax.is_const
-                            || base_syntax.is_reference
-                            || !named.arguments.is_empty()
-                        {
+                        let Some(found) = self.struct_by_path.get(&found_path).copied() else {
                             self.push(
                                 "RES040",
-                                "base declarations cannot be const, references, or generic instances"
-                                    .to_owned(),
-                                base_syntax.span,
-                            );
-                            continue;
-                        }
-                        let Some(found) = self.lookup_struct_path(&named.path.segments, namespace)
-                        else {
-                            self.push(
-                                "RES040",
-                                format!("unresolved base type `{}`", named.path.display()),
+                                format!("unresolved base type `{}`", display_path(&found_path)),
                                 base_syntax.span,
                             );
                             continue;
@@ -413,7 +358,13 @@ impl Resolver<'_> {
                         }
                         match (structure.kind, base_kind) {
                             (ast::UserTypeKind::Struct, ast::UserTypeKind::Struct) => {
-                                if base.replace(found).is_some() {
+                                if base
+                                    .replace(UserTypeBase {
+                                        structure: found,
+                                        arguments,
+                                    })
+                                    .is_some()
+                                {
                                     self.push(
                                         "RES118",
                                         "a struct may have only one data base".to_owned(),
@@ -427,6 +378,14 @@ impl Resolver<'_> {
                                 | ast::UserTypeKind::Interface,
                                 ast::UserTypeKind::Interface,
                             ) => {
+                                if !arguments.is_empty() {
+                                    self.push(
+                                        "RES124",
+                                        "generic interface inheritance is deferred".to_owned(),
+                                        base_syntax.span,
+                                    );
+                                    continue;
+                                }
                                 if interfaces.contains(&found) {
                                     self.push(
                                         "RES118",
@@ -440,11 +399,21 @@ impl Resolver<'_> {
                                     interfaces.push(found);
                                 }
                             }
-                            (ast::UserTypeKind::Class, _) => self.push(
-                                "RES118",
-                                "a class may inherit only from interfaces".to_owned(),
-                                base_syntax.span,
-                            ),
+                            (ast::UserTypeKind::Class, ast::UserTypeKind::Class) => {
+                                if base
+                                    .replace(UserTypeBase {
+                                        structure: found,
+                                        arguments,
+                                    })
+                                    .is_some()
+                                {
+                                    self.push(
+                                        "RES118",
+                                        "a class may have only one class base".to_owned(),
+                                        base_syntax.span,
+                                    );
+                                }
+                            }
                             (ast::UserTypeKind::Interface, _) => self.push(
                                 "RES118",
                                 "an interface may inherit only from interfaces".to_owned(),
@@ -453,6 +422,11 @@ impl Resolver<'_> {
                             (ast::UserTypeKind::Struct, ast::UserTypeKind::Class) => self.push(
                                 "RES118",
                                 "a struct cannot inherit from a class".to_owned(),
+                                base_syntax.span,
+                            ),
+                            (ast::UserTypeKind::Class, ast::UserTypeKind::Struct) => self.push(
+                                "RES118",
+                                "a class cannot inherit from a struct".to_owned(),
                                 base_syntax.span,
                             ),
                         }
@@ -624,7 +598,10 @@ impl Resolver<'_> {
                     );
                     break;
                 }
-                current = self.model.structs[id.0].base;
+                current = self.model.structs[id.0]
+                    .base
+                    .as_ref()
+                    .map(|base| base.structure);
             }
             if structure.kind == ast::UserTypeKind::Interface {
                 self.validate_interface_cycle(structure.id, structure.id, &mut BTreeSet::new());
@@ -1104,7 +1081,8 @@ impl Resolver<'_> {
         let symbol = &self.model.structs[structure.0];
         let available = symbol
             .base
-            .is_none_or(|base| self.struct_has_default_constructor(base, visiting))
+            .as_ref()
+            .is_none_or(|base| self.struct_has_default_constructor(base.structure, visiting))
             && symbol
                 .fields
                 .iter()
@@ -1707,14 +1685,11 @@ impl Resolver<'_> {
     fn constructor_slots(&self, structure: StructId) -> Vec<(String, TypeRef)> {
         let symbol = &self.model.structs[structure.0];
         let mut slots = Vec::new();
-        if let Some(base) = symbol.base {
-            let base = &self.model.structs[base.0];
+        if let Some(base) = &symbol.base {
+            let base_symbol = &self.model.structs[base.structure.0];
             slots.push((
-                base_field_name(base),
-                TypeRef::Struct {
-                    path: base.path.clone(),
-                    arguments: Vec::new(),
-                },
+                base_field_name(base_symbol),
+                user_type(base_symbol, base.arguments.clone()),
             ));
         }
         slots.extend(
@@ -1732,8 +1707,8 @@ impl Resolver<'_> {
         target: &ast::Path,
     ) -> Option<usize> {
         let symbol = &self.model.structs[structure.0];
-        if let Some(base) = symbol.base {
-            let base_path = &self.model.structs[base.0].path;
+        if let Some(base) = &symbol.base {
+            let base_path = &self.model.structs[base.structure.0].path;
             if base_path.ends_with(&target.segments) {
                 return Some(0);
             }
@@ -3316,6 +3291,26 @@ impl Resolver<'_> {
     ) -> (ExpressionInfo, Option<ResolvedField>) {
         if path.segments.len() == 1 {
             let name = &path.segments[0];
+            if name == "this"
+                && let Some(receiver) = &context.receiver
+            {
+                return (
+                    ExpressionInfo {
+                        ty: TypeRef::Reference {
+                            mutable: receiver.mutable,
+                            target: Box::new(resolved_structure_type(
+                                &self.model.structs[receiver.structure.0],
+                            )),
+                        },
+                        category: if receiver.mutable {
+                            ValueCategory::MutablePlace
+                        } else {
+                            ValueCategory::SharedPlace
+                        },
+                    },
+                    None,
+                );
+            }
             for scope in context.scopes.iter().rev() {
                 if let Some(variable) = scope.get(name) {
                     return (
@@ -3394,6 +3389,11 @@ impl Resolver<'_> {
     }
 
     fn value_name_resolves(&self, path: &ast::Path, context: &FunctionContext) -> bool {
+        if matches!(path.segments.as_slice(), [name] if name == "this")
+            && context.receiver.is_some()
+        {
+            return true;
+        }
         if self.lookup_static_constant(path, context).is_some() {
             return true;
         }
@@ -3953,11 +3953,12 @@ impl Resolver<'_> {
         }
         let substitutions = user_type_substitutions(&structure, &structure_type);
         let mut expected = Vec::new();
-        if let Some(base) = structure.base {
-            expected.push(TypeRef::Struct {
-                path: self.model.structs[base.0].path.clone(),
-                arguments: Vec::new(),
-            });
+        if let Some(base) = &structure.base {
+            let base_symbol = &self.model.structs[base.structure.0];
+            expected.push(substitute_type(
+                &user_type(base_symbol, base.arguments.clone()),
+                &substitutions,
+            ));
         }
         expected.extend(
             structure
@@ -4642,6 +4643,11 @@ impl Resolver<'_> {
                 self.resolve_method_call(receiver, name, arguments, span, context, &receiver_info)
             }
             ExpressionKind::Name(path) => {
+                if let Some(resolved) =
+                    self.resolve_implicit_qualified_method_call(path, arguments, span, context)
+                {
+                    return resolved;
+                }
                 if self.value_name_resolves(path, context) {
                     let callee_info = self.resolve_expression(callee, None, context);
                     return self.resolve_stored_function_call(
@@ -5703,41 +5709,66 @@ impl Resolver<'_> {
         span: Span,
         context: &mut FunctionContext,
     ) -> (ExpressionInfo, Option<ResolvedCall>) {
-        if name.segments.len() != 1 {
-            for argument in arguments {
-                self.resolve_expression(argument, None, context);
-            }
-            self.push(
-                "RES048",
-                format!(
-                    "qualified member call `{}` is not supported",
-                    name.display()
-                ),
-                span,
-            );
-            return (error_info(), None);
-        }
         let owner_is_interface =
             self.model.structs[structure.0].kind == ast::UserTypeKind::Interface;
-        let substitutions =
-            user_type_substitutions(&self.model.structs[structure.0], structure_type);
-        let mut path = self.model.structs[structure.0].path.clone();
-        path.push(name.segments[0].clone());
-        let candidates = if owner_is_interface {
+        let Some((method_name, qualification)) = name.segments.split_last() else {
+            return (error_info(), None);
+        };
+        let (candidate_owner, candidate_type, candidates) = if owner_is_interface {
+            if !qualification.is_empty() {
+                for argument in arguments {
+                    self.resolve_expression(argument, None, context);
+                }
+                self.push(
+                    "RES048",
+                    "qualified interface calls are not supported".to_owned(),
+                    span,
+                );
+                return (error_info(), None);
+            }
             let mut candidates = Vec::new();
             self.collect_interface_member_candidates(
                 structure,
-                &name.segments[0],
+                method_name,
                 &mut BTreeSet::new(),
                 &mut candidates,
             );
-            candidates
+            (structure, structure_type.clone(), candidates)
         } else {
-            self.function_sets.get(&path).cloned().unwrap_or_default()
+            let start = if qualification.is_empty() {
+                structure
+            } else {
+                let Some(base) = self.find_base_by_suffix(structure, qualification) else {
+                    for argument in arguments {
+                        self.resolve_expression(argument, None, context);
+                    }
+                    self.push(
+                        "RES048",
+                        format!(
+                            "`{}` is not a base of `{}`",
+                            qualification.join("::"),
+                            display_path(&self.model.structs[structure.0].path)
+                        ),
+                        span,
+                    );
+                    return (error_info(), None);
+                };
+                base
+            };
+            let Some(start_type) = self.project_user_type_to_base(structure_type, start) else {
+                return (error_info(), None);
+            };
+            self.lookup_class_member_set(start, &start_type, method_name)
+                .unwrap_or((start, start_type, Vec::new()))
         };
+        let substitutions =
+            user_type_substitutions(&self.model.structs[candidate_owner.0], &candidate_type);
         let candidates = candidates
             .into_iter()
-            .filter(|id| self.model.functions[id.0].parameters.len() == arguments.len())
+            .filter(|id| {
+                self.model.functions[id.0].receiver.is_some()
+                    && self.model.functions[id.0].parameters.len() == arguments.len()
+            })
             .collect::<Vec<_>>();
         if candidates.is_empty() {
             for argument in arguments {
@@ -5794,6 +5825,7 @@ impl Resolver<'_> {
                             );
                             self.is_derived_reference_binding(&parameter_ty, &adjusted.ty)
                                 || self.is_interface_owner_binding(&parameter_ty, &adjusted.ty)
+                                || self.is_class_owner_binding(&parameter_ty, &adjusted.ty)
                                 || Self::is_shared_to_weak_binding(&parameter_ty, &adjusted.ty)
                         })
                 })
@@ -5867,6 +5899,85 @@ impl Resolver<'_> {
             throws: symbol.throws,
         };
         (info_for_return_type(return_type), Some(call))
+    }
+
+    fn resolve_implicit_qualified_method_call(
+        &mut self,
+        name: &ast::Path,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> Option<(ExpressionInfo, Option<ResolvedCall>)> {
+        let receiver = context.receiver.clone()?;
+        let (method_name, qualification) = name.segments.split_last()?;
+        if qualification.is_empty() {
+            return None;
+        }
+        let structure_type = resolved_structure_type(&self.model.structs[receiver.structure.0]);
+        let start = self.find_base_by_suffix(receiver.structure, qualification)?;
+        let start_type = self.project_user_type_to_base(&structure_type, start)?;
+        let has_instance_member = self
+            .lookup_class_member_set(start, &start_type, method_name)
+            .is_some_and(|(_, _, candidates)| {
+                candidates
+                    .iter()
+                    .any(|id| self.model.functions[id.0].receiver.is_some())
+            });
+        if !has_instance_member {
+            return None;
+        }
+        let receiver_info = ExpressionInfo {
+            ty: TypeRef::Reference {
+                mutable: receiver.mutable,
+                target: Box::new(structure_type.clone()),
+            },
+            category: if receiver.mutable {
+                ValueCategory::MutablePlace
+            } else {
+                ValueCategory::SharedPlace
+            },
+        };
+        Some(self.resolve_struct_method(
+            receiver.structure,
+            &structure_type,
+            &receiver_info,
+            span,
+            name,
+            arguments,
+            span,
+            context,
+        ))
+    }
+
+    fn lookup_class_member_set(
+        &self,
+        structure: StructId,
+        structure_type: &TypeRef,
+        name: &str,
+    ) -> Option<(StructId, TypeRef, Vec<FunctionId>)> {
+        let mut current = structure;
+        let mut current_type = structure_type.clone();
+        loop {
+            let mut path = self.model.structs[current.0].path.clone();
+            path.push(name.to_owned());
+            if let Some(candidates) = self.function_sets.get(&path)
+                && !candidates.is_empty()
+            {
+                return Some((current, current_type, candidates.clone()));
+            }
+            let symbol = &self.model.structs[current.0];
+            let base = symbol.base.as_ref()?;
+            let substitutions = user_type_substitutions(symbol, &current_type);
+            let base_symbol = &self.model.structs[base.structure.0];
+            current_type = user_type(
+                base_symbol,
+                base.arguments
+                    .iter()
+                    .map(|argument| substitute_type(argument, &substitutions))
+                    .collect(),
+            );
+            current = base.structure;
+        }
     }
 
     fn collect_interface_member_candidates(
@@ -6844,6 +6955,7 @@ impl Resolver<'_> {
                             );
                             self.is_derived_reference_binding(&parameter_ty, &adjusted.ty)
                                 || self.is_interface_owner_binding(&parameter_ty, &adjusted.ty)
+                                || self.is_class_owner_binding(&parameter_ty, &adjusted.ty)
                                 || Self::is_shared_to_weak_binding(&parameter_ty, &adjusted.ty)
                         })
                 })
@@ -7068,6 +7180,7 @@ impl Resolver<'_> {
                             canonical(&parameter.ty) == canonical(&argument.ty)
                                 || self.is_derived_reference_binding(&parameter.ty, &adjusted.ty)
                                 || self.is_interface_owner_binding(&parameter.ty, &adjusted.ty)
+                                || self.is_class_owner_binding(&parameter.ty, &adjusted.ty)
                                 || Self::is_shared_to_weak_binding(&parameter.ty, &adjusted.ty)
                         })
                 })
@@ -7507,6 +7620,7 @@ impl Resolver<'_> {
         }
         if !self.is_derived_reference_binding(expected, &actual.ty)
             && !self.is_interface_owner_binding(expected, &actual.ty)
+            && !self.is_class_owner_binding(expected, &actual.ty)
             && !Self::is_shared_to_weak_binding(expected, &actual.ty)
         {
             self.require_exact(expected, &actual.ty, span, description);
@@ -7562,32 +7676,29 @@ impl Resolver<'_> {
                 _ => false,
             };
         }
-        let TypeRef::Struct {
-            path: expected_path,
-            ..
-        } = canonical_ref(expected_target)
-        else {
-            return false;
+        let (expected_path, expected_is_class) = match canonical_ref(expected_target) {
+            TypeRef::Struct { path, .. } => (path, false),
+            TypeRef::Class { path, .. } => (path, true),
+            _ => return false,
         };
-        let TypeRef::Struct {
-            path: actual_path, ..
-        } = automatic_pointee(actual)
-        else {
-            return false;
+        let (actual_path, actual_is_class) = match automatic_pointee(actual) {
+            TypeRef::Struct { path, .. } => (path, false),
+            TypeRef::Class { path, .. } => (path, true),
+            _ => return false,
         };
-        if expected_path == actual_path {
+        if expected_is_class != actual_is_class {
+            return false;
+        }
+        if expected_path == actual_path
+            && canonical_ref(expected_target) == automatic_pointee(actual)
+        {
             return true;
         }
-        let Some(mut current) = self.struct_by_path.get(actual_path).copied() else {
+        let Some(expected_id) = self.struct_by_path.get(expected_path).copied() else {
             return false;
         };
-        while let Some(base) = self.model.structs[current.0].base {
-            if self.model.structs[base.0].path == *expected_path {
-                return true;
-            }
-            current = base;
-        }
-        false
+        self.project_user_type_to_base(automatic_pointee(actual), expected_id)
+            .is_some_and(|projected| canonical_ref(&projected) == canonical_ref(expected_target))
     }
 
     fn is_interface_owner_binding(&self, expected: &TypeRef, actual: &TypeRef) -> bool {
@@ -7631,6 +7742,51 @@ impl Resolver<'_> {
                 self.class_implements_interface(*class, *interface)
                     && self.class_supports_interface_object(*class)
             })
+    }
+
+    fn is_class_owner_binding(&self, expected: &TypeRef, actual: &TypeRef) -> bool {
+        let (
+            TypeRef::Pointer {
+                kind: expected_kind,
+                target: expected_target,
+            },
+            TypeRef::Pointer {
+                kind: actual_kind,
+                target: actual_target,
+            },
+        ) = (canonical_ref(expected), canonical_ref(actual))
+        else {
+            return false;
+        };
+        if expected_kind != actual_kind
+            || !matches!(
+                expected_kind,
+                PointerKind::Shared | PointerKind::SharedNullable
+            )
+        {
+            return false;
+        }
+        let TypeRef::Class {
+            path: expected_path,
+            ..
+        } = canonical_ref(expected_target)
+        else {
+            return false;
+        };
+        let TypeRef::Class {
+            path: actual_path, ..
+        } = canonical_ref(actual_target)
+        else {
+            return false;
+        };
+        if expected_path == actual_path {
+            return false;
+        }
+        let Some(expected_id) = self.struct_by_path.get(expected_path).copied() else {
+            return false;
+        };
+        self.project_user_type_to_base(actual_target, expected_id)
+            .is_some_and(|projected| canonical_ref(&projected) == canonical_ref(expected_target))
     }
 
     fn is_shared_to_weak_binding(expected: &TypeRef, actual: &TypeRef) -> bool {
@@ -7862,7 +8018,10 @@ impl Resolver<'_> {
             if id == base {
                 return true;
             }
-            current = self.model.structs[id.0].base;
+            current = self.model.structs[id.0]
+                .base
+                .as_ref()
+                .map(|base| base.structure);
         }
         false
     }
@@ -8535,7 +8694,10 @@ impl Resolver<'_> {
                     return Some("data inheritance cycle has no JSON representation".to_owned());
                 }
                 hierarchy.push(id);
-                current = self.model.structs[id.0].base;
+                current = self.model.structs[id.0]
+                    .base
+                    .as_ref()
+                    .map(|base| base.structure);
             }
 
             let mut names = BTreeSet::new();
@@ -8600,13 +8762,10 @@ impl Resolver<'_> {
                 }
                 output.insert(structure);
                 let symbol = &self.model.structs[structure.0];
-                if let Some(base) = symbol.base {
-                    let base = &self.model.structs[base.0];
+                if let Some(base) = &symbol.base {
+                    let base_symbol = &self.model.structs[base.structure.0];
                     self.collect_json_conversion_structs(
-                        &TypeRef::Struct {
-                            path: base.path.clone(),
-                            arguments: Vec::new(),
-                        },
+                        &user_type(base_symbol, base.arguments.clone()),
                         visiting,
                         output,
                     );
@@ -8656,12 +8815,16 @@ impl Resolver<'_> {
             .cloned()
             .zip(arguments.iter().cloned())
             .collect::<BTreeMap<_, _>>();
-        let cloneable = symbol
-            .base
-            .is_none_or(|base| self.structure_is_cloneable(base, &[], visiting))
-            && symbol.fields.iter().all(|field| {
-                self.type_is_cloneable(&substitute_type(&field.ty, &substitutions), visiting)
-            });
+        let cloneable = symbol.base.as_ref().is_none_or(|base| {
+            let arguments = base
+                .arguments
+                .iter()
+                .map(|argument| substitute_type(argument, &substitutions))
+                .collect::<Vec<_>>();
+            self.structure_is_cloneable(base.structure, &arguments, visiting)
+        }) && symbol.fields.iter().all(|field| {
+            self.type_is_cloneable(&substitute_type(&field.ty, &substitutions), visiting)
+        });
         visiting.remove(&key);
         cloneable
     }
@@ -8785,9 +8948,15 @@ impl Resolver<'_> {
                         .cloned()
                         .zip(arguments.iter().cloned())
                         .collect::<BTreeMap<_, _>>();
-                    structure.base.is_none_or(|base| {
+                    structure.base.as_ref().is_none_or(|base| {
                         self.thread_auto_trait(
-                            &resolved_structure_type(&self.model.structs[base.0]),
+                            &substitute_type(
+                                &user_type(
+                                    &self.model.structs[base.structure.0],
+                                    base.arguments.clone(),
+                                ),
+                                &substitutions,
+                            ),
                             sync,
                             visiting,
                         )
@@ -8889,19 +9058,19 @@ impl Resolver<'_> {
         arguments: &[TypeRef],
         requested: &ast::Path,
     ) -> Option<StructFieldLookup> {
-        let substitutions = self.model.structs[structure.0]
-            .type_parameters
-            .iter()
-            .cloned()
-            .zip(arguments.iter().cloned())
-            .collect::<BTreeMap<_, _>>();
         let (field_name, qualification) = requested.segments.split_last()?;
         if qualification.is_empty() {
             let mut matches = Vec::new();
             let mut access_path = Vec::new();
-            let mut current = Some(structure);
-            while let Some(id) = current {
+            let mut current = Some((structure, arguments.to_vec()));
+            while let Some((id, current_arguments)) = current {
                 let symbol = &self.model.structs[id.0];
+                let substitutions = symbol
+                    .type_parameters
+                    .iter()
+                    .cloned()
+                    .zip(current_arguments)
+                    .collect::<BTreeMap<_, _>>();
                 if let Some(field) = symbol.fields.iter().find(|field| field.name == *field_name) {
                     let mut field_path = access_path.clone();
                     field_path.push(field.name.clone());
@@ -8912,19 +9081,35 @@ impl Resolver<'_> {
                         is_public: field.is_public,
                     });
                 }
-                let Some(base) = symbol.base else {
+                let Some(base) = &symbol.base else {
                     break;
                 };
-                access_path.push(base_field_name(&self.model.structs[base.0]));
-                current = Some(base);
+                access_path.push(base_field_name(&self.model.structs[base.structure.0]));
+                current = Some((
+                    base.structure,
+                    base.arguments
+                        .iter()
+                        .map(|argument| substitute_type(argument, &substitutions))
+                        .collect(),
+                ));
             }
             return (matches.len() == 1).then(|| matches.remove(0));
         }
         let target = { self.find_base_by_suffix(structure, qualification)? };
         let mut access_path = self.base_projection_path(structure, target)?;
-        let mut current = Some(target);
-        while let Some(id) = current {
+        let target_type = self.project_user_type_to_base(
+            &user_type(&self.model.structs[structure.0], arguments.to_vec()),
+            target,
+        )?;
+        let mut current = Some((target, user_type_arguments(&target_type).to_vec()));
+        while let Some((id, current_arguments)) = current {
             let symbol = &self.model.structs[id.0];
+            let substitutions = symbol
+                .type_parameters
+                .iter()
+                .cloned()
+                .zip(current_arguments)
+                .collect::<BTreeMap<_, _>>();
             if let Some(field) = symbol.fields.iter().find(|field| field.name == *field_name) {
                 access_path.push(field.name.clone());
                 return Some(StructFieldLookup {
@@ -8934,9 +9119,15 @@ impl Resolver<'_> {
                     is_public: field.is_public,
                 });
             }
-            let base = symbol.base?;
-            access_path.push(base_field_name(&self.model.structs[base.0]));
-            current = Some(base);
+            let base = symbol.base.as_ref()?;
+            access_path.push(base_field_name(&self.model.structs[base.structure.0]));
+            current = Some((
+                base.structure,
+                base.arguments
+                    .iter()
+                    .map(|argument| substitute_type(argument, &substitutions))
+                    .collect(),
+            ));
         }
         None
     }
@@ -8956,7 +9147,10 @@ impl Resolver<'_> {
             if path.ends_with(suffix) {
                 return Some(id);
             }
-            current = self.model.structs[id.0].base;
+            current = self.model.structs[id.0]
+                .base
+                .as_ref()
+                .map(|base| base.structure);
         }
         None
     }
@@ -8965,11 +9159,36 @@ impl Resolver<'_> {
         let mut path = Vec::new();
         let mut current = derived;
         while current != base {
-            let next = self.model.structs[current.0].base?;
-            path.push(base_field_name(&self.model.structs[next.0]));
-            current = next;
+            let next = self.model.structs[current.0].base.as_ref()?;
+            path.push(base_field_name(&self.model.structs[next.structure.0]));
+            current = next.structure;
         }
         Some(path)
+    }
+
+    fn project_user_type_to_base(&self, derived: &TypeRef, target: StructId) -> Option<TypeRef> {
+        let mut current_type = canonical_ref(derived).clone();
+        let mut current = self
+            .struct_by_path
+            .get(user_type_path_segments(&current_type)?)
+            .copied()?;
+        loop {
+            if current == target {
+                return Some(current_type);
+            }
+            let symbol = &self.model.structs[current.0];
+            let base = symbol.base.as_ref()?;
+            let substitutions = user_type_substitutions(symbol, &current_type);
+            let base_symbol = &self.model.structs[base.structure.0];
+            current_type = user_type(
+                base_symbol,
+                base.arguments
+                    .iter()
+                    .map(|argument| substitute_type(argument, &substitutions))
+                    .collect(),
+            );
+            current = base.structure;
+        }
     }
 
     fn function_candidates(&self, path: &ast::Path, namespace: &[String]) -> Vec<FunctionId> {
@@ -10083,6 +10302,24 @@ fn resolved_structure_type(structure: &StructSymbol) -> TypeRef {
             path: structure.path.clone(),
             arguments,
         },
+    }
+}
+
+fn user_type_path_segments(ty: &TypeRef) -> Option<&[String]> {
+    match canonical_ref(ty) {
+        TypeRef::Struct { path, .. }
+        | TypeRef::Class { path, .. }
+        | TypeRef::Interface { path, .. } => Some(path),
+        _ => None,
+    }
+}
+
+fn user_type_arguments(ty: &TypeRef) -> &[TypeRef] {
+    match canonical_ref(ty) {
+        TypeRef::Struct { arguments, .. }
+        | TypeRef::Class { arguments, .. }
+        | TypeRef::Interface { arguments, .. } => arguments,
+        _ => &[],
     }
 }
 

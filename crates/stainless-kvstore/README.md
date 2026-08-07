@@ -96,20 +96,22 @@ prefixes, and nested vectors.
 
 ## Multiple tables
 
-`Database` coordinates versions across heterogeneous tables by retaining their
-shared `RawTable` owners. Database-aware table constructors open and register a
-table in one operation:
+`Database` sits above the table classes and coordinates versions across
+heterogeneous tables by retaining their shared `RawTable` bases. `Table<K, V>`
+publicly inherits `RawTable`, and the JSON convenience tables continue that
+single public class chain. Tables are constructed independently, then
+explicitly registered with the coordinator:
 
 ```cpp
-shared_ptr<Database> database = make_shared<Database>();
-JsonTable1<String> users(
-    database,
+Database database;
+shared_ptr<JsonTable1<String>> users = make_shared<JsonTable1<String>>(
     "users.db",
     codecs::string_key());
-JsonTable1<u32> heights(
-    database,
+shared_ptr<JsonTable1<u32>> heights = make_shared<JsonTable1<u32>>(
     "heights.db",
     codecs::u32_key());
+database.add(users);
+database.add(heights);
 
 // Open every existing table before recovery. A prior process may have stopped
 // after only some table commit records became durable.

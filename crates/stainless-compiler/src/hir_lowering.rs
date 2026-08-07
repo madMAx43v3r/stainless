@@ -20,6 +20,7 @@ pub(crate) fn lower(
         semantics,
         diagnostics: Vec::new(),
         current_return_type: None,
+        current_receiver_type: None,
         current_fluent_receiver: false,
         current_constructor: false,
         current_throwing: false,
@@ -117,6 +118,7 @@ struct Lowerer<'a> {
     semantics: &'a SemanticModel,
     diagnostics: Vec<Diagnostic>,
     current_return_type: Option<TypeRef>,
+    current_receiver_type: Option<TypeRef>,
     current_fluent_receiver: bool,
     current_constructor: bool,
     current_throwing: bool,
@@ -236,17 +238,19 @@ impl Lowerer<'_> {
         span: ast::Span,
     ) -> Option<hir::Struct> {
         let mut fields = Vec::new();
-        if let Some(base) = symbol.base {
-            let base_symbol = self.semantics.structure(base)?;
+        if let Some(base) = &symbol.base {
+            let base_symbol = self.semantics.structure(base.structure)?;
+            let base_type =
+                self.lower_type(&user_type(base_symbol, base.arguments.clone()), span)?;
             fields.push(hir::Field {
                 rust_name: base_field_name(base_symbol),
-                ty: self.lower_type(
-                    &TypeRef::Struct {
-                        path: base_symbol.path.clone(),
-                        arguments: Vec::new(),
-                    },
-                    span,
-                )?,
+                ty: if symbol.kind == ast::UserTypeKind::Class
+                    && base_symbol.kind == ast::UserTypeKind::Class
+                {
+                    hir::Type::ClassBase(Box::new(base_type))
+                } else {
+                    base_type
+                },
             });
         }
         fields.extend(symbol.fields.iter().filter_map(|field| {
@@ -259,7 +263,8 @@ impl Lowerer<'_> {
         let exception_base_field = if is_exception {
             symbol
                 .base
-                .and_then(|base| self.semantics.structure(base))
+                .as_ref()
+                .and_then(|base| self.semantics.structure(base.structure))
                 .map(base_field_name)
         } else {
             None
@@ -356,7 +361,7 @@ impl Lowerer<'_> {
                 let Some(symbol) = self.semantics.structure(id) else {
                     return false;
                 };
-                current = symbol.base;
+                current = symbol.base.as_ref().map(|base| base.structure);
             }
             let mut names = BTreeSet::new();
             hierarchy.into_iter().rev().all(|id| {
@@ -409,10 +414,10 @@ impl Lowerer<'_> {
         output: &mut Vec<hir::JsonStructField>,
     ) -> Option<()> {
         let symbol = self.semantics.structure(structure)?;
-        if let Some(base) = symbol.base {
-            let base_symbol = self.semantics.structure(base)?;
+        if let Some(base) = &symbol.base {
+            let base_symbol = self.semantics.structure(base.structure)?;
             prefix.push(base_field_name(base_symbol));
-            self.collect_json_struct_fields(base, prefix, output)?;
+            self.collect_json_struct_fields(base.structure, prefix, output)?;
             prefix.pop();
         }
         output.extend(symbol.fields.iter().map(|field| {
@@ -433,7 +438,7 @@ impl Lowerer<'_> {
             if symbol.path == ["stainless", "Exception"] {
                 return true;
             }
-            current = symbol.base;
+            current = symbol.base.as_ref().map(|base| base.structure);
         }
         false
     }
@@ -556,6 +561,15 @@ impl Lowerer<'_> {
             std::mem::replace(&mut self.exception_target, hir::ExceptionTarget::Function);
         let previous_caught = self.caught_error.take();
         self.current_throwing = throwing;
+        let class_base_field = structure.base.as_ref().and_then(|base| {
+            self.semantics
+                .structure(base.structure)
+                .filter(|base| {
+                    structure.kind == ast::UserTypeKind::Class
+                        && base.kind == ast::UserTypeKind::Class
+                })
+                .map(base_field_name)
+        });
         let fields = symbol
             .initializations
             .iter()
@@ -569,9 +583,14 @@ impl Lowerer<'_> {
                         .as_slice(),
                     None => &[],
                 };
+                let value = self.lower_resolved_call(&initialization.call, None, arguments)?;
                 Some((
                     initialization.rust_name.clone(),
-                    self.lower_resolved_call(&initialization.call, None, arguments)?,
+                    if class_base_field.as_ref() == Some(&initialization.rust_name) {
+                        hir::Expression::ClassBaseNew(Box::new(value))
+                    } else {
+                        value
+                    },
                 ))
             })
             .collect::<Option<Vec<_>>>();
@@ -608,7 +627,8 @@ impl Lowerer<'_> {
             },
         ];
 
-        let previous_return_type = self.current_return_type.replace(struct_type);
+        let previous_return_type = self.current_return_type.replace(struct_type.clone());
+        let previous_receiver_type = self.current_receiver_type.replace(struct_type);
         let previous_fluent_receiver = self.current_fluent_receiver;
         let previous_constructor = self.current_constructor;
         self.current_fluent_receiver = false;
@@ -620,6 +640,7 @@ impl Lowerer<'_> {
             }),
         };
         self.current_return_type = previous_return_type;
+        self.current_receiver_type = previous_receiver_type;
         self.current_fluent_receiver = previous_fluent_receiver;
         self.current_constructor = previous_constructor;
         self.current_throwing = previous_throwing;
@@ -710,6 +731,14 @@ impl Lowerer<'_> {
         let return_type = self.lower_type(&symbol.return_type, function.return_type.span)?;
         let throwing = !symbol.throws.is_empty();
         let previous_return_type = self.current_return_type.replace(symbol.return_type.clone());
+        let previous_receiver_type = std::mem::replace(
+            &mut self.current_receiver_type,
+            symbol
+                .receiver
+                .as_ref()
+                .and_then(|receiver| self.semantics.structure(receiver.structure))
+                .map(resolved_structure_type),
+        );
         let previous_fluent_receiver = self.current_fluent_receiver;
         let previous_throwing = self.current_throwing;
         let previous_target =
@@ -738,6 +767,7 @@ impl Lowerer<'_> {
                 .push(hir::Statement::Return(Some(hir::Expression::Success(None))));
         }
         self.current_return_type = previous_return_type;
+        self.current_receiver_type = previous_receiver_type;
         self.current_fluent_receiver = previous_fluent_receiver;
         self.current_throwing = previous_throwing;
         self.exception_target = previous_target;
@@ -1159,8 +1189,11 @@ impl Lowerer<'_> {
             let projection_target = actual_target.map(automatic_pointee_type);
             let projection = match (projection_target, canonical_ref(expected_target)) {
                 (
-                    Some(TypeRef::Struct { path: derived, .. }),
-                    TypeRef::Struct { path: base, .. },
+                    Some(
+                        TypeRef::Struct { path: derived, .. }
+                        | TypeRef::Class { path: derived, .. },
+                    ),
+                    TypeRef::Struct { path: base, .. } | TypeRef::Class { path: base, .. },
                 ) => self.struct_projection(derived, base).unwrap_or_default(),
                 _ => Vec::new(),
             };
@@ -1229,6 +1262,56 @@ impl Lowerer<'_> {
                     value: Box::new(value),
                 });
             }
+            let class_owner = resolution.and_then(|value| {
+                let TypeRef::Pointer {
+                    kind: expected_kind,
+                    target: expected_target,
+                } = canonical_ref(expected)
+                else {
+                    return None;
+                };
+                let TypeRef::Pointer {
+                    kind: actual_kind,
+                    target: actual_target,
+                } = canonical_ref(&value.ty)
+                else {
+                    return None;
+                };
+                if expected_kind != actual_kind
+                    || !matches!(
+                        expected_kind,
+                        PointerKind::Shared | PointerKind::SharedNullable
+                    )
+                {
+                    return None;
+                }
+                let (
+                    TypeRef::Class {
+                        path: expected_path,
+                        ..
+                    },
+                    TypeRef::Class {
+                        path: actual_path, ..
+                    },
+                ) = (canonical_ref(expected_target), canonical_ref(actual_target))
+                else {
+                    return None;
+                };
+                (expected_path != actual_path).then(|| {
+                    (
+                        *expected_kind == PointerKind::SharedNullable,
+                        self.struct_projection(actual_path, expected_path)
+                            .unwrap_or_default(),
+                    )
+                })
+            });
+            if let Some((nullable, projection)) = class_owner {
+                return Some(hir::Expression::ClassSharedOwnerCoercion {
+                    projection,
+                    nullable,
+                    value: Box::new(lowered),
+                });
+            }
             if (matches!(canonical_ref(expected), TypeRef::Struct { .. })
                 || matches!(
                     canonical_ref(expected),
@@ -1273,6 +1356,9 @@ impl Lowerer<'_> {
 
         let lowered = match &expression.kind {
             ExpressionKind::Name(path) => {
+                if matches!(path.segments.as_slice(), [name] if name == "this") {
+                    return Some(hir::Expression::Name("__stainless_self".to_owned()));
+                }
                 if let Some(reference) = self.semantics.static_constant(expression.span) {
                     let structure = self.semantics.structure(reference.structure)?;
                     let constant = structure.static_constants.get(reference.constant)?;
@@ -1913,23 +1999,29 @@ impl Lowerer<'_> {
                     );
                     return None;
                 };
+                let receiver_instance = function.receiver.as_ref().and_then(|receiver| {
+                    let actual = match callee {
+                        Some(ast::Expression {
+                            kind: ExpressionKind::Field { receiver, .. },
+                            ..
+                        }) => self.semantics.expression(receiver.span).map(|actual| {
+                            automatic_pointee_type(canonical_ref(&actual.ty)).clone()
+                        }),
+                        Some(ast::Expression {
+                            kind: ExpressionKind::Name(path),
+                            ..
+                        }) if path.segments.len() > 1 => self.current_receiver_type.clone(),
+                        _ => return None,
+                    }?;
+                    project_user_type_to_base(self.semantics, &actual, receiver.structure)
+                });
                 let substitutions = function
                     .receiver
                     .as_ref()
-                    .and_then(|receiver| {
+                    .zip(receiver_instance.as_ref())
+                    .and_then(|(receiver, instance)| {
                         let structure = self.semantics.structure(receiver.structure)?;
-                        let syntax_receiver = match callee {
-                            Some(ast::Expression {
-                                kind: ExpressionKind::Field { receiver, .. },
-                                ..
-                            }) => receiver.as_ref(),
-                            _ => return None,
-                        };
-                        let actual = self.semantics.expression(syntax_receiver.span)?;
-                        Some(user_type_substitutions(
-                            structure,
-                            automatic_pointee_type(canonical_ref(&actual.ty)),
-                        ))
+                        Some(user_type_substitutions(structure, instance))
                     })
                     .unwrap_or_default();
                 let mut lowered_arguments = arguments
@@ -1943,39 +2035,42 @@ impl Lowerer<'_> {
                     })
                     .collect::<Option<Vec<_>>>()?;
                 if let Some(receiver) = &function.receiver {
-                    let Some(ast::Expression {
-                        kind:
-                            ExpressionKind::Field {
-                                receiver: syntax_receiver,
-                                ..
-                            },
-                        ..
-                    }) = callee
-                    else {
-                        self.push(
-                            "HIR011",
-                            "member call has no receiver".to_owned(),
-                            call.span,
-                        );
-                        return None;
-                    };
                     let structure = self.semantics.structure(receiver.structure)?;
-                    lowered_arguments.insert(
-                        0,
-                        self.lower_bound_expression(
-                            syntax_receiver,
-                            &TypeRef::Reference {
-                                mutable: receiver.mutable,
-                                target: Box::new(match structure.kind {
-                                    ast::UserTypeKind::Struct
-                                    | ast::UserTypeKind::Class
-                                    | ast::UserTypeKind::Interface => {
-                                        resolved_structure_type(structure)
-                                    }
-                                }),
-                            },
+                    let expected_receiver = TypeRef::Reference {
+                        mutable: receiver.mutable,
+                        target: Box::new(
+                            receiver_instance
+                                .clone()
+                                .unwrap_or_else(|| resolved_structure_type(structure)),
+                        ),
+                    };
+                    let lowered_receiver = match callee {
+                        Some(ast::Expression {
+                            kind:
+                                ExpressionKind::Field {
+                                    receiver: syntax_receiver,
+                                    ..
+                                },
+                            ..
+                        }) => self.lower_bound_expression(syntax_receiver, &expected_receiver)?,
+                        Some(ast::Expression {
+                            kind: ExpressionKind::Name(path),
+                            ..
+                        }) if path.segments.len() > 1 => self.lower_implicit_receiver(
+                            receiver.mutable,
+                            receiver.structure,
+                            call.span,
                         )?,
-                    );
+                        _ => {
+                            self.push(
+                                "HIR011",
+                                "member call has no receiver".to_owned(),
+                                call.span,
+                            );
+                            return None;
+                        }
+                    };
+                    lowered_arguments.insert(0, lowered_receiver);
                 }
                 let invocation = hir::Expression::FunctionCall {
                     modules: function_module_path(function, self.semantics)
@@ -2472,13 +2567,13 @@ impl Lowerer<'_> {
                 let substitutions = user_type_substitutions(symbol, &call.return_type);
                 let mut expected = Vec::new();
                 let mut names = Vec::new();
-                if let Some(base) = symbol.base {
-                    let base = self.semantics.structure(base)?;
-                    expected.push(TypeRef::Struct {
-                        path: base.path.clone(),
-                        arguments: Vec::new(),
-                    });
-                    names.push(base_field_name(base));
+                if let Some(base) = &symbol.base {
+                    let base_symbol = self.semantics.structure(base.structure)?;
+                    expected.push(substitute_user_type(
+                        &user_type(base_symbol, base.arguments.clone()),
+                        &substitutions,
+                    ));
+                    names.push(base_field_name(base_symbol));
                 }
                 expected.extend(
                     symbol
@@ -2911,12 +3006,58 @@ impl Lowerer<'_> {
             .find(|structure| structure.path == derived)?;
         let mut fields = Vec::new();
         loop {
-            let parent = self.semantics.structure(current.base?)?;
+            let parent = self.semantics.structure(current.base.as_ref()?.structure)?;
             fields.push(base_field_name(parent));
             if parent.path == base {
                 return Some(fields);
             }
             current = parent;
+        }
+    }
+
+    fn lower_implicit_receiver(
+        &mut self,
+        mutable: bool,
+        target: crate::resolution::StructId,
+        span: ast::Span,
+    ) -> Option<hir::Expression> {
+        let derived_path =
+            self.current_receiver_type
+                .as_ref()
+                .and_then(|current| match canonical_ref(current) {
+                    TypeRef::Struct { path, .. } | TypeRef::Class { path, .. } => {
+                        Some(path.clone())
+                    }
+                    _ => None,
+                });
+        let Some(derived_path) = derived_path else {
+            self.push(
+                "HIR011",
+                "qualified member call has no implicit class receiver".to_owned(),
+                span,
+            );
+            return None;
+        };
+        let target = self.semantics.structure(target)?;
+        let Some(projection) = self.struct_projection(&derived_path, &target.path) else {
+            self.push(
+                "HIR011",
+                "qualified member receiver is not a base of the current type".to_owned(),
+                span,
+            );
+            return None;
+        };
+        let receiver = hir::Expression::Name("__stainless_self".to_owned());
+        if projection.is_empty() {
+            Some(receiver)
+        } else {
+            Some(hir::Expression::Borrow {
+                mutable,
+                expression: Box::new(hir::Expression::Field {
+                    receiver: Box::new(receiver),
+                    access_path: projection,
+                }),
+            })
         }
     }
 
@@ -3288,6 +3429,10 @@ fn resolved_structure_type(structure: &StructSymbol) -> TypeRef {
         .cloned()
         .map(TypeRef::Parameter)
         .collect();
+    user_type(structure, arguments)
+}
+
+fn user_type(structure: &StructSymbol, arguments: Vec<TypeRef>) -> TypeRef {
     match structure.kind {
         ast::UserTypeKind::Struct => TypeRef::Struct {
             path: structure.path.clone(),
@@ -3320,6 +3465,39 @@ fn user_type_substitutions(
                 .cloned(),
         )
         .collect()
+}
+
+fn project_user_type_to_base(
+    semantics: &SemanticModel,
+    derived: &TypeRef,
+    target: crate::resolution::StructId,
+) -> Option<TypeRef> {
+    let mut current_type = canonical_ref(derived).clone();
+    let mut current = semantics.structs.iter().find(|structure| {
+        matches!(
+            canonical_ref(&current_type),
+            TypeRef::Struct { path, .. }
+                | TypeRef::Class { path, .. }
+                | TypeRef::Interface { path, .. }
+                if path == &structure.path
+        )
+    })?;
+    loop {
+        if current.id == target {
+            return Some(current_type);
+        }
+        let base = current.base.as_ref()?;
+        let substitutions = user_type_substitutions(current, &current_type);
+        let base_symbol = semantics.structure(base.structure)?;
+        current_type = user_type(
+            base_symbol,
+            base.arguments
+                .iter()
+                .map(|argument| substitute_user_type(argument, &substitutions))
+                .collect(),
+        );
+        current = base_symbol;
+    }
 }
 
 fn substitute_user_type(ty: &TypeRef, substitutions: &BTreeMap<String, TypeRef>) -> TypeRef {

@@ -18,6 +18,16 @@ pub struct FunctionId(pub usize);
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StructId(pub usize);
 
+/// One direct data or class base, expressed in the derived type's generic
+/// parameters.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UserTypeBase {
+    /// Resolved base declaration.
+    pub structure: StructId,
+    /// Generic arguments supplied by the derived declaration.
+    pub arguments: Vec<TypeRef>,
+}
+
 /// Stable index of a resolved Stainless constructor.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ConstructorId(pub usize);
@@ -61,8 +71,8 @@ pub struct StructSymbol {
     pub type_parameters: Vec<String>,
     /// Struct, class, or interface source semantics.
     pub kind: crate::ast::UserTypeKind,
-    /// Optional single data base.
-    pub base: Option<StructId>,
+    /// Optional single data or class base.
+    pub base: Option<UserTypeBase>,
     /// Direct interface contracts in declaration order.
     pub interfaces: Vec<StructId>,
     /// Whether outside-module inheritance or implementation is forbidden.

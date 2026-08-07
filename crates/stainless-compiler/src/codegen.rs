@@ -1125,6 +1125,35 @@ impl Emitter {
                     _ => Err("non-owning pointer reached interface owner coercion".to_owned()),
                 }
             }
+            hir::Expression::ClassSharedOwnerCoercion {
+                projection,
+                nullable,
+                value,
+            } => {
+                let value = self.expression(value)?;
+                if *nullable {
+                    let derived = self.temporary("derived_class_owner")?;
+                    let mut base = quote!(#derived);
+                    for field in projection {
+                        let field = identifier(field)?;
+                        base = quote!((#base).#field);
+                    }
+                    Ok(quote!((#value).as_ref().map(|#derived| {
+                        ::stainless_runtime::ClassBase::share(&(#base))
+                    })))
+                } else {
+                    let mut base = value;
+                    for field in projection {
+                        let field = identifier(field)?;
+                        base = quote!((#base).#field);
+                    }
+                    Ok(quote!(::stainless_runtime::ClassBase::share(&(#base))))
+                }
+            }
+            hir::Expression::ClassBaseNew(value) => {
+                let value = self.expression(value)?;
+                Ok(quote!(::stainless_runtime::ClassBase::new(#value)))
+            }
             hir::Expression::DowngradeShared(value) => {
                 let value = self.expression(value)?;
                 Ok(quote!(::std::sync::Arc::downgrade(&(#value))))
@@ -1728,6 +1757,10 @@ fn type_tokens(ty: &hir::Type, lifetime: Option<&syn::Lifetime>) -> Result<Token
             } else {
                 Ok(quote!(#path < #(#arguments),* >))
             }
+        }
+        hir::Type::ClassBase(target) => {
+            let target = type_tokens(target, None)?;
+            Ok(quote!(::stainless_runtime::ClassBase<#target>))
         }
         hir::Type::Callback { .. } => {
             Err("callback type escaped its generated-wrapper parameter boundary".to_owned())
