@@ -52,7 +52,7 @@ boundary, then reads the discarded suffix forward. It collects those exact
 pairs from the RAM map. It then truncates the data WAL to the data length carried
 by the selected commit record. Revert never calls `Map::retain()` or performs
 reverse WAL reads, and its work is proportional to recent discarded index
-records rather than the total index size. An internal `rwlock<StoreState>` lets
+records rather than the total index size. An internal `shared_mutex<StoreState>` lets
 multiple lookups run concurrently while mutations, commits, reverts, and
 recovery use an exclusive write guard.
 

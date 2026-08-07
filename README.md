@@ -1953,7 +1953,7 @@ be imported. The initial synchronization vocabulary maps directly to safe Rust:
 | --- | --- | --- |
 | `mutex<T>` | `std::sync::Mutex<T>` | Exclusive mutable access to one `T` |
 | inferred lock guard | `std::sync::MutexGuard<'_, T>` | Scoped, move-only lock ownership |
-| `rwlock<T>` | `std::sync::RwLock<T>` | Concurrent readers or one exclusive writer |
+| `shared_mutex<T>` | `std::sync::RwLock<T>` | Concurrent readers or one exclusive writer |
 | inferred read guard | `std::sync::RwLockReadGuard<'_, T>` | Scoped, shared access to one `T` |
 | inferred write guard | `std::sync::RwLockWriteGuard<'_, T>` | Scoped, mutable access to one `T` |
 | `condition` | `std::sync::Condvar` | Wait and one/all waiter notification |
@@ -1968,7 +1968,7 @@ auto guard = local.lock();
 guard.ready = true;
 changed.notify_one();
 
-rwlock<State> indexed = rwlock<State>(State{true, 7});
+shared_mutex<State> indexed = shared_mutex<State>(State{true, 7});
 auto view = indexed.read();
 i32 value = view.value;
 ```
@@ -2000,26 +2000,26 @@ lowered to. The current compiler verifies the guard type and lifetime but does
 not yet prove that instance identity, so violating this rule can produce the
 underlying Rust panic.
 
-`rwlock<T>.read()` allows any number of concurrent readers and exposes only
-const access to `T`. `rwlock<T>.write()` excludes both readers and other
+`shared_mutex<T>.read()` allows any number of concurrent readers and exposes
+only const access to `T`. `shared_mutex<T>.write()` excludes both readers and other
 writers and exposes mutable access. Both guard types are inferred and obey the
 same lexical, non-copyable, non-returnable restrictions as a mutex guard.
 Condition waits accept only mutex guards; Rust condition variables do not wait
 on reader/writer locks. Generated code recovers poisoned Rust locks by taking
 their inner value, consistently with `mutex<T>`.
 
-`mutex<T>`, `rwlock<T>`, and `condition` are non-copyable. Because Stainless
+`mutex<T>`, `shared_mutex<T>`, and `condition` are non-copyable. Because Stainless
 structs are implicitly copyable data, none may be stored directly in a struct
 in the current language subset. Shared synchronized state instead uses
-`shared_ptr<mutex<T>>` / `shared_ptr<rwlock<T>>`, and a condition can likewise
+`shared_ptr<mutex<T>>` / `shared_ptr<shared_mutex<T>>`, and a condition can likewise
 use `shared_ptr<condition>`:
 
 ```cpp
 shared_ptr<mutex<State>> state =
     make_shared<mutex<State>>{false, 0};
 shared_ptr<condition> changed = make_shared<condition>();
-shared_ptr<rwlock<State>> index =
-    make_shared<rwlock<State>>{false, 0};
+shared_ptr<shared_mutex<State>> index =
+    make_shared<shared_mutex<State>>{false, 0};
 ```
 
 These synchronized pointee types are deliberate exceptions to the otherwise
@@ -2540,7 +2540,7 @@ logical key by version, and inserting the same key again within one version
 replaces that version's location. `find()` uses the map's non-escaping
 `with_last_in_range()` callback to select the greatest entry between `(key, 0)`
 and `(key, current_version)` in O(log n), then calls `pread_exact()` under the
-same shared `rwlock<StoreState>` guard. It never copies or scans the index.
+same shared `shared_mutex<StoreState>` guard. It never copies or scans the index.
 `find_range(lower, upper)` walks the inclusive compound-key interval once,
 coalesces each logical key's versions, and returns its latest visible values in
 ascending key order. `find_range_first(lower, upper, count)` and

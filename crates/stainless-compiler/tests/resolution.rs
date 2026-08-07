@@ -709,7 +709,7 @@ fn rwlock_read_guards_reject_mutation() {
     i32 value;
 };
 
-void invalid_read_mutation(const rwlock<State>& state) {
+void invalid_read_mutation(const shared_mutex<State>& state) {
     auto guard = state.read();
     guard.value = 1;
 }

@@ -45,18 +45,18 @@ void publish_value(shared_ptr<mutex<SharedState>> state, shared_ptr<condition> c
     changed.notify_all();
 }
 
-shared_ptr<rwlock<SharedState>> new_rw_state()
+shared_ptr<shared_mutex<SharedState>> new_shared_mutex_state()
 {
-    return make_shared<rwlock<SharedState>>{true, 7};
+    return make_shared<shared_mutex<SharedState>>{true, 7};
 }
 
-i32 read_value(shared_ptr<rwlock<SharedState>> state)
+i32 read_value(shared_ptr<shared_mutex<SharedState>> state)
 {
     auto guard = state.read();
     return guard.value;
 }
 
-void write_value(shared_ptr<rwlock<SharedState>> state, i32 value)
+void write_value(shared_ptr<shared_mutex<SharedState>> state, i32 value)
 {
     auto guard = state.write();
     guard.value = value;

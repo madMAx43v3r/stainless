@@ -4443,7 +4443,7 @@ impl Resolver<'_> {
             ExpressionKind::GenericName {
                 path,
                 arguments: type_arguments,
-            } if matches!(path.segments.as_slice(), [name] if name == "rwlock") => {
+            } if matches!(path.segments.as_slice(), [name] if name == "shared_mutex") => {
                 self.resolve_rwlock_constructor(type_arguments, arguments, span, context)
             }
             ExpressionKind::GenericName {
@@ -5114,12 +5114,12 @@ impl Resolver<'_> {
                 "RES113",
                 if matches!(operation, [name] if name == "read" || name == "write") {
                     format!(
-                        "`rwlock<T>.{}()` requires no arguments, found {}",
+                        "`shared_mutex<T>.{}()` requires no arguments, found {}",
                         operation[0],
                         arguments.len()
                     )
                 } else {
-                    format!("`rwlock<T>` has no method `{}`", name.display())
+                    format!("`shared_mutex<T>` has no method `{}`", name.display())
                 },
                 span,
             );
@@ -5918,7 +5918,7 @@ impl Resolver<'_> {
                     "mutex guards cannot be moved explicitly; `condition.wait(guard)` performs the only permitted guard transfer"
                         .to_owned()
                 } else {
-                    "rwlock guards cannot be moved explicitly".to_owned()
+                    "shared_mutex guards cannot be moved explicitly".to_owned()
                 },
                 arguments[0].span,
             );
@@ -6126,7 +6126,7 @@ impl Resolver<'_> {
             self.push(
                 "RES113",
                 format!(
-                    "`rwlock` requires one protected type argument, found {}",
+                    "`shared_mutex` requires one protected type argument, found {}",
                     type_arguments.len()
                 ),
                 span,
@@ -6154,7 +6154,7 @@ impl Resolver<'_> {
             self.push(
                 "RES113",
                 format!(
-                    "`rwlock` cannot protect type `{}` because it contains a reference",
+                    "`shared_mutex` cannot protect type `{}` because it contains a reference",
                     display_type(&target)
                 ),
                 type_arguments[0].span,
@@ -8160,7 +8160,7 @@ impl Resolver<'_> {
                     } else {
                         TypeRef::Mutex(Box::new(arguments[0].clone()))
                     }
-                } else if matches!(segments.as_slice(), [name] if name == "rwlock") {
+                } else if matches!(segments.as_slice(), [name] if name == "shared_mutex") {
                     let arguments = named
                         .arguments
                         .iter()
@@ -8172,7 +8172,7 @@ impl Resolver<'_> {
                         self.push(
                             "RES113",
                             format!(
-                                "`rwlock` expects one protected type argument, found {}",
+                                "`shared_mutex` expects one protected type argument, found {}",
                                 arguments.len()
                             ),
                             ty.span,
@@ -8184,7 +8184,7 @@ impl Resolver<'_> {
                         self.push(
                             "RES113",
                             format!(
-                                "`rwlock` cannot protect type `{}` because it contains a reference",
+                                "`shared_mutex` cannot protect type `{}` because it contains a reference",
                                 display_type(&arguments[0])
                             ),
                             ty.span,
@@ -10034,7 +10034,7 @@ fn display_type(ty: &TypeRef) -> String {
         }
         TypeRef::Mutex(target) => format!("mutex<{}>", display_type(target)),
         TypeRef::MutexGuard(target) => format!("<mutex_guard<{}>>", display_type(target)),
-        TypeRef::RwLock(target) => format!("rwlock<{}>", display_type(target)),
+        TypeRef::RwLock(target) => format!("shared_mutex<{}>", display_type(target)),
         TypeRef::RwLockReadGuard(target) => {
             format!("<rwlock_read_guard<{}>>", display_type(target))
         }

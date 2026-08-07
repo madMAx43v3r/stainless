@@ -2258,7 +2258,7 @@ impl Lowerer<'_> {
                 else {
                     self.push(
                         "HIR011",
-                        "rwlock operation has no receiver".to_owned(),
+                        "shared_mutex operation has no receiver".to_owned(),
                         call.span,
                     );
                     return None;

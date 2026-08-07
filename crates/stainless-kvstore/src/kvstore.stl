@@ -85,22 +85,22 @@ class RawTable {
     void insert(Vec<u8> key, Vec<u8> value) const throws ValueTooLarge, stainless::IoError;
     bool commit(u32 next_version) const throws stainless::IoError;
     bool revert(u32 version) const throws IndexCorrupt, stainless::IoError;
+
     u32 current_version() const;
+
     shared_nullptr<Value> find(const Vec<u8>& key) const throws stainless::IoError;
-    Vec<KeyValue> find_range(const Vec<u8>& lower, const Vec<u8>& upper) const throws stainless::IoError;
+
+    Vec<KeyValue> find_range(
+        const Vec<u8>& lower, const Vec<u8>& upper) const throws stainless::IoError;
     Vec<KeyValue> find_range_first(
-        const Vec<u8>& lower,
-        const Vec<u8>& upper,
-        usize count) const throws stainless::IoError;
+        const Vec<u8>& lower, const Vec<u8>& upper, usize count) const throws stainless::IoError;
     Vec<KeyValue> find_range_last(
-        const Vec<u8>& lower,
-        const Vec<u8>& upper,
-        usize count) const throws stainless::IoError;
+        const Vec<u8>& lower, const Vec<u8>& upper, usize count) const throws stainless::IoError;
 
 private:
     File data_log;
     File index_log;
-    rwlock<StoreState> state;
+    shared_mutex<StoreState> state;
 };
 
 struct DatabaseState {
@@ -114,8 +114,9 @@ class Database {
     shared_ptr<RawTable> open_table(const String& path) const throws stainless::IoError;
     bool commit(u32 next_version) const throws stainless::IoError;
     bool revert(u32 version) const throws IndexCorrupt, stainless::IoError;
-    u32 current_version() const;
     u32 recover() const throws IndexCorrupt, stainless::IoError;
+
+    u32 current_version() const;
 
 private:
     mutex<DatabaseState> state;
@@ -137,15 +138,19 @@ class Table<K, V> {
         function<Decoded<V>(const Vec<u8>&)> decode_value) throws stainless::IoError;
 
     void insert(K key, V value) const throws CodecError, ValueTooLarge, stainless::IoError;
+
     bool find(const K& key, V& value) const throws CodecError, stainless::IoError;
+
     Vec<tuple<K, V>> find_range(const K& lower, const K& upper) const
         throws CodecError, stainless::IoError;
     Vec<tuple<K, V>> find_range_first(const K& lower, const K& upper, usize count) const
         throws CodecError, stainless::IoError;
     Vec<tuple<K, V>> find_range_last(const K& lower, const K& upper, usize count) const
         throws CodecError, stainless::IoError;
+    
     bool commit(u32 next_version) const throws stainless::IoError;
     bool revert(u32 version) const throws IndexCorrupt, stainless::IoError;
+    
     u32 current_version() const;
 
 private:

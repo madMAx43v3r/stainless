@@ -69,9 +69,9 @@ pub enum TypeRef {
     MutexGuard(Box<TypeRef>),
     /// A reader/writer lock owning one synchronized value (`std::sync::RwLock<T>`).
     RwLock(Box<TypeRef>),
-    /// A scoped, move-only shared guard borrowing one `rwlock<T>`.
+    /// A scoped, move-only shared guard borrowing one `shared_mutex<T>`.
     RwLockReadGuard(Box<TypeRef>),
-    /// A scoped, move-only mutable guard borrowing one `rwlock<T>`.
+    /// A scoped, move-only mutable guard borrowing one `shared_mutex<T>`.
     RwLockWriteGuard(Box<TypeRef>),
     /// A condition signal (`std::sync::Condvar`).
     Condition,

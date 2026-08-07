@@ -394,7 +394,7 @@ pub enum Intrinsic {
         /// Protected value type.
         target: TypeRef,
     },
-    /// Construct an `rwlock<T>` around a selected `T` construction.
+    /// Construct a `shared_mutex<T>` around a selected `T` construction.
     RwLockNew {
         /// Protected value type.
         target: TypeRef,
