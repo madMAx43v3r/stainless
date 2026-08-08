@@ -1018,6 +1018,17 @@ fn var_exposes_checked_shared_mutation_methods() {
     assert_eq!(is_string.receiver, Some(Receiver::Shared));
     assert_eq!(is_string.return_type, TypeRef::Bool);
 
+    let string_ref = TypeRef::shared_ref(TypeRef::native("rust::String", vec![]));
+    let get_field = var_binding
+        .find_callable(CallStyle::Method, "get", std::slice::from_ref(&string_ref))
+        .expect("var objects expose dynamic member lookup");
+    assert_eq!(get_field.receiver, Some(Receiver::Shared));
+    assert_eq!(get_field.return_type, var.clone());
+    assert!(matches!(
+        &get_field.lowering,
+        RustLowering::Method { rust_name } if rust_name == "field"
+    ));
+
     let push = var_binding
         .find_callable(CallStyle::Method, "push", std::slice::from_ref(&var))
         .expect("var arrays expose push");
@@ -1025,7 +1036,6 @@ fn var_exposes_checked_shared_mutation_methods() {
     assert_eq!(push.return_type, TypeRef::Void);
     assert_eq!(push.rust_result_error, Some(json_error.clone()));
 
-    let string_ref = TypeRef::shared_ref(TypeRef::native("rust::String", vec![]));
     let set_field = var_binding
         .find_callable(CallStyle::Method, "set", &[string_ref, var])
         .expect("var objects expose dynamic member set");

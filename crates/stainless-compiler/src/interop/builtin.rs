@@ -615,6 +615,17 @@ fn var_binding() -> NativeTypeBinding {
             method("is_string", Receiver::Shared, vec![], TypeRef::Bool),
             method("clone", Receiver::Shared, vec![], var),
             method("to_json", Receiver::Shared, vec![], string),
+            renamed_method(
+                "get",
+                "field",
+                Receiver::Shared,
+                vec![Parameter::adapted(
+                    "name",
+                    string_ref.clone(),
+                    ArgumentAdaptation::StringRefToStr,
+                )],
+                TypeRef::native(VAR_TYPE_PATH, Vec::new()),
+            ),
             fallible_method(
                 "set",
                 "set_field",
@@ -1879,6 +1890,41 @@ fn method_with_requirements(
     return_type: TypeRef,
     requirements: Vec<TraitRequirement>,
 ) -> CallableBinding {
+    renamed_method_with_requirements(
+        source_name,
+        source_name,
+        receiver,
+        parameters,
+        return_type,
+        requirements,
+    )
+}
+
+fn renamed_method(
+    source_name: &'static str,
+    rust_name: &'static str,
+    receiver: Receiver,
+    parameters: Vec<Parameter>,
+    return_type: TypeRef,
+) -> CallableBinding {
+    renamed_method_with_requirements(
+        source_name,
+        rust_name,
+        receiver,
+        parameters,
+        return_type,
+        vec![],
+    )
+}
+
+fn renamed_method_with_requirements(
+    source_name: &'static str,
+    rust_name: &'static str,
+    receiver: Receiver,
+    parameters: Vec<Parameter>,
+    return_type: TypeRef,
+    requirements: Vec<TraitRequirement>,
+) -> CallableBinding {
     CallableBinding {
         source_name: source_name.to_owned(),
         style: CallStyle::Method,
@@ -1890,7 +1936,7 @@ fn method_with_requirements(
         return_borrow: None,
         requirements,
         lowering: RustLowering::Method {
-            rust_name: source_name.to_owned(),
+            rust_name: rust_name.to_owned(),
         },
     }
 }

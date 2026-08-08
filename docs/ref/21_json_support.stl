@@ -72,6 +72,8 @@ i32 main() throws stainless::JsonError
     };
     var array = [1, 2, "text", {}, null];
     var value = 1.23;
+    String dynamic_name = "display_name";
+    var dynamic_member = object.get(dynamic_name);
 
     // Dynamic JSON arrays use snapshot iteration. The source can change while
     // borrowed snapshot elements remain stable, and value bindings consume an
@@ -146,6 +148,7 @@ i32 main() throws stainless::JsonError
         String(removed_member).len() != 6usize ||
         array_length != 6usize ||
         !cycle_rejected ||
+        String(dynamic_member) != "Stainless" ||
         borrowed_total != 6 ||
         owned_total != 10 ||
         ranged.len() != 4 ||
