@@ -1433,6 +1433,21 @@ impl Var {
         .unwrap_or_else(Self::null)
     }
 
+    /// Returns an owned snapshot of the array elements.
+    ///
+    /// Aggregate elements retain their shared identity, while changes to the
+    /// array itself do not change the returned sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonError`] when the receiver is not an array.
+    pub fn array_snapshot(&self) -> Result<Vec<Self>, JsonError> {
+        let VarRepr::Array(array) = &self.0 else {
+            return Err(JsonError::mutation("range iteration requires an array"));
+        };
+        Ok(read_lock(array).clone())
+    }
+
     /// Replaces or creates an object member.
     ///
     /// # Errors
@@ -2481,6 +2496,24 @@ mod tests {
         assert_eq!(shared_object.field("items").index(1), Var::from(2));
         assert!(shared_object.field("items").index(3).is_null());
         assert_eq!(shared_object.field("items").index(4), Var::from(5));
+    }
+
+    #[test]
+    fn array_snapshots_have_stable_membership_and_shared_elements() {
+        let object = Var::object([("value", Var::from(1))]);
+        let mut array = Var::array([object]);
+        let snapshot = array.array_snapshot().expect("array snapshot succeeds");
+
+        array.push(Var::from(2)).expect("array push succeeds");
+        let mut snapshot_object = snapshot[0].clone();
+        snapshot_object
+            .set_field("value", Var::from(3))
+            .expect("snapshot aggregate mutation succeeds");
+
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(array.len().expect("array has a length"), 2);
+        assert_eq!(array.index(0).field("value"), Var::from(3));
+        assert!(Var::from(1).array_snapshot().is_err());
     }
 
     #[test]

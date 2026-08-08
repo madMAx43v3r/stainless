@@ -7,7 +7,7 @@ use crate::ast::{
     self, BinaryOperator, ExpressionKind, ForClause, ForInitializer, Item, PrefixOperator,
     StatementKind,
 };
-use crate::interop::{PointerKind, Receiver, TypeRef};
+use crate::interop::{PointerKind, Receiver, TypeRef, VAR_TYPE_PATH};
 use crate::resolution::{CallTarget, FunctionSymbol, Intrinsic, SemanticModel};
 
 /// Validates ownership rules over an otherwise successfully resolved file.
@@ -683,14 +683,19 @@ impl Analyzer<'_> {
         if bindings.len() != range.bindings.len() {
             return;
         }
+        let json_array = self
+            .semantics
+            .expression(range.iterable.span)
+            .is_some_and(|resolution| is_json_type(canonical_ref(&resolution.ty)));
         let moved_range = is_move_call(self.semantics, &range.iterable);
         let mutable = bindings
             .iter()
             .any(|binding| matches!(binding.ty, TypeRef::Reference { mutable: true, .. }));
-        let borrowed = bindings.iter().any(|binding| binding.ty.is_reference()) || !moved_range;
+        let borrowed = !json_array
+            && (bindings.iter().any(|binding| binding.ty.is_reference()) || !moved_range);
         let origin = self.expression(
             &range.iterable,
-            if moved_range {
+            if moved_range || json_array {
                 Usage::Read
             } else if mutable {
                 Usage::BorrowMutable
@@ -1790,6 +1795,14 @@ fn canonical_ref(ty: &TypeRef) -> &TypeRef {
         TypeRef::Reference { target, .. } => target,
         _ => ty,
     }
+}
+
+fn is_json_type(ty: &TypeRef) -> bool {
+    matches!(
+        ty,
+        TypeRef::Native { path, arguments }
+            if path == VAR_TYPE_PATH && arguments.is_empty()
+    )
 }
 
 fn collect_last_uses(source: &ast::SourceFile) -> BTreeMap<ast::Span, ast::Span> {

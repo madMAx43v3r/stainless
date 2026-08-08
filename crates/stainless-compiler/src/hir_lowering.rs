@@ -1037,6 +1037,10 @@ impl Lowerer<'_> {
                 })
             }
             ForClause::Range(range) => {
+                let json_array = self
+                    .semantics
+                    .expression(range.iterable.span)
+                    .is_some_and(|resolution| is_json_type(canonical_ref(&resolution.ty)));
                 let bindings = range
                     .bindings
                     .iter()
@@ -1059,7 +1063,11 @@ impl Lowerer<'_> {
                     })
                     .collect::<Option<Vec<_>>>()?;
                 let structured = bindings.len() == 2;
-                let mode = if bindings
+                let mode = if json_array && bindings.iter().all(|(ty, _)| ty.is_reference()) {
+                    hir::RangeMode::Shared
+                } else if json_array {
+                    hir::RangeMode::Move
+                } else if bindings
                     .iter()
                     .any(|(ty, _)| matches!(ty, TypeRef::Reference { mutable: true, .. }))
                 {
@@ -1075,12 +1083,28 @@ impl Lowerer<'_> {
                 } else {
                     hir::RangeMode::Copy
                 };
+                let iterable = self.lower_expression(&range.iterable, ExpressionMode::Reference)?;
+                let iterable = if json_array {
+                    hir::Expression::UnwrapRustResult {
+                        expression: Box::new(hir::Expression::MethodCall {
+                            receiver: Box::new(iterable),
+                            rust_name: "array_snapshot".to_owned(),
+                            receiver_mode: Receiver::Shared,
+                            arguments: Vec::new(),
+                        }),
+                        exception: hir::NativeExceptionKind::JsonError,
+                        error_message: hir::RustErrorMessage::Display,
+                        target: self.exception_target.clone(),
+                    }
+                } else {
+                    iterable
+                };
                 let body = self.lower_loop_body(&label, &statement.body)?;
                 Some(hir::Statement::RangeFor {
                     label,
                     bindings: bindings.into_iter().map(|(_, binding)| binding).collect(),
                     mode,
-                    iterable: self.lower_expression(&range.iterable, ExpressionMode::Reference)?,
+                    iterable,
                     body,
                 })
             }

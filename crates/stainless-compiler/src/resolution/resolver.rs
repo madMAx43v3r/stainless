@@ -3021,24 +3021,40 @@ impl Resolver<'_> {
     ) {
         let iterable = self.resolve_expression(&range.iterable, None, context);
         let canonical_iterable = canonical(&iterable.ty);
-        let (elements, permits_mutable_iteration, structured, iterable_name) =
+        let (elements, permits_mutable_iteration, structured, iterable_name, json_array) =
             match &canonical_iterable {
                 TypeRef::Array { element, .. } => (
                     vec![element.as_ref().clone()],
                     true,
                     false,
                     "Array".to_owned(),
+                    false,
                 ),
                 TypeRef::Native { path, arguments } => {
                     match (path.as_str(), arguments.as_slice()) {
                         ("rust::Vec" | "rust::List" | "rust::Queue", [element]) => {
-                            (vec![element.clone()], true, false, path.clone())
+                            (vec![element.clone()], true, false, path.clone(), false)
                         }
                         ("rust::Set", [element]) => {
-                            (vec![element.clone()], false, false, path.clone())
+                            (vec![element.clone()], false, false, path.clone(), false)
                         }
-                        ("rust::Map" | "rust::MultiMap", [key, value]) => {
-                            (vec![key.clone(), value.clone()], true, true, path.clone())
+                        ("rust::Map" | "rust::MultiMap", [key, value]) => (
+                            vec![key.clone(), value.clone()],
+                            true,
+                            true,
+                            path.clone(),
+                            false,
+                        ),
+                        (VAR_TYPE_PATH, []) => {
+                            let json_error = self.json_error_struct();
+                            self.validate_checked_effect(json_error, range.iterable.span, context);
+                            (
+                                vec![TypeRef::native(VAR_TYPE_PATH, Vec::new())],
+                                false,
+                                false,
+                                "JSON array".to_owned(),
+                                true,
+                            )
                         }
                         _ => {
                             self.push(
@@ -3140,14 +3156,21 @@ impl Resolver<'_> {
         let mutable_iteration = binding_types
             .iter()
             .any(|ty| matches!(ty, TypeRef::Reference { mutable: true, .. }));
-        if mutable_iteration && iterable.category != ValueCategory::MutablePlace {
+        if mutable_iteration && json_array {
+            self.push(
+                "RES008",
+                "mutable references are not supported when iterating a JSON array snapshot"
+                    .to_owned(),
+                range.ty.span,
+            );
+        } else if mutable_iteration && iterable.category != ValueCategory::MutablePlace {
             self.push(
                 "RES008",
                 "mutable range binding requires a mutable range".to_owned(),
                 range.iterable.span,
             );
         }
-        if mutable_iteration && !permits_mutable_iteration {
+        if mutable_iteration && !json_array && !permits_mutable_iteration {
             self.push(
                 "RES008",
                 format!(
@@ -3156,7 +3179,8 @@ impl Resolver<'_> {
                 range.ty.span,
             );
         }
-        if binding_types.iter().all(|ty| !ty.is_reference())
+        if !json_array
+            && binding_types.iter().all(|ty| !ty.is_reference())
             && iterable.category != ValueCategory::Temporary
         {
             for (syntax, element) in range.bindings.iter().zip(&elements) {

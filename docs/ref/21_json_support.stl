@@ -50,6 +50,19 @@ bool rejects_cycle(var& value)
     return false;
 }
 
+bool rejects_scalar_range()
+{
+    var scalar = 1;
+    try {
+        for (const var& value : scalar) {
+            return value == null;
+        }
+    } catch (const stainless::JsonError& error) {
+        return String(error.message).len() > 0;
+    }
+    return false;
+}
+
 i32 main() throws stainless::JsonError
 {
     var object = {
@@ -59,6 +72,22 @@ i32 main() throws stainless::JsonError
     };
     var array = [1, 2, "text", {}, null];
     var value = 1.23;
+
+    // Dynamic JSON arrays use snapshot iteration. The source can change while
+    // borrowed snapshot elements remain stable, and value bindings consume an
+    // owned snapshot rather than the source array.
+    var ranged = [1, 2, 3];
+    i32 borrowed_total = 0;
+    for (const var& element : ranged) {
+        borrowed_total += i32(element);
+        if (i32(element) == 1) {
+            ranged.push(4);
+        }
+    }
+    i32 owned_total = 0;
+    for (var element : ranged) {
+        owned_total += i32(element);
+    }
 
     List<String> tags;
     tags.push_back("compiler");
@@ -116,7 +145,11 @@ i32 main() throws stainless::JsonError
         i32(removed_element) != 7 ||
         String(removed_member).len() != 6usize ||
         array_length != 6usize ||
-        !cycle_rejected) {
+        !cycle_rejected ||
+        borrowed_total != 6 ||
+        owned_total != 10 ||
+        ranged.len() != 4 ||
+        !rejects_scalar_range()) {
         return 2;
     }
 

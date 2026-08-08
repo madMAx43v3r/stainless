@@ -680,6 +680,25 @@ void invalid(Set<i32>& values, Map<i32, i32>& pairs) {
 }
 
 #[test]
+fn mutable_json_array_range_references_are_rejected() {
+    let analysis = analyze(
+        r"void invalid(var& values) throws stainless::JsonError {
+    for (var& value : values) {
+    }
+}
+",
+    );
+
+    assert!(
+        analysis.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "RES008" && diagnostic.message.contains("JSON array snapshot")
+        }),
+        "{:#?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
 fn resolves_owned_and_scoped_threads_with_checked_join_errors() {
     let analysis = analyze(include_str!("../../../docs/ref/24_threads.stl"));
 
