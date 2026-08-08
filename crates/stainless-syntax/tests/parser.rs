@@ -310,6 +310,48 @@ private:
 }
 
 #[test]
+fn parses_usize_const_parameters_and_integer_generic_arguments() {
+    let source = r"struct Buffer<T, usize N> {
+    Array<T, N> values;
+    Array<u8, 32> bytes;
+};
+";
+    let parsed = parse(source);
+    let tree = parsed.tree();
+    let structure = tree
+        .items()
+        .find_map(|item| match item {
+            Item::Struct(structure) => Some(structure),
+            _ => None,
+        })
+        .expect("buffer struct");
+    let parameters = structure.generic_parameters().collect::<Vec<_>>();
+    let integer_length = structure
+        .fields()
+        .nth(1)
+        .and_then(|field| field.ty())
+        .and_then(|ty| ty.generic_arguments().nth(1))
+        .and_then(|ty| ty.const_integer_token())
+        .expect("integer const argument");
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(parsed.syntax().to_string(), source);
+    assert_eq!(parameters.len(), 2);
+    assert!(!parameters[0].is_const());
+    assert!(parameters[1].is_const());
+    assert_eq!(parameters[1].const_type_token().unwrap().text(), "usize");
+    assert_eq!(parameters[1].name_token().unwrap().text(), "N");
+    assert_eq!(integer_length.text(), "32");
+
+    let wrong_order = parse("struct Bad<usize N, T> {};\n");
+    assert!(wrong_order.errors().iter().any(|error| {
+        error
+            .message
+            .contains("generic type parameters must precede const parameters")
+    }));
+}
+
+#[test]
 fn deleted_constructor_requires_the_contextual_delete_spelling() {
     let parsed = parse("struct Value { Value() = unavailable; };\n");
 

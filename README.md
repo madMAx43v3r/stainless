@@ -179,10 +179,17 @@ implemented:
   checked `stainless::IoError` failures.
 - [`27_tuples.stl`](docs/ref/27_tuples.stl) — compiler-known heterogeneous
   tuples used as lexicographically ordered compound map keys.
+- [`28_generic_types.stl`](docs/ref/28_generic_types.stl) — invariant generic
+  structs and classes with concrete type substitution.
+- [`29_class_inheritance.stl`](docs/ref/29_class_inheritance.stl) — single
+  class inheritance, explicit base calls, and owner upcasts.
 - [`30_switch.stl`](docs/ref/30_switch.stl) — exhaustive, non-fallthrough
   `switch` expressions with literal arms and a final `else` fallback.
 - [`31_while.stl`](docs/ref/31_while.stl) — condition-controlled loops with
   `break` and `continue`.
+- [`32_arrays.stl`](docs/ref/32_arrays.stl) — compiler-native fixed-size
+  `Array<T, N>`, `usize` const generics, aggregate/default initialization,
+  indexing, methods, and range iteration.
 
 `01_basics.stl`, `02_structs_and_data_inheritance.stl`,
 `11_vec_and_string.stl`, `13_range_for.stl`, and `14_constructors.stl` are
@@ -265,12 +272,15 @@ The first compiler uses the following conservative grammar policy:
 
 - Source identifiers are ASCII and match `[A-Za-z_][A-Za-z0-9_]*`. Unicode
   identifiers may be added later without affecting type semantics.
-- User generic type declarations currently use `struct Name<T>` or
-  `class Name<T>`. Parameters are invariant, type arguments are explicit, and
-  only type parameters are supported. Generic fields, constructors, member
-  signatures, out-of-body definitions, nested type instances, references, and
-  concrete construction are implemented. An out-of-body member repeats the
-  owner parameters in C++ position, for example
+- User generic type declarations use `struct Name<T>` or const parameters such
+  as `struct Buffer<T, usize N>`. Type parameters must precede const
+  parameters. Parameters are invariant and arguments are explicit. Const
+  parameters are compile-time `usize` values and may be supplied by an integer
+  literal, another declared const parameter, or a qualified
+  `static const usize` member. Generic fields, constructors, member signatures,
+  out-of-body definitions, nested type instances, references, and concrete
+  construction are implemented. An out-of-body member repeats the owner
+  parameters in C++ position, for example
   `const T& Box<T>::get() const`. The repeated arguments must exactly name the
   declared parameters in order.
 - Generic arguments must be storable value types; `void`, references, and
@@ -280,9 +290,10 @@ The first compiler uses the following conservative grammar policy:
   can be cloned. Classes remain move-only for every instantiation.
 - Generic single data/class bases may use the derived declaration's type
   parameters. Generic interfaces, interface implementation by a generic type,
-  default type arguments, non-type parameters, specialization, generic free
-  functions, and user-written trait bounds are deferred. Compiler metadata may
-  still expose supported generic Rust types and methods such as `Vec<T>`.
+  default generic arguments, non-`usize` const parameters, specialization,
+  generic free functions, and user-written trait bounds are deferred. Compiler
+  metadata may still expose supported generic Rust types and methods such as
+  `Vec<T>`.
 - `sealed` is valid after `interface` and prevents inheritance or
   implementation outside the module. It is also valid after `struct` or
   `class` and prevents use as a data/class base outside the module. `native` is
@@ -1063,6 +1074,44 @@ checks potentially repeated loop moves conservatively. Lowering `move(value)`
 to an actual Rust move lets `rustc` independently verify the result, but
 generated-Rust errors are a backstop rather than the primary Stainless
 diagnostic mechanism.
+
+### Compiler-native fixed-size arrays
+
+`Array<T, N>` is a fixed-size inline value with no runtime wrapper or heap
+allocation. It lowers directly to Rust `[T; N]` and is available without a
+`use` declaration. `T` must be a storable value type and `N` must be a
+compile-time `usize` value:
+
+```cpp
+struct Limits {
+    static const usize Width = 4;
+};
+
+Array<u32, Limits::Width> values = Array<u32, Limits::Width>{1, 2};
+values[2] = 3;
+```
+
+Aggregate initialization constructs the supplied leading elements and
+default-constructs the remaining elements. Too many elements are rejected.
+An array whose length is a const parameter can be default-constructed; a
+non-empty aggregate requires a concrete length so the compiler can prove its
+arity. Zero-length arrays are valid. `Array<T, N>()` and an uninitialized-looking
+declaration both perform Stainless default construction, so they are valid only
+when `T` has a non-throwing default constructor.
+
+Arrays support `operator[]`-style indexing, `len()`, `is_empty()`, `fill(value)`,
+and C++-style range iteration. `fill()` requires a mutable array and a copyable
+element type. Copy/assignment, equality, ordering, and structural `Send`/`Sync`
+availability follow the element type. A generic declaration writes const
+parameters after type parameters:
+
+```cpp
+struct Buffer<T, usize N> {
+    Array<T, N> values;
+};
+```
+
+The compiler emits `struct Buffer<T, const N: usize> { values: [T; N] }`.
 
 ### Compiler-known tuples
 
@@ -2690,7 +2739,8 @@ external macros remain rejected until each receives purpose-built parsing and
 lowering rules.
 
 Cargo dependencies are declared in the surrounding Rust project's
-`Cargo.toml`, and native paths begin with `rust::<dependency>::...`; for
+`Cargo.toml`, or in `[[cargo_dependency]]` entries for standalone Stainless
+programs, and native paths begin with `rust::<dependency>::...`; for
 example, `use rust::regex::Regex;`. Here `dependency` is the Cargo dependency
 key, with `-` normalized to `_` as in Rust crate paths, so renamed dependencies
 work as expected. Non-standard crates use generated wrappers because a Rust
@@ -2704,6 +2754,10 @@ the Stainless type grammar:
 
 ```toml
 schema = 1
+
+[[cargo_dependency]]
+name = "regex"
+version = "1.12.4"
 
 [[type]]
 dependency = "regex"
@@ -2733,6 +2787,11 @@ receiver = "const"
 parameters = ["const rust::String&"]
 return = "bool"
 ```
+
+Generated wrappers normally return the Rust call result unchanged. A binding
+whose Rust API returns a fixed array can declare `return_conversion = "into"`
+and expose a compatible Stainless type such as `rust::Vec<u8>`; the generated
+wrapper applies `Into::into` and rustc checks the conversion.
 
 ### Stored callables
 
@@ -3084,11 +3143,12 @@ The current recursive-descent grammar handles:
 
 - namespace blocks and losslessly retained `use` declarations;
 - function declarations and definitions, qualified names, parameters,
-  reference types, generic type arguments, `const`, and `throws` clauses;
+  reference types, type and compile-time `usize` generic arguments, `const`,
+  and `throws` clauses;
 - struct, class, and interface definitions; direct fields; typed `static const`
-  struct members; data and interface base lists; `public:`/`private:` labels;
-  member declarations; qualified out-of-type definitions; and struct aggregate
-  initialization;
+  struct members; ordered type/`usize` const generic parameters; data and
+  interface base lists; `public:`/`private:` labels; member declarations;
+  qualified out-of-type definitions; and struct/array aggregate initialization;
 - constructor declarations, `= delete`, qualified out-of-type definitions,
   and C++-style data-base/member initializer lists;
 - blocks, initialized or default-constructed local declarations, `return`,
@@ -3097,8 +3157,8 @@ The current recursive-descent grammar handles:
 - classic `for (init; condition; update)` and range
   `for (binding : expression)` statements;
 - names and paths, literals, parenthesized expressions, calls with narrowly
-  parsed explicit generic targets such as `make_unique<T>`, member access,
-  indexing, ordinary and explicitly base-qualified struct fields,
+  parsed explicit generic targets such as `make_unique<T>` and `Array<T, N>`,
+  member access, indexing, ordinary and explicitly base-qualified struct fields,
   prefix/postfix operators, assignment, precedence-aware binary expressions,
   and typed lambdas with explicit capture lists, arbitrary owned initializer
   captures, C++-positioned `mutable`, and exact
@@ -3377,11 +3437,36 @@ stainlessc --build -o hello main.stl
 stainlessc --run main.stl
 ```
 
+Larger programs can use `stainless-package.toml`:
+
+```toml
+schema = 1
+name = "poker"
+sources = ["src/poker.stl", "src/hand.stl"]
+main = "src/main.stl"
+
+[dependencies]
+stainless-crypto = "../../crates/stainless-crypto"
+stainless-http = "../../crates/stainless-http"
+```
+
+Build the package and all transitive source dependencies with:
+
+```sh
+stainlessc --build --package apps/poker -o poker-dealer
+```
+
+Dependency paths are relative to the declaring package. A dependency's
+`sources` are compiled before the dependent package, while its `main` is not
+included. `[native_dependencies]` maps Cargo dependency names to local Cargo
+package paths; registry dependencies continue to live in that package's
+`stainless-bindings.toml`.
+
 Multiple source arguments are concatenated into one translation unit in the
-order supplied. `--package-root DIR` loads `DIR/stainless-bindings.toml`.
-Standalone builds that use those native bindings add each backing Cargo crate
-with `--dependency NAME=PATH`; the dependency is linked only in the compiler's
-temporary build directory.
+order supplied. Repeatable `--package-root DIR` options compose each package's
+`DIR/stainless-bindings.toml`. Registry dependencies declared there are added
+to the compiler's temporary Cargo build. Local backing crates are supplied as
+`--dependency NAME=PATH` and are also linked only in that temporary directory.
 
 `--check` validates without emitting Rust. Without `-o`, generated Rust is
 written to stdout. `--build` writes an executable to the required `-o` path.
@@ -3391,9 +3476,7 @@ files. Runtime-free programs still use `rustc` directly. Programs that use
 native JSON receive a hidden temporary Cargo manifest linking
 `stainless-runtime`; users still do not create `main.rs` or `build.rs`.
 Diagnostics go to stderr and use byte spans until richer source rendering is
-added. Automatic Cargo metadata/version resolution for external dependencies
-remains deferred; standalone builds currently accept explicit path
-dependencies.
+added.
 
 ## Rust library survey
 

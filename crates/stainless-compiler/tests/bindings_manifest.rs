@@ -4,8 +4,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use stainless_compiler::interop::{
     ArgumentAdaptation, BINDINGS_MANIFEST_FILENAME, CallStyle, CallbackEscape, CallbackKind,
-    NativeErrorFormat, Receiver, RustLowering, TypeRef, WrapperTarget, load_bindings_manifest,
-    load_package_bindings, parse_bindings_manifest, standard_bindings,
+    NativeErrorFormat, Receiver, ReturnAdaptation, RustLowering, TypeRef, WrapperTarget,
+    load_bindings_manifest, load_package_bindings, load_package_dependencies,
+    parse_bindings_manifest, standard_bindings,
 };
 
 static TEMPORARY_INDEX: AtomicUsize = AtomicUsize::new(0);
@@ -171,6 +172,64 @@ return = "rust::example::Parser"
             ..
         } if rust_path == "::example::parse"
     ));
+}
+
+#[test]
+fn parses_generated_wrapper_return_conversion() {
+    let bindings = parse_bindings_manifest(
+        r#"schema = 1
+
+[[type]]
+dependency = "example"
+rust_path = "example::Bytes"
+stainless_path = "rust::example::Bytes"
+representation = "opaque"
+
+[[method]]
+receiver_type = "rust::example::Bytes"
+rust_name = "array"
+stainless_name = "bytes"
+receiver = "const"
+parameters = []
+return = "rust::Vec<u8>"
+return_conversion = "into"
+"#,
+    )
+    .unwrap();
+    let bytes = bindings.type_by_path("rust::example::Bytes").unwrap();
+    let callable = bytes
+        .find_callable(CallStyle::Method, "bytes", &[])
+        .unwrap();
+    assert!(matches!(
+        callable.lowering,
+        RustLowering::GeneratedWrapper {
+            return_adaptation: ReturnAdaptation::Into,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn loads_standalone_registry_dependencies() {
+    let package = TemporaryDirectory::new("registry-dependencies");
+    fs::write(
+        package.path().join(BINDINGS_MANIFEST_FILENAME),
+        r#"schema = 1
+
+[[cargo_dependency]]
+name = "example"
+version = "1.2.3"
+default_features = false
+features = ["fast", "codec/hex"]
+"#,
+    )
+    .unwrap();
+    let dependencies = load_package_dependencies(package.path()).unwrap();
+    assert_eq!(dependencies.len(), 1);
+    assert_eq!(dependencies[0].name, "example");
+    assert_eq!(dependencies[0].version, "1.2.3");
+    assert!(!dependencies[0].default_features);
+    assert_eq!(dependencies[0].features, ["fast", "codec/hex"]);
 }
 
 #[test]

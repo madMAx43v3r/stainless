@@ -506,7 +506,13 @@ impl Parser<'_> {
         self.start(SyntaxKind::GenericArgumentList);
         self.bump();
         while !self.at_end() && !self.at(SyntaxKind::Greater) {
-            self.parse_type(false);
+            if self.at(SyntaxKind::Integer) {
+                self.start(SyntaxKind::TypeReference);
+                self.bump();
+                self.finish();
+            } else {
+                self.parse_type(false);
+            }
             if !self.eat(SyntaxKind::Comma) {
                 break;
             }
@@ -521,8 +527,22 @@ impl Parser<'_> {
         if self.at(SyntaxKind::Greater) {
             self.error("a generic parameter list cannot be empty");
         }
+        let mut saw_const_parameter = false;
         while !self.at_end() && !self.at(SyntaxKind::Greater) {
-            self.expect(SyntaxKind::Identifier, "expected a generic type parameter");
+            self.start(SyntaxKind::GenericParameter);
+            let const_parameter = self.nth(1) == Some(SyntaxKind::Identifier);
+            if const_parameter && self.current_text() != Some("usize") {
+                self.error("a const generic parameter must have type `usize`");
+            }
+            if !const_parameter && saw_const_parameter {
+                self.error("generic type parameters must precede const parameters");
+            }
+            self.expect(SyntaxKind::Identifier, "expected a generic parameter");
+            if self.at(SyntaxKind::Identifier) {
+                saw_const_parameter = true;
+                self.bump();
+            }
+            self.finish();
             if !self.eat(SyntaxKind::Comma) {
                 break;
             }

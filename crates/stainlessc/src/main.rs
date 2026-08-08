@@ -7,8 +7,10 @@ use std::path::PathBuf;
 use std::process::{Command as ProcessCommand, ExitCode};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod package;
+
 const USAGE: &str = "\
-Usage: stainlessc [OPTIONS] <INPUT.stl>
+Usage: stainlessc [OPTIONS] [INPUT.stl]...
 
 Transpile Stainless source to Rust.
 
@@ -16,6 +18,9 @@ Options:
     --check              Validate without emitting Rust
     --build              Compile a root `i32 main()` into an executable
     --run                Compile and run a root `i32 main()` function
+    --package <DIR>      Build DIR/stainless-package.toml and its dependencies
+    --package-root <DIR> Load DIR/stainless-bindings.toml (repeatable)
+    --dependency <N=P>  Add native Cargo dependency N from path P
     -o, --output <PATH>  Write emitted Rust or the built executable to PATH
     -h, --help           Print help
     -V, --version        Print version
@@ -23,7 +28,10 @@ Options:
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Options {
-    input: PathBuf,
+    inputs: Vec<PathBuf>,
+    package: Option<PathBuf>,
+    package_roots: Vec<PathBuf>,
+    dependencies: Vec<(String, PathBuf)>,
     output: Option<PathBuf>,
     check: bool,
     build: bool,
@@ -55,7 +63,10 @@ fn main() -> ExitCode {
 }
 
 fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Command, String> {
-    let mut input = None;
+    let mut inputs = Vec::new();
+    let mut package = None;
+    let mut package_roots = Vec::new();
+    let mut dependencies = Vec::new();
     let mut output = None;
     let mut check = false;
     let mut build = false;
@@ -68,6 +79,14 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Comman
             Some("--check") => check = true,
             Some("--build") => build = true,
             Some("--run") => run = true,
+            Some("--package") => {
+                if package.is_some() {
+                    return Err("the package option may be provided only once".to_owned());
+                }
+                package = Some(PathBuf::from(arguments.next().ok_or_else(|| {
+                    "expected a directory after the package option".to_owned()
+                })?));
+            }
             Some("-o" | "--output") => {
                 if output.is_some() {
                     return Err("the output option may be provided only once".to_owned());
@@ -76,17 +95,52 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Comman
                     "expected a path after the output option".to_owned()
                 })?));
             }
+            Some("--package-root") => {
+                let package_root = PathBuf::from(arguments.next().ok_or_else(|| {
+                    "expected a directory after the package-root option".to_owned()
+                })?);
+                if package_roots.contains(&package_root) {
+                    return Err(format!(
+                        "package root `{}` was provided more than once",
+                        package_root.display()
+                    ));
+                }
+                package_roots.push(package_root);
+            }
+            Some("--dependency") => {
+                let dependency = arguments
+                    .next()
+                    .ok_or_else(|| "expected NAME=PATH after the dependency option".to_owned())?;
+                let dependency = dependency
+                    .to_str()
+                    .ok_or_else(|| "dependency specifications must be UTF-8".to_owned())?;
+                let (name, path) = dependency
+                    .split_once('=')
+                    .ok_or_else(|| "dependency specifications must use NAME=PATH".to_owned())?;
+                if name.is_empty()
+                    || !name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+                    || path.is_empty()
+                {
+                    return Err("dependency specifications must use a valid NAME=PATH".to_owned());
+                }
+                if dependencies.iter().any(|(existing, _)| existing == name) {
+                    return Err(format!("dependency `{name}` was provided more than once"));
+                }
+                dependencies.push((name.to_owned(), PathBuf::from(path)));
+            }
             Some(option) if option.starts_with('-') && option != "-" => {
                 return Err(format!("unknown option `{option}`"));
             }
             _ => {
-                if input.replace(PathBuf::from(argument)).is_some() {
-                    return Err("expected exactly one Stainless input file".to_owned());
-                }
+                inputs.push(PathBuf::from(argument));
             }
         }
     }
-    let input = input.ok_or_else(|| "missing Stainless input file".to_owned())?;
+    if inputs.is_empty() && package.is_none() {
+        return Err("missing a Stainless input file or --package <DIR>".to_owned());
+    }
     if usize::from(check) + usize::from(build) + usize::from(run) > 1 {
         return Err("--check, --build, and --run are mutually exclusive".to_owned());
     }
@@ -99,11 +153,18 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Comman
     if build && output.is_none() {
         return Err("--build requires --output <PROGRAM>".to_owned());
     }
-    if build && output.as_ref() == Some(&input) {
+    if build
+        && output
+            .as_ref()
+            .is_some_and(|output| inputs.contains(output))
+    {
         return Err("the executable output cannot overwrite the Stainless input".to_owned());
     }
     Ok(Command::Compile(Options {
-        input,
+        inputs,
+        package,
+        package_roots,
+        dependencies,
         output,
         check,
         build,
@@ -112,22 +173,58 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Comman
 }
 
 fn compile(options: &Options) -> ExitCode {
-    let source = match fs::read_to_string(&options.input) {
-        Ok(source) => source,
+    let compilation = match prepare_compilation(options) {
+        Ok(compilation) => compilation,
         Err(error) => {
-            eprintln!(
-                "error: failed to read `{}`: {error}",
-                options.input.display()
-            );
+            eprintln!("error: {error}");
             return ExitCode::FAILURE;
         }
     };
-    let result = stainless_compiler::transpile(&source);
+    let mut source = String::new();
+    for input in &compilation.inputs {
+        let fragment = match fs::read_to_string(input) {
+            Ok(fragment) => fragment,
+            Err(error) => {
+                eprintln!("error: failed to read `{}`: {error}", input.display());
+                return ExitCode::FAILURE;
+            }
+        };
+        if !source.is_empty() {
+            source.push('\n');
+        }
+        source.push_str(&fragment);
+    }
+    let (result, registry_dependencies) =
+        match transpile_sources(&source, &compilation.package_roots) {
+            Ok(output) => output,
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
+    if let Some(dependency) = registry_dependencies.iter().find(|dependency| {
+        compilation
+            .dependencies
+            .iter()
+            .any(|(name, _)| name == &dependency.name)
+    }) {
+        eprintln!(
+            "error: dependency `{}` is declared by both the package and --dependency",
+            dependency.name
+        );
+        return ExitCode::FAILURE;
+    }
+    let input_label = compilation
+        .inputs
+        .iter()
+        .map(|input| input.display().to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     if !result.analysis.diagnostics.is_empty() {
         for diagnostic in &result.analysis.diagnostics {
             eprintln!(
                 "{}:{}..{}: {:?} {} {:?}: {}",
-                options.input.display(),
+                input_label,
                 diagnostic.span.start,
                 diagnostic.span.end,
                 diagnostic.severity,
@@ -149,11 +246,13 @@ fn compile(options: &Options) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if options.run {
-        return run_program(&result);
+        return run_program(&result, &compilation.dependencies, &registry_dependencies);
     }
     if options.build {
         return build_program(
             &result,
+            &compilation.dependencies,
+            &registry_dependencies,
             options
                 .output
                 .as_deref()
@@ -182,7 +281,114 @@ fn compile(options: &Options) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn run_program(result: &stainless_compiler::TranspileResult) -> ExitCode {
+struct Compilation {
+    inputs: Vec<PathBuf>,
+    package_roots: Vec<PathBuf>,
+    dependencies: Vec<(String, PathBuf)>,
+}
+
+fn prepare_compilation(options: &Options) -> Result<Compilation, String> {
+    let mut inputs = Vec::new();
+    let mut package_roots = Vec::new();
+    let mut dependencies = Vec::new();
+    if let Some(package_root) = &options.package {
+        let package = package::resolve(package_root)?;
+        inputs.extend(package.sources);
+        package_roots.extend(package.package_roots);
+        dependencies.extend(package.native_dependencies);
+    }
+    inputs.extend(options.inputs.iter().cloned());
+    for package_root in &options.package_roots {
+        if !package_roots.contains(package_root) {
+            package_roots.push(package_root.clone());
+        }
+    }
+    for (name, path) in &options.dependencies {
+        if dependencies.iter().any(|(existing, _)| existing == name) {
+            return Err(format!(
+                "native dependency `{name}` is declared by both the package and --dependency"
+            ));
+        }
+        dependencies.push((name.clone(), path.clone()));
+    }
+    if let Some(output) = &options.output
+        && inputs.contains(output)
+    {
+        return Err("the output cannot overwrite a Stainless package source".to_owned());
+    }
+    Ok(Compilation {
+        inputs,
+        package_roots,
+        dependencies,
+    })
+}
+
+fn transpile_sources(
+    source: &str,
+    package_roots: &[PathBuf],
+) -> Result<
+    (
+        stainless_compiler::TranspileResult,
+        Vec<stainless_compiler::interop::CargoDependency>,
+    ),
+    String,
+> {
+    if package_roots.is_empty() {
+        return Ok((stainless_compiler::transpile(source), Vec::new()));
+    }
+    let mut bindings = stainless_compiler::interop::standard_bindings()
+        .map_err(|error| format!("failed to load compiler bindings: {error}"))?;
+    let mut dependencies: Vec<stainless_compiler::interop::CargoDependency> = Vec::new();
+    for package_root in package_roots {
+        let external = stainless_compiler::interop::load_package_external_bindings(package_root)
+            .map_err(|error| {
+                format!(
+                    "failed to load Stainless bindings from `{}`: {error}",
+                    package_root.display()
+                )
+            })?;
+        bindings = bindings.merge(external).map_err(|error| {
+            format!(
+                "conflicting Stainless bindings from `{}`: {error}",
+                package_root.display()
+            )
+        })?;
+        let package_dependencies = stainless_compiler::interop::load_package_dependencies(
+            package_root,
+        )
+        .map_err(|error| {
+            format!(
+                "failed to load Stainless dependencies from `{}`: {error}",
+                package_root.display()
+            )
+        })?;
+        for dependency in package_dependencies {
+            if let Some(existing) = dependencies
+                .iter()
+                .find(|existing| existing.name == dependency.name)
+            {
+                if existing != &dependency {
+                    return Err(format!(
+                        "conflicting package dependency `{}`",
+                        dependency.name
+                    ));
+                }
+            } else {
+                dependencies.push(dependency);
+            }
+        }
+    }
+    Ok((
+        stainless_compiler::transpile_with_bindings(source, &bindings),
+        dependencies,
+    ))
+}
+
+fn run_program(
+    result: &stainless_compiler::TranspileResult,
+    dependencies: &[(String, PathBuf)],
+    registry_dependencies: &[stainless_compiler::interop::CargoDependency],
+) -> ExitCode {
     let rust = match executable_source(result) {
         Ok(rust) => rust,
         Err(message) => {
@@ -199,7 +405,14 @@ fn run_program(result: &stainless_compiler::TranspileResult) -> ExitCode {
     };
     let source = directory.join("generated.rs");
     let executable = directory.join(format!("stainless-program{}", env::consts::EXE_SUFFIX));
-    let outcome = compile_executable(&rust, &source, &executable).and_then(|()| {
+    let outcome = compile_executable(
+        &rust,
+        &source,
+        &executable,
+        dependencies,
+        registry_dependencies,
+    )
+    .and_then(|()| {
         ProcessCommand::new(&executable)
             .status()
             .map_err(|error| format!("failed to run `{}`: {error}", executable.display()))
@@ -225,6 +438,8 @@ fn run_program(result: &stainless_compiler::TranspileResult) -> ExitCode {
 
 fn build_program(
     result: &stainless_compiler::TranspileResult,
+    dependencies: &[(String, PathBuf)],
+    registry_dependencies: &[stainless_compiler::interop::CargoDependency],
     output: &std::path::Path,
 ) -> ExitCode {
     let rust = match executable_source(result) {
@@ -242,7 +457,7 @@ fn build_program(
         }
     };
     let source = directory.join("generated.rs");
-    let outcome = compile_executable(&rust, &source, output);
+    let outcome = compile_executable(&rust, &source, output, dependencies, registry_dependencies);
     if let Err(error) = fs::remove_dir_all(&directory) {
         eprintln!(
             "warning: failed to remove temporary directory `{}`: {error}",
@@ -262,9 +477,20 @@ fn compile_executable(
     rust: &str,
     source: &std::path::Path,
     output: &std::path::Path,
+    dependencies: &[(String, PathBuf)],
+    registry_dependencies: &[stainless_compiler::interop::CargoDependency],
 ) -> Result<(), String> {
-    if rust.contains("::stainless_runtime::") {
-        return compile_executable_with_runtime(rust, source, output);
+    if rust.contains("::stainless_runtime::")
+        || !dependencies.is_empty()
+        || !registry_dependencies.is_empty()
+    {
+        return compile_executable_with_runtime(
+            rust,
+            source,
+            output,
+            dependencies,
+            registry_dependencies,
+        );
     }
     fs::write(source, rust)
         .map_err(|error| format!("failed to write `{}`: {error}", source.display()))?;
@@ -289,6 +515,8 @@ fn compile_executable_with_runtime(
     rust: &str,
     source: &std::path::Path,
     output: &std::path::Path,
+    dependencies: &[(String, PathBuf)],
+    registry_dependencies: &[stainless_compiler::interop::CargoDependency],
 ) -> Result<(), String> {
     let directory = source
         .parent()
@@ -313,9 +541,41 @@ fn compile_executable_with_runtime(
     } else {
         format!("stainless-runtime = \"={}\"", env!("CARGO_PKG_VERSION"))
     };
-    let manifest = format!(
+    let mut manifest = format!(
         "[package]\nname = \"stainless-program\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\n{dependency}\n"
     );
+    for (name, path) in dependencies {
+        let path = if path.is_absolute() {
+            path.clone()
+        } else {
+            env::current_dir()
+                .map_err(|error| format!("failed to resolve dependency `{name}`: {error}"))?
+                .join(path)
+        };
+        writeln!(
+            manifest,
+            "{name} = {{ path = \"{}\" }}",
+            toml_escape_path(&path)
+        )
+        .expect("writing a dependency to a String cannot fail");
+    }
+    for dependency in registry_dependencies {
+        let features = dependency
+            .features
+            .iter()
+            .map(|feature| format!("\"{}\"", toml_escape_string(feature)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(
+            manifest,
+            "{} = {{ version = \"{}\", default-features = {}, features = [{}] }}",
+            dependency.name,
+            toml_escape_string(&dependency.version),
+            dependency.default_features,
+            features
+        )
+        .expect("writing a dependency to a String cannot fail");
+    }
     let manifest_path = directory.join("Cargo.toml");
     fs::write(&manifest_path, manifest).map_err(|error| {
         format!(
@@ -351,9 +611,11 @@ fn compile_executable_with_runtime(
 }
 
 fn toml_escape_path(path: &std::path::Path) -> String {
-    path.to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
+    toml_escape_string(&path.to_string_lossy())
+}
+
+fn toml_escape_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn executable_source(result: &stainless_compiler::TranspileResult) -> Result<String, String> {
@@ -431,7 +693,10 @@ mod tests {
         assert_eq!(
             check,
             Options {
-                input: PathBuf::from("input.stl"),
+                inputs: vec![PathBuf::from("input.stl")],
+                package: None,
+                package_roots: Vec::new(),
+                dependencies: Vec::new(),
                 output: None,
                 check: true,
                 build: false,
@@ -446,6 +711,68 @@ mod tests {
             panic!("expected compile command");
         };
         assert_eq!(output.output, Some(PathBuf::from("output.rs")));
+    }
+
+    #[test]
+    fn parses_a_source_package_without_explicit_inputs() {
+        let Command::Compile(options) = parse_options(
+            ["--build", "--package", "apps/poker", "-o", "poker-dealer"].map(OsString::from),
+        )
+        .expect("package arguments") else {
+            panic!("expected compile command");
+        };
+        assert_eq!(options.package, Some(PathBuf::from("apps/poker")));
+        assert!(options.inputs.is_empty());
+    }
+
+    #[test]
+    fn parses_multiple_sources_and_package_roots() {
+        let Command::Compile(options) = parse_options(
+            [
+                "--check",
+                "--package-root",
+                "app",
+                "--package-root",
+                "library",
+                "src/first.stl",
+                "src/second.stl",
+            ]
+            .map(OsString::from),
+        )
+        .expect("multi-source arguments") else {
+            panic!("expected compile command");
+        };
+        assert_eq!(
+            options.inputs,
+            vec![
+                PathBuf::from("src/first.stl"),
+                PathBuf::from("src/second.stl")
+            ]
+        );
+        assert_eq!(
+            options.package_roots,
+            vec![PathBuf::from("app"), PathBuf::from("library")]
+        );
+    }
+
+    #[test]
+    fn parses_native_dependency_paths() {
+        let Command::Compile(options) = parse_options(
+            [
+                "--check",
+                "--dependency",
+                "native-helper=../helper",
+                "src/main.stl",
+            ]
+            .map(OsString::from),
+        )
+        .expect("dependency arguments") else {
+            panic!("expected compile command");
+        };
+        assert_eq!(
+            options.dependencies,
+            vec![("native-helper".to_owned(), PathBuf::from("../helper"))]
+        );
     }
 
     #[test]

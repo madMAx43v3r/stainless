@@ -9,5 +9,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+serde.workspace = true
 stainless-compiler = { path = "../stainless-compiler" }
 stainless-runtime = { path = "../stainless-runtime", version = "0.1.0" }
+toml.workspace = true

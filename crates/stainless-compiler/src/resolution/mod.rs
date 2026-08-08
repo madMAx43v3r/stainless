@@ -69,6 +69,8 @@ pub struct StructSymbol {
     pub path: Vec<String>,
     /// Invariant generic type parameters in declaration order.
     pub type_parameters: Vec<String>,
+    /// Parameters declared as compile-time `usize` values.
+    pub const_parameters: Vec<String>,
     /// Struct, class, or interface source semantics.
     pub kind: crate::ast::UserTypeKind,
     /// Optional single data or class base.
@@ -333,6 +335,28 @@ pub enum Intrinsic {
     TupleNew {
         /// One selected construction operation per tuple element.
         constructions: Vec<ResolvedCall>,
+    },
+    /// Construct a compiler-native fixed-size array element by element.
+    ArrayNew {
+        /// Construction operations for explicitly supplied leading elements.
+        constructions: Vec<ResolvedCall>,
+        /// Repeated construction for the default-initialized tail.
+        default: Option<Box<ResolvedCall>>,
+    },
+    /// Default construction of a scalar value.
+    DefaultValue {
+        /// Scalar type initialized through Rust's `Default` contract.
+        target: TypeRef,
+    },
+    /// Query a fixed-size array's length or emptiness.
+    ArrayQuery {
+        /// `true` selects `is_empty`, `false` selects `len`.
+        empty: bool,
+    },
+    /// Replace every fixed-size array element with a copied value.
+    ArrayFill {
+        /// Array element type.
+        element: TypeRef,
     },
     /// Allocate a constructed value into a non-null unique owner.
     MakeOwner {

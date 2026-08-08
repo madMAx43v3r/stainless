@@ -122,6 +122,7 @@ define_syntax_kinds! {
     Parameter,
     TypeReference,
     GenericParameterList,
+    GenericParameter,
     GenericArgumentList,
     FunctionTypeSignature,
     ThrowsClause,

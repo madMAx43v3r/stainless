@@ -7,8 +7,9 @@ Included support:
 
 - Stainless keywords, declarations, contextual `static const` members,
   primitive and ownership types
-- Nested generic types and declarations, compiler-known tuples, and numeric
-  tuple projection such as `Map<tuple<Vec<u8>, u32>, Entry>` and `key.1`
+- Nested generic types and declarations, compiler-known tuples and fixed-size
+  `Array<T, N>`, and numeric tuple projection such as
+  `Map<tuple<Vec<u8>, u32>, Entry>` and `key.1`
 - Strings, characters, numeric literals, comments, macros, and operators
 - Bracket matching, automatic closing, indentation, comment toggling, and
   `// region` folding

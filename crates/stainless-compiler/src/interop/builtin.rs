@@ -615,14 +615,6 @@ fn var_binding() -> NativeTypeBinding {
             method("clone", Receiver::Shared, vec![], var),
             method("to_json", Receiver::Shared, vec![], string),
             fallible_method(
-                "to_u128_exact",
-                "to_u128_exact",
-                Receiver::Shared,
-                vec![],
-                TypeRef::U128,
-                json_error.clone(),
-            ),
-            fallible_method(
                 "set",
                 "set_field",
                 Receiver::Mutable,

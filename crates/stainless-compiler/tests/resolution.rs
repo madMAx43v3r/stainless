@@ -155,6 +155,31 @@ fn while_requires_a_boolean_or_nullable_pointer_condition() {
 }
 
 #[test]
+fn rejects_invalid_fixed_array_lengths_and_aggregate_arity() {
+    let analysis = analyze(
+        r"void invalid(usize runtime_length) {
+    Array<u8, 2> too_many = Array<u8, 2>{1, 2, 3};
+    Array<u8, runtime_length> runtime_sized;
+    Array<u8, 2u32> wrong_literal_type;
+}
+",
+    );
+
+    assert!(analysis.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "RES130"
+            && diagnostic
+                .message
+                .contains("cannot be initialized with 3 element")
+    }));
+    assert!(analysis.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "RES130" && diagnostic.message.contains("runtime_length")
+    }));
+    assert!(analysis.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "RES130" && diagnostic.message.contains("must have type `usize`")
+    }));
+}
+
+#[test]
 fn resolves_reference_parser_fixtures_without_semantic_errors() {
     for source in [
         include_str!("../../../docs/ref/01_basics.stl"),
@@ -176,6 +201,7 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
         include_str!("../../../docs/ref/27_tuples.stl"),
         include_str!("../../../docs/ref/28_generic_types.stl"),
         include_str!("../../../docs/ref/29_class_inheritance.stl"),
+        include_str!("../../../docs/ref/32_arrays.stl"),
     ] {
         let analysis = analyze(source);
 

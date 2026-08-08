@@ -108,6 +108,7 @@ enum ConstructionSyntax {
 struct FunctionContext {
     namespace: Vec<String>,
     type_parameters: Vec<String>,
+    const_parameters: Vec<String>,
     return_type: TypeRef,
     scopes: Vec<BTreeMap<String, Variable>>,
     receiver: Option<StructReceiver>,
@@ -162,6 +163,7 @@ impl Resolver<'_> {
             id: root,
             path: root_path.clone(),
             type_parameters: Vec::new(),
+            const_parameters: Vec::new(),
             kind: ast::UserTypeKind::Struct,
             base: None,
             interfaces: Vec::new(),
@@ -194,6 +196,7 @@ impl Resolver<'_> {
             id,
             path: path.clone(),
             type_parameters: Vec::new(),
+            const_parameters: Vec::new(),
             kind: ast::UserTypeKind::Struct,
             base: Some(UserTypeBase {
                 structure: root,
@@ -261,6 +264,7 @@ impl Resolver<'_> {
                         id,
                         path: path.clone(),
                         type_parameters: structure.type_parameters.clone(),
+                        const_parameters: structure.const_parameters.clone(),
                         kind: structure.kind,
                         base: None,
                         interfaces: Vec::new(),
@@ -305,6 +309,7 @@ impl Resolver<'_> {
                             base_syntax,
                             namespace,
                             &structure.type_parameters,
+                            &structure.const_parameters,
                             false,
                         );
                         let (found_path, arguments) = match canonical_ref(&resolved) {
@@ -447,6 +452,7 @@ impl Resolver<'_> {
                                 &field.ty,
                                 namespace,
                                 &structure.type_parameters,
+                                &structure.const_parameters,
                                 false,
                             );
                             self.reject_bare_interface_type(
@@ -517,6 +523,7 @@ impl Resolver<'_> {
                                 &constant.ty,
                                 namespace,
                                 &structure.type_parameters,
+                                &structure.const_parameters,
                                 false,
                             );
                             if !is_integer(&ty) && ty != TypeRef::Error {
@@ -873,6 +880,7 @@ impl Resolver<'_> {
                     &parameter.ty,
                     type_namespace,
                     &self.model.structs[owner.0].type_parameters.clone(),
+                    &self.model.structs[owner.0].const_parameters.clone(),
                     false,
                 );
                 self.reject_bare_interface_type(&ty, parameter.ty.span, "parameter");
@@ -1097,32 +1105,7 @@ impl Resolver<'_> {
         visiting: &mut BTreeSet<StructId>,
     ) -> bool {
         match canonical_ref(ty) {
-            TypeRef::Condition
-            | TypeRef::Pointer {
-                kind:
-                    PointerKind::UniqueNullable
-                    | PointerKind::SharedNullable
-                    | PointerKind::Weak
-                    | PointerKind::AtomicNullable,
-                ..
-            } => true,
-            TypeRef::Tuple(elements) => elements
-                .iter()
-                .all(|element| self.type_has_default_constructor(element, visiting)),
-            TypeRef::Native { path, .. } => {
-                self.bindings.type_by_path(path).is_some_and(|binding| {
-                    binding.callables.iter().any(|callable| {
-                        callable.style == CallStyle::Constructor && callable.parameters.is_empty()
-                    })
-                })
-            }
-            TypeRef::Struct { path, .. } | TypeRef::Class { path, .. } => self
-                .struct_by_path
-                .get(path)
-                .is_some_and(|id| self.struct_has_default_constructor(*id, visiting)),
-            TypeRef::Error
-            | TypeRef::Void
-            | TypeRef::Bool
+            TypeRef::Bool
             | TypeRef::Char
             | TypeRef::I8
             | TypeRef::I16
@@ -1138,7 +1121,35 @@ impl Resolver<'_> {
             | TypeRef::Usize
             | TypeRef::F32
             | TypeRef::F64
+            | TypeRef::Condition
+            | TypeRef::Pointer {
+                kind:
+                    PointerKind::UniqueNullable
+                    | PointerKind::SharedNullable
+                    | PointerKind::Weak
+                    | PointerKind::AtomicNullable,
+                ..
+            } => true,
+            TypeRef::Tuple(elements) => elements
+                .iter()
+                .all(|element| self.type_has_default_constructor(element, visiting)),
+            TypeRef::Array { element, .. } => self.type_has_default_constructor(element, visiting),
+            TypeRef::Native { path, .. } => {
+                self.bindings.type_by_path(path).is_some_and(|binding| {
+                    binding.callables.iter().any(|callable| {
+                        callable.style == CallStyle::Constructor && callable.parameters.is_empty()
+                    })
+                })
+            }
+            TypeRef::Struct { path, .. } | TypeRef::Class { path, .. } => self
+                .struct_by_path
+                .get(path)
+                .is_some_and(|id| self.struct_has_default_constructor(*id, visiting)),
+            TypeRef::Error
+            | TypeRef::Void
             | TypeRef::Parameter(_)
+            | TypeRef::ConstUsize(_)
+            | TypeRef::ConstParameter(_)
             | TypeRef::Callback(_)
             | TypeRef::Function(_)
             | TypeRef::Pointer { .. }
@@ -1193,6 +1204,9 @@ impl Resolver<'_> {
         let owner_type_parameters = owner.map_or_else(Vec::new, |owner| {
             self.model.structs[owner.0].type_parameters.clone()
         });
+        let owner_const_parameters = owner.map_or_else(Vec::new, |owner| {
+            self.model.structs[owner.0].const_parameters.clone()
+        });
         let parameters = function
             .parameters
             .iter()
@@ -1201,6 +1215,7 @@ impl Resolver<'_> {
                     &parameter.ty,
                     &type_namespace,
                     &owner_type_parameters,
+                    &owner_const_parameters,
                     false,
                 );
                 self.reject_bare_interface_type(&ty, parameter.ty.span, "parameter");
@@ -1265,6 +1280,7 @@ impl Resolver<'_> {
             &function.return_type,
             &type_namespace,
             &owner_type_parameters,
+            &owner_const_parameters,
             false,
         );
         self.reject_bare_interface_type(&return_type, function.return_type.span, "return value");
@@ -1426,6 +1442,7 @@ impl Resolver<'_> {
         span: Span,
     ) {
         let parameters = self.model.structs[owner.0].type_parameters.clone();
+        let const_parameters = self.model.structs[owner.0].const_parameters.clone();
         if is_member_declaration {
             if !arguments.is_empty() {
                 self.push(
@@ -1449,8 +1466,14 @@ impl Resolver<'_> {
             return;
         }
         for (argument, parameter) in arguments.iter().zip(&parameters) {
-            let resolved = self.resolve_type(argument, namespace, &parameters, false);
-            if resolved != TypeRef::Parameter(parameter.clone()) {
+            let resolved =
+                self.resolve_type(argument, namespace, &parameters, &const_parameters, false);
+            let expected = if const_parameters.contains(parameter) {
+                TypeRef::ConstParameter(parameter.clone())
+            } else {
+                TypeRef::Parameter(parameter.clone())
+            };
+            if resolved != expected {
                 self.push(
                     "RES124",
                     format!(
@@ -1548,6 +1571,7 @@ impl Resolver<'_> {
         let mut initialization_context = FunctionContext {
             namespace: constructor_namespace.clone(),
             type_parameters: structure.type_parameters.clone(),
+            const_parameters: structure.const_parameters.clone(),
             return_type: TypeRef::Void,
             scopes: vec![scope.clone()],
             receiver: None,
@@ -1624,6 +1648,7 @@ impl Resolver<'_> {
         let mut context = FunctionContext {
             namespace: constructor_namespace,
             type_parameters: structure.type_parameters.clone(),
+            const_parameters: structure.const_parameters.clone(),
             return_type: TypeRef::Void,
             scopes: vec![scope],
             receiver: Some(StructReceiver {
@@ -1656,6 +1681,7 @@ impl Resolver<'_> {
             let mut context = FunctionContext {
                 namespace: structure.path[..structure.path.len().saturating_sub(1)].to_vec(),
                 type_parameters: structure.type_parameters.clone(),
+                const_parameters: structure.const_parameters.clone(),
                 return_type: TypeRef::Void,
                 scopes: vec![BTreeMap::new()],
                 receiver: None,
@@ -1733,6 +1759,9 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
     ) -> Option<ResolvedCall> {
         match canonical_ref(target) {
+            TypeRef::Array { element, length } => {
+                self.resolve_array_slot_construction(element, length, arguments, span, context)
+            }
             TypeRef::Tuple(elements) => {
                 self.resolve_tuple_slot_construction(elements, arguments, span, context)
             }
@@ -1915,6 +1944,108 @@ impl Resolver<'_> {
         })
     }
 
+    fn resolve_array_slot_construction(
+        &mut self,
+        element: &TypeRef,
+        length: &TypeRef,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> Option<ResolvedCall> {
+        let concrete_length = match length {
+            TypeRef::ConstUsize(value) => usize::try_from(*value).ok(),
+            TypeRef::ConstParameter(_) => None,
+            _ => {
+                for argument in arguments {
+                    self.resolve_expression(argument, None, context);
+                }
+                self.push(
+                    "RES130",
+                    "array construction has an invalid compile-time length".to_owned(),
+                    span,
+                );
+                return None;
+            }
+        };
+        if let Some(length) = concrete_length
+            && arguments.len() > length
+        {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES130",
+                format!(
+                    "array of length {length} cannot be initialized with {} element(s)",
+                    arguments.len()
+                ),
+                span,
+            );
+            return None;
+        }
+        if concrete_length.is_none() && !arguments.is_empty() {
+            if arguments.len() == 1 {
+                let target = TypeRef::Array {
+                    element: Box::new(element.clone()),
+                    length: Box::new(length.clone()),
+                };
+                return self.resolve_direct_initialization(&target, &arguments[0], span, context);
+            }
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES130",
+                "an array with a parameterized length can only be default-constructed".to_owned(),
+                span,
+            );
+            return None;
+        }
+
+        let mut constructions = Vec::with_capacity(arguments.len());
+        let mut throws = Vec::new();
+        for argument in arguments {
+            let construction = self.resolve_slot_construction(
+                element,
+                std::slice::from_ref(argument),
+                argument.span,
+                context,
+            )?;
+            throws.extend(construction.throws.iter().copied());
+            constructions.push(construction);
+        }
+        let needs_default = concrete_length.is_none_or(|length| arguments.len() < length);
+        let default = if needs_default {
+            let construction = self.resolve_default_call(element, span, context)?;
+            if !construction.throws.is_empty() {
+                self.push(
+                    "RES130",
+                    "array tail default construction cannot throw".to_owned(),
+                    span,
+                );
+                return None;
+            }
+            Some(Box::new(construction))
+        } else {
+            None
+        };
+        throws.sort_unstable();
+        throws.dedup();
+        let return_type = TypeRef::Array {
+            element: Box::new(element.clone()),
+            length: Box::new(length.clone()),
+        };
+        Some(ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::ArrayNew {
+                constructions,
+                default,
+            }),
+            return_type,
+            throws,
+        })
+    }
+
     fn resolve_rwlock_slot_construction(
         &mut self,
         protected: &TypeRef,
@@ -1996,6 +2127,9 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
     ) -> Option<ResolvedCall> {
         match canonical_ref(target) {
+            TypeRef::Array { element, length } => {
+                self.resolve_array_slot_construction(element, length, &[], span, context)
+            }
             TypeRef::Tuple(elements) => {
                 let mut constructions = Vec::with_capacity(elements.len());
                 let mut throws = Vec::new();
@@ -2121,6 +2255,29 @@ impl Resolver<'_> {
                 );
                 call
             }
+            TypeRef::Bool
+            | TypeRef::Char
+            | TypeRef::I8
+            | TypeRef::I16
+            | TypeRef::I32
+            | TypeRef::I64
+            | TypeRef::I128
+            | TypeRef::Isize
+            | TypeRef::U8
+            | TypeRef::U16
+            | TypeRef::U32
+            | TypeRef::U64
+            | TypeRef::U128
+            | TypeRef::Usize
+            | TypeRef::F32
+            | TypeRef::F64 => Some(ResolvedCall {
+                span,
+                target: CallTarget::Intrinsic(Intrinsic::DefaultValue {
+                    target: canonical_ref(target).clone(),
+                }),
+                return_type: canonical_ref(target).clone(),
+                throws: Vec::new(),
+            }),
             _ => {
                 self.push(
                     "RES065",
@@ -2165,6 +2322,9 @@ impl Resolver<'_> {
             namespace: function_namespace,
             type_parameters: symbol.owner.map_or_else(Vec::new, |owner| {
                 self.model.structs[owner.0].type_parameters.clone()
+            }),
+            const_parameters: symbol.owner.map_or_else(Vec::new, |owner| {
+                self.model.structs[owner.0].const_parameters.clone()
             }),
             return_type: symbol.return_type,
             scopes: vec![initial_scope],
@@ -2434,6 +2594,7 @@ impl Resolver<'_> {
                     &binding.ty,
                     &context.namespace,
                     &context.type_parameters,
+                    &context.const_parameters,
                     false,
                 );
                 if let TypeRef::Struct { path, .. } = canonical(&resolved) {
@@ -2644,6 +2805,7 @@ impl Resolver<'_> {
                 &local.ty,
                 &context.namespace,
                 &context.type_parameters,
+                &context.const_parameters,
                 false,
             );
             self.reject_bare_interface_type(&ty, local.ty.span, "local variable");
@@ -2859,33 +3021,44 @@ impl Resolver<'_> {
     ) {
         let iterable = self.resolve_expression(&range.iterable, None, context);
         let canonical_iterable = canonical(&iterable.ty);
-        let TypeRef::Native { path, arguments } = &canonical_iterable else {
-            if canonical_iterable != TypeRef::Error {
-                self.push(
-                    "RES006",
-                    format!(
-                        "range expression has non-iterable type `{}`",
-                        display_type(&canonical_iterable)
-                    ),
-                    range.iterable.span,
-                );
-            }
-            return;
-        };
-        let (elements, permits_mutable_iteration, structured) =
-            match (path.as_str(), arguments.as_slice()) {
-                ("rust::Vec" | "rust::List" | "rust::Queue", [element]) => {
-                    (vec![element.clone()], true, false)
+        let (elements, permits_mutable_iteration, structured, iterable_name) =
+            match &canonical_iterable {
+                TypeRef::Array { element, .. } => (
+                    vec![element.as_ref().clone()],
+                    true,
+                    false,
+                    "Array".to_owned(),
+                ),
+                TypeRef::Native { path, arguments } => {
+                    match (path.as_str(), arguments.as_slice()) {
+                        ("rust::Vec" | "rust::List" | "rust::Queue", [element]) => {
+                            (vec![element.clone()], true, false, path.clone())
+                        }
+                        ("rust::Set", [element]) => {
+                            (vec![element.clone()], false, false, path.clone())
+                        }
+                        ("rust::Map" | "rust::MultiMap", [key, value]) => {
+                            (vec![key.clone(), value.clone()], true, true, path.clone())
+                        }
+                        _ => {
+                            self.push(
+                                "RES006",
+                                format!(
+                                    "range iteration is not implemented for `{}`",
+                                    display_type(&canonical_iterable)
+                                ),
+                                range.iterable.span,
+                            );
+                            return;
+                        }
+                    }
                 }
-                ("rust::Set", [element]) => (vec![element.clone()], false, false),
-                ("rust::Map" | "rust::MultiMap", [key, value]) => {
-                    (vec![key.clone(), value.clone()], true, true)
-                }
+                TypeRef::Error => return,
                 _ => {
                     self.push(
                         "RES006",
                         format!(
-                            "range iteration is not implemented for `{}`",
+                            "range expression has non-iterable type `{}`",
                             display_type(&canonical_iterable)
                         ),
                         range.iterable.span,
@@ -2899,7 +3072,7 @@ impl Resolver<'_> {
                 if structured {
                     "map iteration requires `[key, value]` structured bindings".to_owned()
                 } else {
-                    format!("`{path}` iteration requires one element binding")
+                    format!("`{iterable_name}` iteration requires one element binding")
                 },
                 range.ty.span,
             );
@@ -2941,6 +3114,7 @@ impl Resolver<'_> {
                     &range.ty,
                     &context.namespace,
                     &context.type_parameters,
+                    &context.const_parameters,
                     false,
                 )
             }]
@@ -2977,7 +3151,7 @@ impl Resolver<'_> {
             self.push(
                 "RES008",
                 format!(
-                    "mutable range iteration is not supported for ordered collection `{path}` because changing an element could invalidate its order"
+                    "mutable range iteration is not supported for ordered collection `{iterable_name}` because changing an element could invalidate its order"
                 ),
                 range.ty.span,
             );
@@ -3196,8 +3370,17 @@ impl Resolver<'_> {
             ExpressionKind::Index { receiver, index } => {
                 let receiver = self.resolve_expression(receiver, None, context);
                 let index = self.resolve_expression(index, Some(&TypeRef::Usize), context);
-                self.require_exact(&TypeRef::Usize, &index.ty, expression.span, "JSON index");
-                if is_json_var(&canonical(&receiver.ty)) {
+                self.require_exact(&TypeRef::Usize, &index.ty, expression.span, "index");
+                if let TypeRef::Array { element, .. } = canonical(&receiver.ty) {
+                    (
+                        ExpressionInfo {
+                            ty: element.as_ref().clone(),
+                            category: receiver.category,
+                        },
+                        None,
+                        None,
+                    )
+                } else if is_json_var(&canonical(&receiver.ty)) {
                     (
                         ExpressionInfo {
                             ty: json_var_type(),
@@ -3211,7 +3394,7 @@ impl Resolver<'_> {
                         self.push(
                             "RES011",
                             format!(
-                                "indexing requires `var`, found `{}`",
+                                "indexing requires `Array<T, N>` or `var`, found `{}`",
                                 display_type(&receiver.ty)
                             ),
                             expression.span,
@@ -3446,12 +3629,7 @@ impl Resolver<'_> {
             if let Some(receiver) = &context.receiver
                 && let Some(field) = self.lookup_struct_field(
                     receiver.structure,
-                    &self.model.structs[receiver.structure.0]
-                        .type_parameters
-                        .iter()
-                        .cloned()
-                        .map(TypeRef::Parameter)
-                        .collect::<Vec<_>>(),
+                    &resolved_structure_arguments(&self.model.structs[receiver.structure.0]),
                     path,
                 )
             {
@@ -3526,12 +3704,7 @@ impl Resolver<'_> {
             || context.receiver.as_ref().is_some_and(|receiver| {
                 self.lookup_struct_field(
                     receiver.structure,
-                    &self.model.structs[receiver.structure.0]
-                        .type_parameters
-                        .iter()
-                        .cloned()
-                        .map(TypeRef::Parameter)
-                        .collect::<Vec<_>>(),
+                    &resolved_structure_arguments(&self.model.structs[receiver.structure.0]),
                     path,
                 )
                 .is_some()
@@ -3993,6 +4166,7 @@ impl Resolver<'_> {
                 &parameter.ty,
                 &outer.namespace,
                 &outer.type_parameters,
+                &outer.const_parameters,
                 false,
             );
             self.reject_bare_interface_type(&resolved, parameter.ty.span, "lambda parameter");
@@ -4022,6 +4196,7 @@ impl Resolver<'_> {
         let mut context = FunctionContext {
             namespace: outer.namespace.clone(),
             type_parameters: outer.type_parameters.clone(),
+            const_parameters: outer.const_parameters.clone(),
             return_type: callback_return.clone(),
             scopes: vec![lambda_scope],
             receiver: None,
@@ -4163,7 +4338,18 @@ impl Resolver<'_> {
                 context,
             );
         }
-        let resolved = self.resolve_type(ty, &context.namespace, &context.type_parameters, false);
+        let resolved = self.resolve_type(
+            ty,
+            &context.namespace,
+            &context.type_parameters,
+            &context.const_parameters,
+            false,
+        );
+        if matches!(resolved, TypeRef::Array { .. }) {
+            let call =
+                self.resolve_braced_slot_construction(&resolved, initializers, span, context);
+            return (temporary(resolved), call);
+        }
         let (path, kind) = match &resolved {
             TypeRef::Struct { path, .. } => (path, ast::UserTypeKind::Struct),
             TypeRef::Class { path, .. } => (path, ast::UserTypeKind::Class),
@@ -4514,6 +4700,36 @@ impl Resolver<'_> {
             ExpressionKind::GenericName {
                 path,
                 arguments: type_arguments,
+            } if matches!(path.segments.as_slice(), [name] if name == "Array") => {
+                let source_type = ast::Type {
+                    is_const: false,
+                    is_reference: false,
+                    kind: TypeKind::Named(ast::NamedType {
+                        path: path.clone(),
+                        arguments: type_arguments.clone(),
+                    }),
+                    span,
+                };
+                let target = self.resolve_type(
+                    &source_type,
+                    &context.namespace,
+                    &context.type_parameters,
+                    &context.const_parameters,
+                    false,
+                );
+                if target == TypeRef::Error {
+                    for argument in arguments {
+                        self.resolve_expression(argument, None, context);
+                    }
+                    (error_info(), None)
+                } else {
+                    let call = self.resolve_slot_construction(&target, arguments, span, context);
+                    (temporary(target), call)
+                }
+            }
+            ExpressionKind::GenericName {
+                path,
+                arguments: type_arguments,
             } if matches!(path.segments.as_slice(), [name] if name == "tuple") => {
                 self.resolve_tuple_constructor(type_arguments, arguments, span, context)
             }
@@ -4590,51 +4806,28 @@ impl Resolver<'_> {
                 else {
                     unreachable!("generic user type lookup was checked")
                 };
-                let resolved_arguments = type_arguments
-                    .iter()
-                    .map(|argument| {
-                        self.resolve_type(
-                            argument,
-                            &context.namespace,
-                            &context.type_parameters,
-                            false,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let symbol = self.model.structs[structure.0].clone();
-                if resolved_arguments.len() != symbol.type_parameters.len() {
+                let source_type = ast::Type {
+                    is_const: false,
+                    is_reference: false,
+                    kind: TypeKind::Named(ast::NamedType {
+                        path: path.clone(),
+                        arguments: type_arguments.clone(),
+                    }),
+                    span,
+                };
+                let structure_type = self.resolve_type(
+                    &source_type,
+                    &context.namespace,
+                    &context.type_parameters,
+                    &context.const_parameters,
+                    false,
+                );
+                if structure_type == TypeRef::Error {
                     for argument in arguments {
                         self.resolve_expression(argument, None, context);
                     }
-                    self.push(
-                        "RES050",
-                        format!(
-                            "type `{}` expects {} type argument(s), found {}",
-                            path.display(),
-                            symbol.type_parameters.len(),
-                            resolved_arguments.len()
-                        ),
-                        span,
-                    );
-                    (error_info(), None)
-                } else if resolved_arguments.iter().any(|argument| {
-                    matches!(argument, TypeRef::Void | TypeRef::Reference { .. })
-                        || argument.contains_reference()
-                }) {
-                    for argument in arguments {
-                        self.resolve_expression(argument, None, context);
-                    }
-                    self.push(
-                        "RES124",
-                        format!(
-                            "type `{}` requires storable value type arguments",
-                            path.display()
-                        ),
-                        span,
-                    );
                     (error_info(), None)
                 } else {
-                    let structure_type = user_type(&symbol, resolved_arguments);
                     self.resolve_user_constructor(
                         structure,
                         structure_type,
@@ -5042,6 +5235,14 @@ impl Resolver<'_> {
             );
         }
         match self.refined_automatic_pointee(receiver, receiver_info, context, span) {
+            TypeRef::Array { element, .. } => self.resolve_array_method(
+                element.as_ref(),
+                receiver_info,
+                name,
+                arguments,
+                span,
+                context,
+            ),
             ref structure_type @ (TypeRef::Struct { ref path, .. }
             | TypeRef::Class { ref path, .. }
             | TypeRef::Interface { ref path, .. }) => {
@@ -5145,6 +5346,101 @@ impl Resolver<'_> {
                         span,
                     );
                 }
+                (error_info(), None)
+            }
+        }
+    }
+
+    fn resolve_array_method(
+        &mut self,
+        element: &TypeRef,
+        receiver: &ExpressionInfo,
+        name: &ast::Path,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        match name.segments.as_slice() {
+            [method] if method == "len" || method == "is_empty" => {
+                for argument in arguments {
+                    self.resolve_expression(argument, None, context);
+                }
+                if !arguments.is_empty() {
+                    self.push(
+                        "RES130",
+                        format!("array `{method}()` does not accept arguments"),
+                        span,
+                    );
+                    return (error_info(), None);
+                }
+                let return_type = if *method == "len" {
+                    TypeRef::Usize
+                } else {
+                    TypeRef::Bool
+                };
+                let call = ResolvedCall {
+                    span,
+                    target: CallTarget::Intrinsic(Intrinsic::ArrayQuery {
+                        empty: *method == "is_empty",
+                    }),
+                    return_type: return_type.clone(),
+                    throws: Vec::new(),
+                };
+                (temporary(return_type), Some(call))
+            }
+            [method] if method == "fill" => {
+                if arguments.len() != 1 {
+                    for argument in arguments {
+                        self.resolve_expression(argument, None, context);
+                    }
+                    self.push(
+                        "RES130",
+                        format!(
+                            "array `fill()` expects one element, found {}",
+                            arguments.len()
+                        ),
+                        span,
+                    );
+                    return (error_info(), None);
+                }
+                let actual = self.resolve_expression(&arguments[0], Some(element), context);
+                self.validate_binding(element, &actual, arguments[0].span, "array fill value");
+                if receiver.category != ValueCategory::MutablePlace {
+                    self.push(
+                        "RES130",
+                        "array `fill()` requires a mutable receiver".to_owned(),
+                        span,
+                    );
+                }
+                if !self.is_copyable_type(element) {
+                    self.push(
+                        "RES130",
+                        format!(
+                            "array `fill()` requires a copyable element, found `{}`",
+                            display_type(element)
+                        ),
+                        span,
+                    );
+                }
+                let call = ResolvedCall {
+                    span,
+                    target: CallTarget::Intrinsic(Intrinsic::ArrayFill {
+                        element: element.clone(),
+                    }),
+                    return_type: TypeRef::Void,
+                    throws: Vec::new(),
+                };
+                (temporary(TypeRef::Void), Some(call))
+            }
+            _ => {
+                for argument in arguments {
+                    self.resolve_expression(argument, None, context);
+                }
+                self.push(
+                    "RES130",
+                    format!("array has no method `{}`", name.display()),
+                    span,
+                );
                 (error_info(), None)
             }
         }
@@ -6197,6 +6493,7 @@ impl Resolver<'_> {
             &type_arguments[0],
             &context.namespace,
             &context.type_parameters,
+            &context.const_parameters,
             false,
         );
         if target == TypeRef::Error {
@@ -6249,7 +6546,13 @@ impl Resolver<'_> {
         let elements = type_arguments
             .iter()
             .map(|element| {
-                self.resolve_type(element, &context.namespace, &context.type_parameters, false)
+                self.resolve_type(
+                    element,
+                    &context.namespace,
+                    &context.type_parameters,
+                    &context.const_parameters,
+                    false,
+                )
             })
             .collect::<Vec<_>>();
         if !(2..=12).contains(&elements.len()) {
@@ -6313,6 +6616,7 @@ impl Resolver<'_> {
             &source_type,
             &context.namespace,
             &context.type_parameters,
+            &context.const_parameters,
             false,
         );
         let TypeRef::Native {
@@ -6365,6 +6669,7 @@ impl Resolver<'_> {
             &type_arguments[0],
             &context.namespace,
             &context.type_parameters,
+            &context.const_parameters,
             false,
         );
         if target == TypeRef::Error {
@@ -6439,6 +6744,7 @@ impl Resolver<'_> {
             &type_arguments[0],
             &context.namespace,
             &context.type_parameters,
+            &context.const_parameters,
             false,
         );
         if matches!(target, TypeRef::Void | TypeRef::Reference { .. }) {
@@ -6495,6 +6801,9 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
     ) -> Option<ResolvedCall> {
         match canonical_ref(target) {
+            TypeRef::Array { element, length } => {
+                self.resolve_array_slot_construction(element, length, initializers, span, context)
+            }
             TypeRef::Mutex(protected) => {
                 let construction =
                     self.resolve_braced_slot_construction(protected, initializers, span, context)?;
@@ -6588,6 +6897,7 @@ impl Resolver<'_> {
             &type_arguments[0],
             &context.namespace,
             &context.type_parameters,
+            &context.const_parameters,
             false,
         );
         if target == TypeRef::Error {
@@ -8051,7 +8361,7 @@ impl Resolver<'_> {
     ) -> Vec<StructId> {
         let mut exceptions = Vec::new();
         for ty in syntax {
-            let resolved = self.resolve_type(ty, namespace, &[], false);
+            let resolved = self.resolve_type(ty, namespace, &[], &[], false);
             if resolved.is_reference() {
                 self.push(
                     "RES070",
@@ -8191,12 +8501,181 @@ impl Resolver<'_> {
         NativeInstanceLookup::Invalid
     }
 
+    fn resolve_const_argument(
+        &mut self,
+        argument: &ast::Type,
+        namespace: &[String],
+        type_parameters: &[String],
+        const_parameters: &[String],
+    ) -> TypeRef {
+        if let Some(text) = wrong_array_length_literal(argument) {
+            self.push(
+                "RES130",
+                format!("array length literal `{text}` must have type `usize`"),
+                argument.span,
+            );
+            return TypeRef::Error;
+        }
+        if let TypeKind::Named(named) = &argument.kind
+            && named.arguments.is_empty()
+        {
+            if let [name] = named.path.segments.as_slice()
+                && const_parameters.contains(name)
+            {
+                return TypeRef::ConstParameter(name.clone());
+            }
+            if let [name] = named.path.segments.as_slice()
+                && primitive_type(&named.path.segments).is_none()
+            {
+                self.push(
+                    "RES130",
+                    if type_parameters.contains(name) {
+                        format!("type parameter `{name}` cannot be used as an array length")
+                    } else {
+                        format!(
+                            "array length `{name}` is not a declared compile-time const parameter"
+                        )
+                    },
+                    argument.span,
+                );
+                return TypeRef::Error;
+            }
+            if named.path.segments.len() >= 2 {
+                let constant_name = named.path.segments.last().cloned().unwrap_or_default();
+                let owner_path = &named.path.segments[..named.path.segments.len() - 1];
+                if let Some(owner) = self.lookup_struct_path(owner_path, namespace) {
+                    let symbol = &self.model.structs[owner.0];
+                    if let Some(constant) = symbol
+                        .static_constants
+                        .iter()
+                        .find(|constant| constant.name == constant_name)
+                    {
+                        let constant_ty = constant.ty.clone();
+                        let constant_value = constant.value.clone();
+                        if canonical(&constant_ty) != TypeRef::Usize {
+                            self.push(
+                                "RES130",
+                                format!(
+                                    "array length constant `{}` must have type `usize`, found `{}`",
+                                    named.path.display(),
+                                    display_type(&constant_ty)
+                                ),
+                                argument.span,
+                            );
+                            return TypeRef::Error;
+                        }
+                        return integer_magnitude(&constant_value)
+                            .and_then(|value| usize::try_from(value).ok())
+                            .map_or_else(
+                                || {
+                                    self.push(
+                                        "RES130",
+                                        format!(
+                                            "array length constant `{}` does not fit `usize`",
+                                            named.path.display()
+                                        ),
+                                        argument.span,
+                                    );
+                                    TypeRef::Error
+                                },
+                                |value| TypeRef::ConstUsize(value as u64),
+                            );
+                    }
+                }
+            }
+        }
+        let resolved = self.resolve_type(
+            argument,
+            namespace,
+            type_parameters,
+            const_parameters,
+            false,
+        );
+        if matches!(
+            resolved,
+            TypeRef::ConstUsize(_) | TypeRef::ConstParameter(_)
+        ) {
+            resolved
+        } else {
+            self.push(
+                "RES130",
+                format!(
+                    "array length requires a `usize` literal, const parameter, or qualified `static const usize`, found `{}`",
+                    display_type(&resolved)
+                ),
+                argument.span,
+            );
+            TypeRef::Error
+        }
+    }
+
+    fn resolve_array_type(
+        &mut self,
+        named: &ast::NamedType,
+        namespace: &[String],
+        type_parameters: &[String],
+        const_parameters: &[String],
+        span: Span,
+    ) -> TypeRef {
+        if named.arguments.len() == 2 {
+            let element = self.resolve_type(
+                &named.arguments[0],
+                namespace,
+                type_parameters,
+                const_parameters,
+                false,
+            );
+            let length = self.resolve_const_argument(
+                &named.arguments[1],
+                namespace,
+                type_parameters,
+                const_parameters,
+            );
+            if matches!(
+                element,
+                TypeRef::Void
+                    | TypeRef::Reference { .. }
+                    | TypeRef::ConstUsize(_)
+                    | TypeRef::ConstParameter(_)
+            ) || element.contains_reference()
+            {
+                self.push(
+                    "RES130",
+                    format!(
+                        "`Array` element `{}` is not a storable value type",
+                        display_type(&element)
+                    ),
+                    named.arguments[0].span,
+                );
+                TypeRef::Error
+            } else if element == TypeRef::Error || length == TypeRef::Error {
+                TypeRef::Error
+            } else {
+                TypeRef::Array {
+                    element: Box::new(element),
+                    length: Box::new(length),
+                }
+            }
+        } else {
+            self.push(
+                "RES130",
+                format!(
+                    "`Array` expects an element type and a compile-time length, found {} argument(s)",
+                    named.arguments.len()
+                ),
+                span,
+            );
+            TypeRef::Error
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn resolve_type(
         &mut self,
         ty: &ast::Type,
         namespace: &[String],
         type_parameters: &[String],
+        const_parameters: &[String],
         allow_auto: bool,
     ) -> TypeRef {
         let value = match &ty.kind {
@@ -8210,6 +8689,19 @@ impl Resolver<'_> {
                 TypeRef::Error
             }
             TypeKind::Error => TypeRef::Error,
+            TypeKind::ConstUsize(text) => integer_magnitude(text)
+                .and_then(|value| usize::try_from(value).ok())
+                .map_or_else(
+                    || {
+                        self.push(
+                            "RES130",
+                            format!("array length `{text}` does not fit `usize`"),
+                            ty.span,
+                        );
+                        TypeRef::Error
+                    },
+                    |value| TypeRef::ConstUsize(value as u64),
+                ),
             TypeKind::Function {
                 mutable,
                 parameters,
@@ -8218,7 +8710,13 @@ impl Resolver<'_> {
                 let resolved_parameters = parameters
                     .iter()
                     .map(|parameter| {
-                        self.resolve_type(parameter, namespace, type_parameters, false)
+                        self.resolve_type(
+                            parameter,
+                            namespace,
+                            type_parameters,
+                            const_parameters,
+                            false,
+                        )
                     })
                     .collect::<Vec<_>>();
                 for (parameter, resolved) in parameters.iter().zip(&resolved_parameters) {
@@ -8230,7 +8728,13 @@ impl Resolver<'_> {
                         );
                     }
                 }
-                let return_type = self.resolve_type(return_type, namespace, type_parameters, false);
+                let return_type = self.resolve_type(
+                    return_type,
+                    namespace,
+                    type_parameters,
+                    const_parameters,
+                    false,
+                );
                 if return_type.is_reference() || return_type.contains_reference() {
                     self.push(
                         "RES092",
@@ -8251,6 +8755,17 @@ impl Resolver<'_> {
             TypeKind::Named(named) => {
                 let segments = &named.path.segments;
                 if let [name] = segments.as_slice()
+                    && const_parameters.contains(name)
+                {
+                    if !named.arguments.is_empty() {
+                        self.push(
+                            "RES050",
+                            format!("const generic parameter `{name}` cannot have arguments"),
+                            ty.span,
+                        );
+                    }
+                    TypeRef::ConstParameter(name.clone())
+                } else if let [name] = segments.as_slice()
                     && type_parameters.contains(name)
                 {
                     if !named.arguments.is_empty() {
@@ -8261,6 +8776,14 @@ impl Resolver<'_> {
                         );
                     }
                     TypeRef::Parameter(name.clone())
+                } else if matches!(segments.as_slice(), [name] if name == "Array") {
+                    self.resolve_array_type(
+                        named,
+                        namespace,
+                        type_parameters,
+                        const_parameters,
+                        ty.span,
+                    )
                 } else if self.is_reserved_rust_path(
                     segments,
                     namespace,
@@ -8270,7 +8793,13 @@ impl Resolver<'_> {
                         .arguments
                         .iter()
                         .map(|argument| {
-                            self.resolve_type(argument, namespace, type_parameters, false)
+                            self.resolve_type(
+                                argument,
+                                namespace,
+                                type_parameters,
+                                const_parameters,
+                                false,
+                            )
                         })
                         .collect::<Vec<_>>();
                     if arguments.len() != 1 {
@@ -8316,7 +8845,13 @@ impl Resolver<'_> {
                         .arguments
                         .iter()
                         .map(|argument| {
-                            self.resolve_type(argument, namespace, type_parameters, false)
+                            self.resolve_type(
+                                argument,
+                                namespace,
+                                type_parameters,
+                                const_parameters,
+                                false,
+                            )
                         })
                         .collect::<Vec<_>>();
                     if arguments.len() != 1 {
@@ -8344,7 +8879,13 @@ impl Resolver<'_> {
                         .arguments
                         .iter()
                         .map(|argument| {
-                            self.resolve_type(argument, namespace, type_parameters, false)
+                            self.resolve_type(
+                                argument,
+                                namespace,
+                                type_parameters,
+                                const_parameters,
+                                false,
+                            )
                         })
                         .collect::<Vec<_>>();
                     if !(2..=12).contains(&arguments.len()) {
@@ -8375,7 +8916,13 @@ impl Resolver<'_> {
                         .arguments
                         .iter()
                         .map(|argument| {
-                            self.resolve_type(argument, namespace, type_parameters, false)
+                            self.resolve_type(
+                                argument,
+                                namespace,
+                                type_parameters,
+                                const_parameters,
+                                false,
+                            )
                         })
                         .collect::<Vec<_>>();
                     if arguments.len() != 1 {
@@ -8408,7 +8955,13 @@ impl Resolver<'_> {
                         .arguments
                         .iter()
                         .map(|argument| {
-                            self.resolve_type(argument, namespace, type_parameters, false)
+                            self.resolve_type(
+                                argument,
+                                namespace,
+                                type_parameters,
+                                const_parameters,
+                                false,
+                            )
                         })
                         .collect::<Vec<_>>();
                     if arguments.len() != 1 {
@@ -8441,7 +8994,13 @@ impl Resolver<'_> {
                         .arguments
                         .iter()
                         .map(|argument| {
-                            self.resolve_type(argument, namespace, type_parameters, false)
+                            self.resolve_type(
+                                argument,
+                                namespace,
+                                type_parameters,
+                                const_parameters,
+                                false,
+                            )
                         })
                         .collect::<Vec<_>>();
                     if arguments.len() != 1 {
@@ -8499,90 +9058,136 @@ impl Resolver<'_> {
                         );
                     }
                     primitive
+                } else if let Some(id) = self.lookup_struct_path(segments, namespace) {
+                    let symbol = self.model.structs[id.0].clone();
+                    if named.arguments.len() != symbol.type_parameters.len() {
+                        let argument_kind = if symbol.const_parameters.is_empty() {
+                            "type"
+                        } else {
+                            "generic"
+                        };
+                        self.push(
+                            "RES050",
+                            format!(
+                                "type `{}` expects {} {argument_kind} argument(s), found {}",
+                                named.path.display(),
+                                symbol.type_parameters.len(),
+                                named.arguments.len()
+                            ),
+                            ty.span,
+                        );
+                        return TypeRef::Error;
+                    }
+                    let arguments = named
+                        .arguments
+                        .iter()
+                        .zip(&symbol.type_parameters)
+                        .map(|(argument, parameter)| {
+                            if symbol.const_parameters.contains(parameter) {
+                                self.resolve_const_argument(
+                                    argument,
+                                    namespace,
+                                    type_parameters,
+                                    const_parameters,
+                                )
+                            } else {
+                                self.resolve_type(
+                                    argument,
+                                    namespace,
+                                    type_parameters,
+                                    const_parameters,
+                                    false,
+                                )
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let invalid_type_argument = arguments.iter().zip(&symbol.type_parameters).any(
+                        |(argument, parameter)| {
+                            if symbol.const_parameters.contains(parameter) {
+                                !matches!(
+                                    argument,
+                                    TypeRef::ConstUsize(_) | TypeRef::ConstParameter(_)
+                                ) && *argument != TypeRef::Error
+                            } else {
+                                matches!(
+                                    argument,
+                                    TypeRef::Void
+                                        | TypeRef::Reference { .. }
+                                        | TypeRef::ConstUsize(_)
+                                        | TypeRef::ConstParameter(_)
+                                ) || argument.contains_reference()
+                            }
+                        },
+                    );
+                    if invalid_type_argument {
+                        self.push(
+                            "RES124",
+                            format!(
+                                "type `{}` has an invalid generic argument",
+                                named.path.display()
+                            ),
+                            ty.span,
+                        );
+                        return TypeRef::Error;
+                    }
+                    match symbol.kind {
+                        ast::UserTypeKind::Struct => TypeRef::Struct {
+                            path: symbol.path,
+                            arguments,
+                        },
+                        ast::UserTypeKind::Class => TypeRef::Class {
+                            path: symbol.path,
+                            arguments,
+                        },
+                        ast::UserTypeKind::Interface => TypeRef::Interface {
+                            path: symbol.path,
+                            arguments,
+                        },
+                    }
                 } else {
                     let arguments = named
                         .arguments
                         .iter()
                         .map(|argument| {
-                            self.resolve_type(argument, namespace, type_parameters, false)
+                            self.resolve_type(
+                                argument,
+                                namespace,
+                                type_parameters,
+                                const_parameters,
+                                false,
+                            )
                         })
                         .collect::<Vec<_>>();
-                    if let Some(id) = self.lookup_struct_path(segments, namespace) {
-                        let symbol = self.model.structs[id.0].clone();
-                        if arguments.len() != symbol.type_parameters.len() {
-                            self.push(
-                                "RES050",
-                                format!(
-                                    "type `{}` expects {} type argument(s), found {}",
-                                    named.path.display(),
-                                    symbol.type_parameters.len(),
-                                    arguments.len()
-                                ),
-                                ty.span,
-                            );
-                            return TypeRef::Error;
-                        }
-                        if arguments.iter().any(|argument| {
-                            matches!(argument, TypeRef::Void | TypeRef::Reference { .. })
-                                || argument.contains_reference()
-                        }) {
-                            self.push(
-                                "RES124",
-                                format!(
-                                    "type `{}` requires storable value type arguments",
-                                    named.path.display()
-                                ),
-                                ty.span,
-                            );
-                            return TypeRef::Error;
-                        }
-                        match symbol.kind {
-                            ast::UserTypeKind::Struct => TypeRef::Struct {
-                                path: symbol.path,
-                                arguments,
-                            },
-                            ast::UserTypeKind::Class => TypeRef::Class {
-                                path: symbol.path,
-                                arguments,
-                            },
-                            ast::UserTypeKind::Interface => TypeRef::Interface {
-                                path: symbol.path,
-                                arguments,
-                            },
-                        }
-                    } else {
-                        let Some(path) = self.native_path(segments, namespace, true, ty.span)
-                        else {
-                            return TypeRef::Error;
-                        };
-                        let expected_arity = self.bindings.type_by_path(&path).map_or_else(
-                            || native_container_arity(&path),
-                            |binding| Some(binding.type_parameters.len()),
-                        );
-                        if path == "rust::Option"
-                            && matches!(arguments.as_slice(), [TypeRef::Pointer { .. }])
-                        {
-                            self.push(
+                    let Some(path) = self.native_path(segments, namespace, true, ty.span) else {
+                        return TypeRef::Error;
+                    };
+                    let expected_arity = self.bindings.type_by_path(&path).map_or_else(
+                        || native_container_arity(&path),
+                        |binding| Some(binding.type_parameters.len()),
+                    );
+                    if path == "rust::Option"
+                        && matches!(arguments.as_slice(), [TypeRef::Pointer { .. }])
+                    {
+                        self.push(
                                 "RES111",
                                 "`rust::Option<T>` cannot contain a Stainless pointer type; use the corresponding nullable pointer"
                                     .to_owned(),
                                 ty.span,
                             );
-                            TypeRef::Error
-                        } else if expected_arity == Some(arguments.len()) {
-                            TypeRef::Native { path, arguments }
-                        } else {
-                            self.push(
-                                "RES034",
-                                format!(
-                                    "native type `{path}` expects {} type argument(s), found {}",
-                                    expected_arity.unwrap_or(0),
-                                    arguments.len()
-                                ),
-                                ty.span,
-                            );
-                            TypeRef::Error
-                        }
+                        TypeRef::Error
+                    } else if expected_arity == Some(arguments.len()) {
+                        TypeRef::Native { path, arguments }
+                    } else {
+                        self.push(
+                            "RES034",
+                            format!(
+                                "native type `{path}` expects {} type argument(s), found {}",
+                                expected_arity.unwrap_or(0),
+                                arguments.len()
+                            ),
+                            ty.span,
+                        );
+                        TypeRef::Error
                     }
                 }
             }
@@ -8972,6 +9577,7 @@ impl Resolver<'_> {
             TypeRef::Tuple(elements) => elements
                 .iter()
                 .all(|element| self.type_is_cloneable(element, visiting)),
+            TypeRef::Array { element, .. } => self.type_is_cloneable(element, visiting),
             TypeRef::Native { path, arguments } => {
                 matches!(
                     path.as_str(),
@@ -9001,6 +9607,8 @@ impl Resolver<'_> {
             TypeRef::Function(function) => function.kind == StoredFunctionKind::Shared,
             TypeRef::Void
             | TypeRef::Parameter(_)
+            | TypeRef::ConstUsize(_)
+            | TypeRef::ConstParameter(_)
             | TypeRef::Callback(_)
             | TypeRef::Mutex(_)
             | TypeRef::MutexGuard(_)
@@ -9056,6 +9664,7 @@ impl Resolver<'_> {
             TypeRef::Tuple(elements) => elements
                 .iter()
                 .all(|element| self.thread_auto_trait(element, sync, visiting)),
+            TypeRef::Array { element, .. } => self.thread_auto_trait(element, sync, visiting),
             TypeRef::Struct { path, arguments } | TypeRef::Class { path, arguments } => {
                 self.struct_by_path.get(path).is_some_and(|id| {
                     let structure = &self.model.structs[id.0];
@@ -9133,6 +9742,8 @@ impl Resolver<'_> {
             | TypeRef::Callback(_)
             | TypeRef::Function(_)
             | TypeRef::Parameter(_)
+            | TypeRef::ConstUsize(_)
+            | TypeRef::ConstParameter(_)
             | TypeRef::Error => false,
         };
         visiting.remove(&key);
@@ -9423,6 +10034,9 @@ impl Resolver<'_> {
             }
             TypeRef::Void
             | TypeRef::Parameter(_)
+            | TypeRef::ConstUsize(_)
+            | TypeRef::ConstParameter(_)
+            | TypeRef::Array { .. }
             | TypeRef::Tuple(_)
             | TypeRef::Callback(_)
             | TypeRef::Function(_)
@@ -9528,7 +10142,13 @@ fn instantiate_callable(
 
 fn substitute(ty: &TypeRef, substitutions: &BTreeMap<String, TypeRef>) -> TypeRef {
     match ty {
-        TypeRef::Parameter(name) => substitutions.get(name).cloned().unwrap_or(TypeRef::Error),
+        TypeRef::Parameter(name) | TypeRef::ConstParameter(name) => {
+            substitutions.get(name).cloned().unwrap_or(TypeRef::Error)
+        }
+        TypeRef::Array { element, length } => TypeRef::Array {
+            element: Box::new(substitute(element, substitutions)),
+            length: Box::new(substitute(length, substitutions)),
+        },
         TypeRef::Native { path, arguments } => TypeRef::Native {
             path: path.clone(),
             arguments: arguments
@@ -9852,6 +10472,15 @@ fn integer_suffix_text(text: &str) -> Option<&'static str> {
     .find(|suffix| text.ends_with(suffix))
 }
 
+fn wrong_array_length_literal(ty: &ast::Type) -> Option<&str> {
+    let TypeKind::ConstUsize(text) = &ty.kind else {
+        return None;
+    };
+    integer_suffix_text(text)
+        .is_some_and(|suffix| suffix != "usize")
+        .then_some(text)
+}
+
 fn integer_literal_fits(magnitude: u128, ty: &TypeRef, negated: bool) -> bool {
     let (signed, bits) = match canonical_ref(ty) {
         TypeRef::I8 => (true, 8),
@@ -10148,6 +10777,7 @@ fn is_copyable(ty: &TypeRef) -> bool {
             | TypeRef::Struct { .. }
             | TypeRef::Reference { .. }
     ) || matches!(ty, TypeRef::Tuple(elements) if elements.iter().all(is_copyable))
+        || matches!(ty, TypeRef::Array { element, .. } if is_copyable(element))
         || is_json_var(ty)
         || matches!(
             ty,
@@ -10168,6 +10798,7 @@ fn supports_equality(ty: &TypeRef) -> bool {
     }
     match ty {
         TypeRef::Tuple(elements) => elements.iter().all(supports_equality),
+        TypeRef::Array { element, .. } => supports_equality(element),
         TypeRef::Native { path, arguments } => match (path.as_str(), arguments.as_slice()) {
             ("rust::String", []) => true,
             ("rust::Vec" | "rust::List" | "rust::Queue" | "rust::Option", [element]) => {
@@ -10192,6 +10823,7 @@ fn supports_ordering(ty: &TypeRef) -> bool {
     }
     match ty {
         TypeRef::Tuple(elements) => elements.iter().all(supports_ordering),
+        TypeRef::Array { element, .. } => supports_ordering(element),
         TypeRef::Native { path, arguments } => match (path.as_str(), arguments.as_slice()) {
             ("rust::String", []) => true,
             ("rust::Vec" | "rust::List" | "rust::Queue" | "rust::Option", [element]) => {
@@ -10227,6 +10859,7 @@ fn awaited_call_span(expression: &Expression) -> Option<Span> {
 fn contains_move_only_storage(ty: &TypeRef) -> bool {
     match ty {
         TypeRef::Tuple(elements) => elements.iter().any(contains_move_only_storage),
+        TypeRef::Array { element, .. } => contains_move_only_storage(element),
         TypeRef::Mutex(_)
         | TypeRef::MutexGuard(_)
         | TypeRef::RwLock(_)
@@ -10322,6 +10955,11 @@ fn display_type(ty: &TypeRef) -> String {
         TypeRef::F32 => "f32".to_owned(),
         TypeRef::F64 => "f64".to_owned(),
         TypeRef::Parameter(name) => (*name).clone(),
+        TypeRef::ConstUsize(value) => value.to_string(),
+        TypeRef::ConstParameter(name) => name.clone(),
+        TypeRef::Array { element, length } => {
+            format!("Array<{}, {}>", display_type(element), display_type(length))
+        }
         TypeRef::Tuple(elements) => format!(
             "tuple<{}>",
             elements
@@ -10400,12 +11038,7 @@ fn display_type(ty: &TypeRef) -> String {
 }
 
 fn resolved_structure_type(structure: &StructSymbol) -> TypeRef {
-    let arguments = structure
-        .type_parameters
-        .iter()
-        .cloned()
-        .map(TypeRef::Parameter)
-        .collect();
+    let arguments = resolved_structure_arguments(structure);
     match structure.kind {
         ast::UserTypeKind::Struct => TypeRef::Struct {
             path: structure.path.clone(),
@@ -10420,6 +11053,20 @@ fn resolved_structure_type(structure: &StructSymbol) -> TypeRef {
             arguments,
         },
     }
+}
+
+fn resolved_structure_arguments(structure: &StructSymbol) -> Vec<TypeRef> {
+    structure
+        .type_parameters
+        .iter()
+        .map(|parameter| {
+            if structure.const_parameters.contains(parameter) {
+                TypeRef::ConstParameter(parameter.clone())
+            } else {
+                TypeRef::Parameter(parameter.clone())
+            }
+        })
+        .collect()
 }
 
 fn user_type_path_segments(ty: &TypeRef) -> Option<&[String]> {

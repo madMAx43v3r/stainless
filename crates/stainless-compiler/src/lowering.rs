@@ -37,10 +37,7 @@ fn lower_item(item: cst::Item) -> Item {
         cst::Item::Struct(definition) => lower_struct_like_definition(
             ast::UserTypeKind::Struct,
             definition.name_token(),
-            definition
-                .generic_parameters()
-                .map(|token| token.text().to_owned())
-                .collect(),
+            definition.generic_parameters().collect(),
             definition.is_sealed(),
             definition.has_access_specifier(),
             definition.bases().collect(),
@@ -70,10 +67,7 @@ fn lower_item(item: cst::Item) -> Item {
         cst::Item::Class(definition) => lower_struct_like_definition(
             ast::UserTypeKind::Class,
             definition.name_token(),
-            definition
-                .generic_parameters()
-                .map(|token| token.text().to_owned())
-                .collect(),
+            definition.generic_parameters().collect(),
             definition.is_sealed(),
             definition.has_access_specifier(),
             definition.bases().collect(),
@@ -103,10 +97,7 @@ fn lower_item(item: cst::Item) -> Item {
         cst::Item::Interface(definition) => lower_struct_like_definition(
             ast::UserTypeKind::Interface,
             definition.name_token(),
-            definition
-                .generic_parameters()
-                .map(|token| token.text().to_owned())
-                .collect(),
+            definition.generic_parameters().collect(),
             definition.is_sealed(),
             definition.has_access_specifier(),
             definition.bases().collect(),
@@ -140,7 +131,7 @@ fn lower_item(item: cst::Item) -> Item {
 fn lower_struct_like_definition(
     kind: ast::UserTypeKind,
     name: Option<stainless_syntax::SyntaxToken>,
-    type_parameters: Vec<String>,
+    generic_parameters: Vec<cst::GenericParameter>,
     is_sealed: bool,
     has_access_specifier: bool,
     bases: Vec<cst::TypeReference>,
@@ -149,12 +140,27 @@ fn lower_struct_like_definition(
     constructors: Vec<(cst::Constructor, bool)>,
     definition_span: Span,
 ) -> Item {
+    let type_parameters = generic_parameters
+        .iter()
+        .map(|parameter| {
+            parameter
+                .name_token()
+                .map_or_else(missing_name, |token| token.text().to_owned())
+        })
+        .collect::<Vec<_>>();
+    let const_parameters = generic_parameters
+        .iter()
+        .filter(|parameter| parameter.is_const())
+        .filter_map(cst::GenericParameter::name_token)
+        .map(|token| token.text().to_owned())
+        .collect();
     let (static_constants, fields): (Vec<_>, Vec<_>) =
         fields.into_iter().partition(|(field, _)| field.is_static());
     Item::Struct(ast::Struct {
         kind,
         name: name.map_or_else(missing_name, |token| token.text().to_owned()),
         type_parameters,
+        const_parameters,
         bases: bases.iter().map(lower_type).collect(),
         is_sealed,
         has_access_specifier,
@@ -313,6 +319,8 @@ fn lower_type(ty: &cst::TypeReference) -> ast::Type {
     let path = path_from_tokens(ty.path_tokens());
     let kind = if ty.is_auto() {
         TypeKind::Inferred
+    } else if let Some(integer) = ty.const_integer_token() {
+        TypeKind::ConstUsize(integer.text().to_owned())
     } else if matches!(path.segments.as_slice(), [name] if name == "function" || name == "function_mut")
     {
         if let Some(signature) = ty.function_signature() {

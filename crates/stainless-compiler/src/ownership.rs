@@ -285,8 +285,7 @@ impl Analyzer<'_> {
                     arguments: symbol
                         .type_parameters
                         .iter()
-                        .cloned()
-                        .map(TypeRef::Parameter)
+                        .map(|parameter| generic_parameter_type(symbol, parameter))
                         .collect(),
                 },
                 ast::UserTypeKind::Class => TypeRef::Class {
@@ -294,8 +293,7 @@ impl Analyzer<'_> {
                     arguments: symbol
                         .type_parameters
                         .iter()
-                        .cloned()
-                        .map(TypeRef::Parameter)
+                        .map(|parameter| generic_parameter_type(symbol, parameter))
                         .collect(),
                 },
                 ast::UserTypeKind::Interface => TypeRef::Interface {
@@ -303,8 +301,7 @@ impl Analyzer<'_> {
                     arguments: symbol
                         .type_parameters
                         .iter()
-                        .cloned()
-                        .map(TypeRef::Parameter)
+                        .map(|parameter| generic_parameter_type(symbol, parameter))
                         .collect(),
                 },
             });
@@ -1033,7 +1030,34 @@ impl Analyzer<'_> {
                 }
                 None
             }
-            CallTarget::Intrinsic(Intrinsic::ConditionNew | Intrinsic::PointerDefault { .. }) => {
+            CallTarget::Intrinsic(Intrinsic::ArrayNew {
+                constructions,
+                default,
+            }) => {
+                for (construction, argument) in constructions.iter().zip(arguments) {
+                    self.construction_arguments(construction, std::slice::from_ref(argument));
+                }
+                if let Some(default) = default {
+                    self.construction_arguments(default, &[]);
+                }
+                None
+            }
+            CallTarget::Intrinsic(
+                Intrinsic::ConditionNew
+                | Intrinsic::PointerDefault { .. }
+                | Intrinsic::DefaultValue { .. },
+            ) => None,
+            CallTarget::Intrinsic(Intrinsic::ArrayQuery { .. }) => {
+                if let Some(receiver) = call_receiver(expression) {
+                    self.expression(receiver, Usage::BorrowShared);
+                }
+                None
+            }
+            CallTarget::Intrinsic(Intrinsic::ArrayFill { element }) => {
+                if let Some(receiver) = call_receiver(expression) {
+                    self.expression(receiver, Usage::BorrowMutable);
+                }
+                self.call_arguments(arguments, std::slice::from_ref(element).iter());
                 None
             }
             CallTarget::Intrinsic(Intrinsic::MutexLock { .. }) => call_receiver(expression)
@@ -1730,6 +1754,7 @@ fn is_copyable(ty: &TypeRef) -> bool {
             | TypeRef::F64
             | TypeRef::Struct { .. }
     ) || matches!(ty, TypeRef::Tuple(elements) if elements.iter().all(is_copyable))
+        || matches!(ty, TypeRef::Array { element, .. } if is_copyable(element))
         || matches!(
             ty,
             TypeRef::Native { path, arguments }
@@ -1747,6 +1772,17 @@ fn is_copyable(ty: &TypeRef) -> bool {
             TypeRef::Function(function)
                 if function.kind == crate::interop::StoredFunctionKind::Shared
         )
+}
+
+fn generic_parameter_type(
+    structure: &crate::resolution::StructSymbol,
+    parameter: &String,
+) -> TypeRef {
+    if structure.const_parameters.contains(parameter) {
+        TypeRef::ConstParameter(parameter.clone())
+    } else {
+        TypeRef::Parameter(parameter.clone())
+    }
 }
 
 fn canonical_ref(ty: &TypeRef) -> &TypeRef {

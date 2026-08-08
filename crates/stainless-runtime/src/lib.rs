@@ -1697,33 +1697,6 @@ impl Var {
         unsigned_integer(self.js_number(), 128)
     }
 
-    /// Converts a JSON unsigned integer or decimal string to `u128` without
-    /// floating-point coercion.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`JsonError`] for other JSON kinds, fractional/negative input,
-    /// or values outside the `u128` range.
-    pub fn to_u128_exact(&self) -> Result<u128, JsonError> {
-        let source = match &self.0 {
-            VarRepr::Number(value) => value.to_string(),
-            VarRepr::String(value) => value.clone(),
-            _ => {
-                return Err(JsonError::mutation(
-                    "exact u128 conversion requires a number or decimal string",
-                ));
-            }
-        };
-        if source.is_empty() || !source.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(JsonError::mutation(
-                "exact u128 conversion requires an unsigned decimal integer",
-            ));
-        }
-        source
-            .parse::<u128>()
-            .map_err(|error| JsonError::mutation(format!("u128 conversion failed: {error}")))
-    }
-
     /// Converts through JavaScript's numeric coercion and then to `usize`.
     #[must_use]
     pub fn to_usize(&self) -> usize {
@@ -2460,26 +2433,6 @@ mod tests {
             Var::array([Var::from(1), Var::null(), Var::from("x")]).to_string_value(),
             "1,,x"
         );
-    }
-
-    #[test]
-    fn exact_u128_conversion_preserves_wapi_decimal_amounts() {
-        let maximum = u128::MAX.to_string();
-        assert_eq!(
-            Var::from(maximum.clone())
-                .to_u128_exact()
-                .expect("decimal string"),
-            u128::MAX
-        );
-        assert_eq!(
-            Var::parse(&maximum)
-                .expect("arbitrary precision JSON number")
-                .to_u128_exact()
-                .expect("exact JSON number"),
-            u128::MAX
-        );
-        assert!(Var::from("1.5").to_u128_exact().is_err());
-        assert!(Var::from("-1").to_u128_exact().is_err());
     }
 
     #[test]

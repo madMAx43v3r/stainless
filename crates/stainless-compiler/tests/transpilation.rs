@@ -64,6 +64,45 @@ fn while_statements_lower_to_labeled_rust_loops() {
     remove_temporary_parent(&binary);
 }
 
+#[test]
+fn fixed_arrays_and_const_generics_lower_to_rust_arrays() {
+    let result = transpile(include_str!("../../../docs/ref/32_arrays.stl"));
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let function = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "array_result"])
+        .expect("array_result symbol")
+        .mangled_name
+        .clone();
+    let mut rust = result.rust.expect("arrays should emit Rust");
+    assert!(rust.contains("[T; N]"), "{rust}");
+    assert!(rust.contains("const N: usize"), "{rust}");
+    write!(
+        rust,
+        "\nfn main() {{ assert_eq!(__stainless_namespace_samples::{function}(), 19); }}\n"
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("fixed-arrays", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .expect("generated array program should run");
+    assert!(
+        output.status.success(),
+        "status: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    remove_temporary_parent(&binary);
+}
+
 const BEHAVIOR_SOURCE: &str = r#"use rust::{String, Vec};
 
 namespace samples {

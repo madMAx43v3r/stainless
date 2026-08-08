@@ -197,12 +197,16 @@ impl Emitter {
         } else {
             call
         };
+        let call = match wrapper.return_adaptation {
+            crate::interop::ReturnAdaptation::Identity => call,
+            crate::interop::ReturnAdaptation::Into => quote!((#call).into()),
+        };
         let generics = (!generic_parameters.is_empty()).then(|| quote!(<#(#generic_parameters),*>));
         let where_clause =
             (!callback_bounds.is_empty()).then(|| quote!(where #(#callback_bounds),*));
         let asyncness = wrapper.is_async.then(|| quote!(async));
         Ok(quote! {
-            #[allow(non_snake_case)]
+            #[allow(deprecated, non_snake_case)]
             pub(crate) #asyncness fn #name #generics (
                 #(#parameter_declarations),*
             ) -> #return_type
@@ -248,11 +252,11 @@ impl Emitter {
 
     fn structure(structure: &hir::Struct) -> Result<TokenStream, String> {
         let name = identifier(&structure.rust_name)?;
-        let type_parameters = structure
-            .type_parameters
-            .iter()
-            .map(|parameter| identifier(parameter))
-            .collect::<Result<Vec<_>, _>>()?;
+        let type_parameters = generic_parameter_declarations(
+            &structure.type_parameters,
+            &structure.const_parameters,
+            false,
+        )?;
         let generics = if type_parameters.is_empty() {
             TokenStream::new()
         } else {
@@ -562,24 +566,20 @@ impl Emitter {
             quote!(-> #return_type)
         };
         let body = self.block(&function.body)?;
-        let type_parameters = function
-            .type_parameters
-            .iter()
-            .map(|parameter| identifier(parameter))
-            .collect::<Result<Vec<_>, _>>()?;
+        let generic_parameters = generic_parameter_declarations(
+            &function.type_parameters,
+            &function.const_parameters,
+            true,
+        )?;
         // Stainless generic arguments are owned value types: references cannot
         // be stored in fields or nested inside a generic argument. Reflect that
         // invariant in Rust so a generic value may safely appear in an escaping
         // `function` / `function_mut` closure.
-        let bounded_type_parameters = type_parameters
-            .iter()
-            .map(|parameter| quote!(#parameter: 'static))
-            .collect::<Vec<_>>();
-        let generics = match (explicit_lifetime, type_parameters.is_empty()) {
+        let generics = match (explicit_lifetime, generic_parameters.is_empty()) {
             (false, true) => None,
             (true, true) => Some(quote!(<'__stainless_borrow>)),
-            (false, false) => Some(quote!(<#(#bounded_type_parameters),*>)),
-            (true, false) => Some(quote!(<'__stainless_borrow, #(#bounded_type_parameters),*>)),
+            (false, false) => Some(quote!(<#(#generic_parameters),*>)),
+            (true, false) => Some(quote!(<'__stainless_borrow, #(#generic_parameters),*>)),
         };
         let asyncness = function.is_async.then(|| quote!(async));
         Ok(quote! {
@@ -908,6 +908,32 @@ impl Emitter {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(quote!((#(#elements),*)))
             }
+            hir::Expression::Array { elements, default } => {
+                let elements = elements
+                    .iter()
+                    .map(|element| self.expression(element))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let Some(default) = default else {
+                    return Ok(quote!([#(#elements),*]));
+                };
+                let default = self.expression(default)?;
+                if elements.is_empty() {
+                    Ok(quote!(::core::array::from_fn(|_| #default)))
+                } else {
+                    let values = self.temporary("array_values")?;
+                    Ok(quote!({
+                        let mut #values = [#(#elements),*].into_iter();
+                        ::core::array::from_fn(|_| match #values.next() {
+                            ::core::option::Option::Some(value) => value,
+                            ::core::option::Option::None => #default,
+                        })
+                    }))
+                }
+            }
+            hir::Expression::DefaultValue(ty) => {
+                let ty = type_tokens(ty, None)?;
+                Ok(quote!(<#ty as ::core::default::Default>::default()))
+            }
             hir::Expression::Name(name) => {
                 let name = identifier(name)?;
                 Ok(quote!(#name))
@@ -975,6 +1001,11 @@ impl Emitter {
                 let receiver = self.expression(receiver)?;
                 let index = self.expression(index)?;
                 Ok(quote!((#receiver).index(#index)))
+            }
+            hir::Expression::ArrayIndex { receiver, index } => {
+                let receiver = self.expression(receiver)?;
+                let index = self.expression(index)?;
+                Ok(quote!((#receiver)[#index]))
             }
             hir::Expression::JsonSetField {
                 receiver,
@@ -1753,6 +1784,26 @@ fn parameter_tokens(
     Ok(quote!(#mutable #name: #ty))
 }
 
+fn generic_parameter_declarations(
+    parameters: &[String],
+    const_parameters: &[String],
+    static_type_bound: bool,
+) -> Result<Vec<TokenStream>, String> {
+    parameters
+        .iter()
+        .map(|parameter| {
+            let name = identifier(parameter)?;
+            if const_parameters.contains(parameter) {
+                Ok(quote!(const #name: usize))
+            } else if static_type_bound {
+                Ok(quote!(#name: 'static))
+            } else {
+                Ok(quote!(#name))
+            }
+        })
+        .collect()
+}
+
 #[allow(clippy::too_many_lines)]
 fn type_tokens(ty: &hir::Type, lifetime: Option<&syn::Lifetime>) -> Result<TokenStream, String> {
     match ty {
@@ -1760,6 +1811,19 @@ fn type_tokens(ty: &hir::Type, lifetime: Option<&syn::Lifetime>) -> Result<Token
         hir::Type::Primitive(name) => {
             let name = identifier(name)?;
             Ok(quote!(#name))
+        }
+        hir::Type::ConstUsize(value) => {
+            let value = syn::LitInt::new(&value.to_string(), proc_macro2::Span::call_site());
+            Ok(quote!(#value))
+        }
+        hir::Type::ConstParameter(name) | hir::Type::Parameter(name) => {
+            let name = identifier(name)?;
+            Ok(quote!(#name))
+        }
+        hir::Type::Array { element, length } => {
+            let element = type_tokens(element, None)?;
+            let length = type_tokens(length, None)?;
+            Ok(quote!([#element; #length]))
         }
         hir::Type::Tuple(elements) => {
             let elements = elements
@@ -1892,10 +1956,6 @@ fn type_tokens(ty: &hir::Type, lifetime: Option<&syn::Lifetime>) -> Result<Token
             } else {
                 Ok(quote!(dyn #path<#(#arguments),*> + ::core::marker::Send + ::core::marker::Sync))
             }
-        }
-        hir::Type::Parameter(name) => {
-            let name = identifier(name)?;
-            Ok(quote!(#name))
         }
         hir::Type::Reference { mutable, target } => {
             let interface = matches!(target.as_ref(), hir::Type::Interface { .. });

@@ -43,6 +43,17 @@ pub enum TypeRef {
     F64,
     /// A generic type parameter declared by the native type.
     Parameter(String),
+    /// A concrete compile-time `usize` generic argument.
+    ConstUsize(u64),
+    /// A compile-time `usize` parameter declared by a Stainless user type.
+    ConstParameter(String),
+    /// A compiler-native fixed-size inline array.
+    Array {
+        /// Stored element type.
+        element: Box<TypeRef>,
+        /// Concrete or parameterized compile-time length.
+        length: Box<TypeRef>,
+    },
     /// A compiler-known heterogeneous value tuple with two or more elements.
     Tuple(Vec<TypeRef>),
     /// A native Rust type under the reserved Stainless `rust::` namespace.
@@ -213,6 +224,7 @@ impl TypeRef {
             | Self::Class { arguments, .. }
             | Self::Interface { arguments, .. }
             | Self::Tuple(arguments) => arguments.iter().any(Self::contains_reference),
+            Self::Array { element, .. } => element.contains_reference(),
             Self::Pointer { target, .. }
             | Self::Mutex(target)
             | Self::RwLock(target)
@@ -366,6 +378,16 @@ pub enum ArgumentAdaptation {
     StringRefToStr,
 }
 
+/// Conversion applied to the value returned by a generated Rust wrapper.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ReturnAdaptation {
+    /// Return the Rust callable's value without changing its representation.
+    #[default]
+    Identity,
+    /// Convert the Rust callable's value with [`Into::into`].
+    Into,
+}
+
 /// One callable parameter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Parameter {
@@ -426,6 +448,8 @@ pub enum RustLowering {
         wrapper_name: String,
         /// Real Rust item invoked by the wrapper.
         target: WrapperTarget,
+        /// Conversion applied after the real Rust call completes.
+        return_adaptation: ReturnAdaptation,
     },
 }
 
@@ -584,6 +608,7 @@ impl NativeBindings {
                 if let RustLowering::GeneratedWrapper {
                     wrapper_name,
                     target,
+                    ..
                 } = &callable.lowering
                 {
                     if !wrapper_names.insert(wrapper_name.as_str()) {
@@ -689,6 +714,10 @@ fn callback_resolution_type(ty: &TypeRef) -> TypeRef {
         TypeRef::Tuple(elements) => {
             TypeRef::Tuple(elements.iter().map(callback_resolution_type).collect())
         }
+        TypeRef::Array { element, length } => TypeRef::Array {
+            element: Box::new(callback_resolution_type(element)),
+            length: length.clone(),
+        },
         TypeRef::Pointer { kind, target } => {
             TypeRef::pointer(*kind, callback_resolution_type(target))
         }

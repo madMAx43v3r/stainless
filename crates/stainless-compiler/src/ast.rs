@@ -103,6 +103,8 @@ pub struct Struct {
     pub name: String,
     /// Invariant generic type parameters in declaration order.
     pub type_parameters: Vec<String>,
+    /// Parameters from `usize N` generic slots, as a subset of `type_parameters`.
+    pub const_parameters: Vec<String>,
     /// Direct data/class-base or interface declarations in source order.
     pub bases: Vec<Type>,
     /// Whether inheritance/implementation is restricted to this module.
@@ -272,6 +274,8 @@ pub enum TypeKind {
         /// Exact value-semantic return type.
         return_type: Box<Type>,
     },
+    /// A non-negative integer used only in a compile-time generic value slot.
+    ConstUsize(String),
     /// A missing or malformed type retained after parser recovery.
     Error,
 }

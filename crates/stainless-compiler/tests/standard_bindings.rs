@@ -601,6 +601,7 @@ fn regex_uses_generated_wrappers_and_proven_error_formatting() {
     let RustLowering::GeneratedWrapper {
         wrapper_name,
         target,
+        ..
     } = &new.lowering
     else {
         panic!("Regex::new should use a generated wrapper");
@@ -628,6 +629,7 @@ fn regex_uses_generated_wrappers_and_proven_error_formatting() {
     let RustLowering::GeneratedWrapper {
         wrapper_name,
         target,
+        ..
     } = &is_match.lowering
     else {
         panic!("Regex::is_match should use a generated wrapper");
@@ -676,6 +678,7 @@ fn invalid_generated_wrapper_metadata_is_rejected_before_lowering() {
         lowering: RustLowering::GeneratedWrapper {
             wrapper_name: "__duplicate_wrapper".to_owned(),
             target,
+            return_adaptation: stainless_compiler::interop::ReturnAdaptation::Identity,
         },
     };
     let binding = |callables| NativeTypeBinding {
@@ -1025,13 +1028,6 @@ fn var_exposes_checked_shared_mutation_methods() {
         &set_field.lowering,
         RustLowering::Method { rust_name } if rust_name == "set_field"
     ));
-
-    let exact_u128 = var_binding
-        .find_callable(CallStyle::Method, "to_u128_exact", &[])
-        .expect("var exposes exact WAPI amount conversion");
-    assert_eq!(exact_u128.receiver, Some(Receiver::Shared));
-    assert_eq!(exact_u128.return_type, TypeRef::U128);
-    assert_eq!(exact_u128.rust_result_error, Some(json_error.clone()));
 
     let bytes_ref = TypeRef::shared_ref(TypeRef::native("rust::Vec", vec![TypeRef::U8]));
     let parse_bytes = var_binding

@@ -78,8 +78,19 @@ impl Builder {
     /// ambiguous exports, an invalid Rust export name, or a missing `OUT_DIR`.
     pub fn compile(&self) -> Result<PathBuf, BuildError> {
         verify_rustc_version()?;
-        let (source_paths, source) = load_sources(&self.sources)?;
-        let result = stainless_compiler::transpile(&source);
+        let package_root = package_root()?;
+        let (source_paths, source) = load_sources(&package_root, &self.sources)?;
+        let bindings_path =
+            package_root.join(stainless_compiler::interop::BINDINGS_MANIFEST_FILENAME);
+        println!("cargo:rerun-if-changed={}", bindings_path.display());
+        let bindings =
+            stainless_compiler::interop::load_package_bindings(&package_root).map_err(|error| {
+                BuildError::new(format!(
+                    "failed to load Stainless bindings for `{}`: {error}",
+                    package_root.display()
+                ))
+            })?;
+        let result = stainless_compiler::transpile_with_bindings(&source, &bindings);
         for warning in result
             .analysis
             .diagnostics
@@ -155,11 +166,17 @@ impl Builder {
     }
 }
 
-fn load_sources(sources: &[PathBuf]) -> Result<(Vec<PathBuf>, String), BuildError> {
-    let package_root = PathBuf::from(
+fn package_root() -> Result<PathBuf, BuildError> {
+    Ok(PathBuf::from(
         env::var_os("CARGO_MANIFEST_DIR")
             .ok_or_else(|| BuildError::new("Cargo did not set CARGO_MANIFEST_DIR"))?,
-    );
+    ))
+}
+
+fn load_sources(
+    package_root: &Path,
+    sources: &[PathBuf],
+) -> Result<(Vec<PathBuf>, String), BuildError> {
     let source_paths = sources
         .iter()
         .map(|source| {

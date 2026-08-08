@@ -11,13 +11,27 @@ use serde::Deserialize;
 use super::builtin::standard_bindings;
 use super::model::{
     ArgumentAdaptation, CallStyle, CallableBinding, CallbackEscape, CallbackKind, NativeBindings,
-    NativeErrorFormat, NativeTypeBinding, Parameter, Receiver, RustLowering, TypeRef,
-    WrapperTarget,
+    NativeErrorFormat, NativeTypeBinding, Parameter, Receiver, ReturnAdaptation, RustLowering,
+    TypeRef, WrapperTarget,
 };
 use crate::ast::{self, Item, TypeKind};
 
 /// Package-root filename containing user-authored Rust bindings.
 pub const BINDINGS_MANIFEST_FILENAME: &str = "stainless-bindings.toml";
+
+/// One registry dependency required when a package is built as a standalone
+/// Stainless executable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CargoDependency {
+    /// Cargo dependency key.
+    pub name: String,
+    /// Cargo registry version requirement.
+    pub version: String,
+    /// Whether Cargo enables the dependency's default features.
+    pub default_features: bool,
+    /// Explicit Cargo features enabled for the dependency.
+    pub features: Vec<String>,
+}
 
 /// Parses one version-1 bindings manifest without adding compiler built-ins.
 ///
@@ -41,6 +55,7 @@ pub fn parse_bindings_manifest(source: &str) -> Result<NativeBindings, ManifestE
             manifest.schema
         )));
     }
+    validate_cargo_dependencies(&manifest.cargo_dependencies)?;
 
     let builtins = standard_bindings().map_err(|error| {
         ManifestError::message(format!("invalid compiler-provided bindings: {error}"))
@@ -99,10 +114,12 @@ pub fn parse_bindings_manifest(source: &str) -> Result<NativeBindings, ManifestE
                     CallStyle::AssociatedFunction,
                     &entry.parameters,
                     &entry.return_type,
+                    entry.return_conversion.into(),
                 ),
                 target: WrapperTarget::Function {
                     rust_path: absolute_rust_path(&entry.rust_path),
                 },
+                return_adaptation: entry.return_conversion.into(),
             },
             &known_arity,
             entry.is_async,
@@ -140,10 +157,12 @@ pub fn parse_bindings_manifest(source: &str) -> Result<NativeBindings, ManifestE
                     CallStyle::Method,
                     &entry.parameters,
                     &entry.return_type,
+                    entry.return_conversion.into(),
                 ),
                 target: WrapperTarget::Method {
                     rust_name: entry.rust_name,
                 },
+                return_adaptation: entry.return_conversion.into(),
             },
             &known_arity,
             entry.is_async,
@@ -216,6 +235,79 @@ pub fn load_package_bindings(
             Some(path),
         )
     })
+}
+
+/// Loads only the optional external bindings declared by a package root.
+/// Compiler built-ins are not included, which allows callers to compose
+/// several Stainless packages before adding built-ins once.
+///
+/// # Errors
+///
+/// Returns a [`ManifestError`] when the package manifest exists but cannot be
+/// loaded.
+pub fn load_package_external_bindings(
+    package_root: impl AsRef<Path>,
+) -> Result<NativeBindings, ManifestError> {
+    let path = package_root.as_ref().join(BINDINGS_MANIFEST_FILENAME);
+    let source = match fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(NativeBindings::default());
+        }
+        Err(error) => return Err(manifest_read_error(&path, &error)),
+    };
+    parse_manifest_file_source(&path, &source)
+}
+
+/// Loads registry dependencies declared by an optional package bindings
+/// manifest.
+///
+/// A missing `stainless-bindings.toml` yields an empty dependency list.
+///
+/// # Errors
+///
+/// Returns a [`ManifestError`] when the package manifest cannot be read or its
+/// dependency declarations are invalid.
+pub fn load_package_dependencies(
+    package_root: impl AsRef<Path>,
+) -> Result<Vec<CargoDependency>, ManifestError> {
+    let path = package_root.as_ref().join(BINDINGS_MANIFEST_FILENAME);
+    let source = match fs::read_to_string(&path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(manifest_read_error(&path, &error)),
+    };
+    let manifest = toml::from_str::<Manifest>(&source).map_err(|error| {
+        ManifestError::new(
+            format!("invalid bindings TOML: {error}"),
+            error.span(),
+            Some(path.clone()),
+        )
+    })?;
+    if manifest.schema != 1 {
+        return Err(ManifestError::new(
+            format!(
+                "unsupported bindings schema {}; expected 1",
+                manifest.schema
+            ),
+            None,
+            Some(path),
+        ));
+    }
+    validate_cargo_dependencies(&manifest.cargo_dependencies).map_err(|mut error| {
+        error.path = Some(path);
+        error
+    })?;
+    Ok(manifest
+        .cargo_dependencies
+        .into_iter()
+        .map(|dependency| CargoDependency {
+            name: dependency.name,
+            version: dependency.version,
+            default_features: dependency.default_features,
+            features: dependency.features,
+        })
+        .collect())
 }
 
 fn parse_manifest_file_source(path: &Path, source: &str) -> Result<NativeBindings, ManifestError> {
@@ -412,6 +504,11 @@ fn lower_manifest_type(
         TypeKind::Function { .. } => {
             return Err(ManifestError::message(
                 "stored Stainless function types are not valid in native binding signatures",
+            ));
+        }
+        TypeKind::ConstUsize(_) => {
+            return Err(ManifestError::message(
+                "const generic values are not valid as binding parameter types",
             ));
         }
         TypeKind::Named(named) => {
@@ -653,14 +750,57 @@ fn dependency_identifier(dependency: &str) -> String {
     dependency.replace('-', "_")
 }
 
+fn validate_cargo_dependencies(
+    dependencies: &[ManifestCargoDependency],
+) -> Result<(), ManifestError> {
+    let mut names = std::collections::BTreeSet::new();
+    for dependency in dependencies {
+        validate_dependency(&dependency.name)?;
+        if !names.insert(dependency.name.as_str()) {
+            return Err(ManifestError::message(format!(
+                "duplicate Cargo dependency `{}`",
+                dependency.name
+            )));
+        }
+        if dependency.version.is_empty()
+            || dependency
+                .version
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte == b'"' || byte == b'\\')
+        {
+            return Err(ManifestError::message(format!(
+                "invalid Cargo version requirement for `{}`",
+                dependency.name
+            )));
+        }
+        for feature in &dependency.features {
+            if feature.is_empty()
+                || !feature.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || matches!(byte, b'_' | b'-' | b'/' | b'?' | b'+' | b'.')
+                })
+            {
+                return Err(ManifestError::message(format!(
+                    "invalid Cargo feature `{feature}` for `{}`",
+                    dependency.name
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn wrapper_name(
     dependency: &str,
     target: &str,
     style: CallStyle,
     parameters: &[ManifestParameter],
     return_type: &str,
+    return_adaptation: ReturnAdaptation,
 ) -> String {
-    let signature = format!("{dependency}|{target}|{style:?}|{parameters:?}|{return_type}");
+    let signature = format!(
+        "{dependency}|{target}|{style:?}|{parameters:?}|{return_type}|{return_adaptation:?}"
+    );
     let hash = signature
         .bytes()
         .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
@@ -684,12 +824,29 @@ fn wrapper_name(
 #[serde(deny_unknown_fields)]
 struct Manifest {
     schema: u32,
+    #[serde(rename = "cargo_dependency", default)]
+    cargo_dependencies: Vec<ManifestCargoDependency>,
     #[serde(rename = "type", default)]
     types: Vec<ManifestType>,
     #[serde(rename = "function", default)]
     functions: Vec<ManifestFunction>,
     #[serde(rename = "method", default)]
     methods: Vec<ManifestMethod>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManifestCargoDependency {
+    name: String,
+    version: String,
+    #[serde(default = "default_true", rename = "default_features")]
+    default_features: bool,
+    #[serde(default)]
+    features: Vec<String>,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -736,6 +893,8 @@ struct ManifestFunction {
     is_async: bool,
     #[serde(rename = "return")]
     return_type: String,
+    #[serde(default)]
+    return_conversion: ManifestReturnConversion,
 }
 
 #[derive(Debug, Deserialize)]
@@ -750,6 +909,25 @@ struct ManifestMethod {
     is_async: bool,
     #[serde(rename = "return")]
     return_type: String,
+    #[serde(default)]
+    return_conversion: ManifestReturnConversion,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ManifestReturnConversion {
+    #[default]
+    Identity,
+    Into,
+}
+
+impl From<ManifestReturnConversion> for ReturnAdaptation {
+    fn from(value: ManifestReturnConversion) -> Self {
+        match value {
+            ManifestReturnConversion::Identity => Self::Identity,
+            ManifestReturnConversion::Into => Self::Into,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]

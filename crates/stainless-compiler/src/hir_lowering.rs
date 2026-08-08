@@ -304,6 +304,7 @@ impl Lowerer<'_> {
             source_path: symbol.path.clone(),
             rust_name: rust_name.to_owned(),
             type_parameters: symbol.type_parameters.clone(),
+            const_parameters: symbol.const_parameters.clone(),
             copyable: symbol.kind == ast::UserTypeKind::Struct,
             fields,
             static_constants: symbol
@@ -668,6 +669,7 @@ impl Lowerer<'_> {
             module_path: structure.path[..structure.path.len().saturating_sub(1)].to_vec(),
             rust_name: symbol.mangled_name.clone(),
             type_parameters: structure.type_parameters.clone(),
+            const_parameters: structure.const_parameters.clone(),
             is_async: false,
             parameters,
             return_type: lowered_type,
@@ -780,6 +782,10 @@ impl Lowerer<'_> {
                 .owner
                 .and_then(|owner| self.semantics.structure(owner))
                 .map_or_else(Vec::new, |structure| structure.type_parameters.clone()),
+            const_parameters: symbol
+                .owner
+                .and_then(|owner| self.semantics.structure(owner))
+                .map_or_else(Vec::new, |structure| structure.const_parameters.clone()),
             is_async: symbol.is_async,
             parameters,
             return_type,
@@ -1754,10 +1760,27 @@ impl Lowerer<'_> {
                     return None;
                 }
             }
-            ExpressionKind::Index { receiver, index } => hir::Expression::JsonIndex {
-                receiver: Box::new(self.lower_expression(receiver, ExpressionMode::Reference)?),
-                index: Box::new(self.lower_expression(index, ExpressionMode::Value)?),
-            },
+            ExpressionKind::Index { receiver, index } => {
+                let receiver_type = self
+                    .semantics
+                    .expression(receiver.span)
+                    .map(|resolution| canonical_ref(&resolution.ty));
+                if matches!(receiver_type, Some(TypeRef::Array { .. })) {
+                    hir::Expression::ArrayIndex {
+                        receiver: Box::new(
+                            self.lower_expression(receiver, ExpressionMode::Reference)?,
+                        ),
+                        index: Box::new(self.lower_expression(index, ExpressionMode::Value)?),
+                    }
+                } else {
+                    hir::Expression::JsonIndex {
+                        receiver: Box::new(
+                            self.lower_expression(receiver, ExpressionMode::Reference)?,
+                        ),
+                        index: Box::new(self.lower_expression(index, ExpressionMode::Value)?),
+                    }
+                }
+            }
             ExpressionKind::Lambda {
                 captures,
                 parameters,
@@ -1983,6 +2006,7 @@ impl Lowerer<'_> {
                 Intrinsic::UnwrapRustResult { .. }
                     | Intrinsic::MakeOwner { .. }
                     | Intrinsic::TupleNew { .. }
+                    | Intrinsic::ArrayNew { .. }
                     | Intrinsic::MutexNew { .. }
                     | Intrinsic::RwLockNew { .. }
             )
@@ -1991,6 +2015,75 @@ impl Lowerer<'_> {
             CallTarget::Native(native) if native.result_adaptation.is_some()
         );
         let lowered = match &call.target {
+            CallTarget::Intrinsic(Intrinsic::DefaultValue { target }) => Some(
+                hir::Expression::DefaultValue(self.lower_type(target, call.span)?),
+            ),
+            CallTarget::Intrinsic(Intrinsic::ArrayNew {
+                constructions,
+                default,
+            }) => {
+                if constructions.len() > arguments.len() {
+                    self.push(
+                        "HIR011",
+                        "array construction arity changed after resolution".to_owned(),
+                        call.span,
+                    );
+                    return None;
+                }
+                let elements = constructions
+                    .iter()
+                    .zip(arguments)
+                    .map(|(construction, argument)| {
+                        self.lower_resolved_call(construction, None, std::slice::from_ref(argument))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                let default = if let Some(construction) = default.as_deref() {
+                    Some(Box::new(self.lower_resolved_call(
+                        construction,
+                        None,
+                        &[],
+                    )?))
+                } else {
+                    None
+                };
+                Some(hir::Expression::Array { elements, default })
+            }
+            CallTarget::Intrinsic(Intrinsic::ArrayQuery { empty }) => {
+                let Some(ast::Expression {
+                    kind: ExpressionKind::Field { receiver, .. },
+                    ..
+                }) = callee
+                else {
+                    self.push(
+                        "HIR011",
+                        "array query has no receiver".to_owned(),
+                        call.span,
+                    );
+                    return None;
+                };
+                Some(hir::Expression::MethodCall {
+                    receiver: Box::new(self.lower_expression(receiver, ExpressionMode::Reference)?),
+                    rust_name: if *empty { "is_empty" } else { "len" }.to_owned(),
+                    receiver_mode: Receiver::Shared,
+                    arguments: Vec::new(),
+                })
+            }
+            CallTarget::Intrinsic(Intrinsic::ArrayFill { element }) => {
+                let Some(ast::Expression {
+                    kind: ExpressionKind::Field { receiver, .. },
+                    ..
+                }) = callee
+                else {
+                    self.push("HIR011", "array fill has no receiver".to_owned(), call.span);
+                    return None;
+                };
+                Some(hir::Expression::MethodCall {
+                    receiver: Box::new(self.lower_expression(receiver, ExpressionMode::Reference)?),
+                    rust_name: "fill".to_owned(),
+                    receiver_mode: Receiver::Mutable,
+                    arguments: vec![self.lower_bound_expression(arguments.first()?, element)?],
+                })
+            }
             CallTarget::Intrinsic(Intrinsic::TupleNew { constructions }) => {
                 let elements = if arguments.is_empty() {
                     constructions
@@ -2647,6 +2740,7 @@ impl Lowerer<'_> {
         if let RustLowering::GeneratedWrapper {
             wrapper_name,
             target,
+            return_adaptation,
         } = &native.lowering
         {
             return self.lower_generated_wrapper_call(
@@ -2656,6 +2750,7 @@ impl Lowerer<'_> {
                 span,
                 wrapper_name,
                 target,
+                *return_adaptation,
             );
         }
         let lowered_arguments = arguments
@@ -2811,6 +2906,7 @@ impl Lowerer<'_> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn lower_generated_wrapper_call(
         &mut self,
         native: &NativeCall,
@@ -2819,6 +2915,7 @@ impl Lowerer<'_> {
         span: ast::Span,
         wrapper_name: &str,
         target: &crate::interop::WrapperTarget,
+        return_adaptation: crate::interop::ReturnAdaptation,
     ) -> Option<hir::Expression> {
         let receiver = match (native.receiver, &native.receiver_type) {
             (Some(mode), Some(ty)) => Some(hir::NativeWrapperReceiver {
@@ -2852,6 +2949,7 @@ impl Lowerer<'_> {
             receiver,
             parameters,
             is_async: native.is_async,
+            return_adaptation,
             return_type: self.lower_type(&native.return_type, span)?,
         };
         if let Some(previous) = self.native_wrappers.get(wrapper_name) {
@@ -2940,6 +3038,12 @@ impl Lowerer<'_> {
             TypeRef::Usize => hir::Type::Primitive("usize"),
             TypeRef::F32 => hir::Type::Primitive("f32"),
             TypeRef::F64 => hir::Type::Primitive("f64"),
+            TypeRef::ConstUsize(value) => hir::Type::ConstUsize(*value),
+            TypeRef::ConstParameter(name) => hir::Type::ConstParameter(name.clone()),
+            TypeRef::Array { element, length } => hir::Type::Array {
+                element: Box::new(self.lower_type(element, span)?),
+                length: Box::new(self.lower_type(length, span)?),
+            },
             TypeRef::Native { path, arguments } => {
                 let rust_path =
                     native_type_path(path, self.semantics, span, &mut self.diagnostics)?;
@@ -3456,8 +3560,13 @@ fn resolved_structure_type(structure: &StructSymbol) -> TypeRef {
     let arguments = structure
         .type_parameters
         .iter()
-        .cloned()
-        .map(TypeRef::Parameter)
+        .map(|parameter| {
+            if structure.const_parameters.contains(parameter) {
+                TypeRef::ConstParameter(parameter.clone())
+            } else {
+                TypeRef::Parameter(parameter.clone())
+            }
+        })
         .collect();
     user_type(structure, arguments)
 }
@@ -3532,10 +3641,14 @@ fn project_user_type_to_base(
 
 fn substitute_user_type(ty: &TypeRef, substitutions: &BTreeMap<String, TypeRef>) -> TypeRef {
     match ty {
-        TypeRef::Parameter(name) => substitutions
+        TypeRef::Parameter(name) | TypeRef::ConstParameter(name) => substitutions
             .get(name)
             .cloned()
             .unwrap_or_else(|| ty.clone()),
+        TypeRef::Array { element, length } => TypeRef::Array {
+            element: Box::new(substitute_user_type(element, substitutions)),
+            length: Box::new(substitute_user_type(length, substitutions)),
+        },
         TypeRef::Tuple(elements) => TypeRef::Tuple(
             elements
                 .iter()

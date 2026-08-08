@@ -2,7 +2,8 @@
 
 use crate::ast::{BinaryOperator, LiteralKind, PrefixOperator, Span};
 use crate::interop::{
-    ArgumentAdaptation, CallbackKind, PointerKind, Receiver, StoredFunctionKind, WrapperTarget,
+    ArgumentAdaptation, CallbackKind, PointerKind, Receiver, ReturnAdaptation, StoredFunctionKind,
+    WrapperTarget,
 };
 
 /// A source file after successful semantic resolution and backend lowering.
@@ -33,6 +34,8 @@ pub struct NativeWrapper {
     pub parameters: Vec<NativeWrapperParameter>,
     /// Whether the wrapped Rust callable returns a future.
     pub is_async: bool,
+    /// Conversion applied after the wrapped call completes.
+    pub return_adaptation: ReturnAdaptation,
     /// Concrete wrapper return type.
     pub return_type: Type,
 }
@@ -92,6 +95,8 @@ pub struct Struct {
     pub rust_name: String,
     /// Rust generic type parameters in declaration order.
     pub type_parameters: Vec<String>,
+    /// Parameters emitted as Rust `const N: usize` generic parameters.
+    pub const_parameters: Vec<String>,
     /// Whether generated Rust may derive `Clone` for Stainless copy semantics.
     pub copyable: bool,
     /// Direct representation fields, including an optional base subobject.
@@ -200,6 +205,8 @@ pub struct Function {
     pub rust_name: String,
     /// Rust generic type parameters in declaration order.
     pub type_parameters: Vec<String>,
+    /// Generic parameters emitted as Rust `const N: usize` parameters.
+    pub const_parameters: Vec<String>,
     /// Whether this emits as a Rust `async fn`.
     pub is_async: bool,
     /// Function parameters.
@@ -234,6 +241,17 @@ pub enum Type {
     Unit,
     /// A Rust primitive type.
     Primitive(&'static str),
+    /// A concrete const-generic `usize` argument.
+    ConstUsize(u64),
+    /// A named const-generic `usize` parameter.
+    ConstParameter(String),
+    /// A fixed-size Rust array `[T; N]`.
+    Array {
+        /// Element type.
+        element: Box<Type>,
+        /// Concrete or parameterized length.
+        length: Box<Type>,
+    },
     /// A heterogeneous Rust tuple value.
     Tuple(Vec<Type>),
     /// A native Rust type with concrete type arguments.
@@ -522,6 +540,15 @@ pub struct RangeBinding {
 pub enum Expression {
     /// A heterogeneous Rust tuple expression.
     Tuple(Vec<Expression>),
+    /// A fixed-size Rust array with an optional default-initialized tail.
+    Array {
+        /// Explicit leading elements.
+        elements: Vec<Expression>,
+        /// Expression evaluated once for every missing element.
+        default: Option<Box<Expression>>,
+    },
+    /// Default construct a scalar value.
+    DefaultValue(Type),
     /// A local or parameter binding.
     Name(String),
     /// A struct-associated compile-time constant.
@@ -565,6 +592,13 @@ pub enum Expression {
         /// JSON receiver.
         receiver: Box<Expression>,
         /// Array index.
+        index: Box<Expression>,
+    },
+    /// Fixed-size array indexing.
+    ArrayIndex {
+        /// Array place or value.
+        receiver: Box<Expression>,
+        /// Checked `usize` index.
         index: Box<Expression>,
     },
     /// Checked JSON object member assignment.

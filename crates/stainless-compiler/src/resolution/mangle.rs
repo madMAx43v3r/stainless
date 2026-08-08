@@ -115,6 +115,22 @@ fn encode_type(ty: &TypeRef, output: &mut String) {
             output.push('_');
             output.push_str(name);
         }
+        TypeRef::ConstUsize(value) => {
+            output.push_str("n_");
+            output.push_str(&value.to_string());
+        }
+        TypeRef::ConstParameter(name) => {
+            output.push_str("c_");
+            output.push_str(&name.len().to_string());
+            output.push('_');
+            output.push_str(name);
+        }
+        TypeRef::Array { element, length } => {
+            output.push_str("array_");
+            encode_type(element, output);
+            output.push('_');
+            encode_type(length, output);
+        }
         TypeRef::Tuple(elements) => {
             output.push_str("tuple_");
             output.push_str(&elements.len().to_string());

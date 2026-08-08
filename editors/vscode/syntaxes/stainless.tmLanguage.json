@@ -169,7 +169,7 @@
       "patterns": [
         {
           "name": "meta.type.generic.stainless",
-          "begin": "\\b(tuple|unique_ptr|unique_nullptr|shared_ptr|shared_nullptr|weak_ptr|atomic_ptr|atomic_nullptr|optional|function|function_mut|mutex|shared_mutex|[A-Z][A-Za-z0-9_]*)\\b(\\s*)(<)",
+          "begin": "\\b(tuple|Array|unique_ptr|unique_nullptr|shared_ptr|shared_nullptr|weak_ptr|atomic_ptr|atomic_nullptr|optional|function|function_mut|mutex|shared_mutex|[A-Z][A-Za-z0-9_]*)\\b(\\s*)(<)",
           "beginCaptures": {
             "1": { "name": "support.type.generic.stainless" },
             "3": { "name": "punctuation.definition.typearguments.begin.stainless" }
@@ -252,7 +252,7 @@
         },
         {
           "name": "support.type.native.stainless",
-          "match": "\\b(?:tuple|String|Vec|List|Queue|Map|MultiMap|Set|Option|Result)\\b"
+          "match": "\\b(?:tuple|Array|String|Vec|List|Queue|Map|MultiMap|Set|Option|Result)\\b"
         }
       ]
     },

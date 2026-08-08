@@ -74,6 +74,7 @@ ast_node!(ParameterList, ParameterList);
 ast_node!(Parameter, Parameter);
 ast_node!(TypeReference, TypeReference);
 ast_node!(GenericParameterList, GenericParameterList);
+ast_node!(GenericParameter, GenericParameter);
 ast_node!(GenericArgumentList, GenericArgumentList);
 ast_node!(FunctionTypeSignature, FunctionTypeSignature);
 ast_node!(ThrowsClause, ThrowsClause);
@@ -495,14 +496,11 @@ macro_rules! type_definition_accessors {
                 children(self.syntax())
             }
 
-            pub fn generic_parameters(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
-                child::<GenericParameterList>(self.syntax())
-                    .into_iter()
-                    .flat_map(|parameters| {
-                        direct_tokens(parameters.syntax())
-                            .filter(|token| token.kind() == SyntaxKind::Identifier)
-                            .collect::<Vec<_>>()
-                    })
+            pub fn generic_parameters(&self) -> AstChildren<GenericParameter> {
+                child::<GenericParameterList>(self.syntax()).map_or_else(
+                    || children(self.syntax()),
+                    |parameters| children(parameters.syntax()),
+                )
             }
 
             #[must_use]
@@ -915,6 +913,11 @@ impl TypeReference {
         token(self.syntax(), SyntaxKind::Amp).is_some()
     }
 
+    #[must_use]
+    pub fn const_integer_token(&self) -> Option<SyntaxToken> {
+        direct_tokens(self.syntax()).find(|token| token.kind() == SyntaxKind::Integer)
+    }
+
     pub fn path_tokens(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
         direct_tokens(self.syntax()).filter(|token| {
             matches!(
@@ -940,6 +943,32 @@ impl GenericArgumentList {
     #[must_use]
     pub fn types(&self) -> AstChildren<TypeReference> {
         children(self.syntax())
+    }
+}
+
+impl GenericParameter {
+    #[must_use]
+    pub fn is_const(&self) -> bool {
+        self.identifier_tokens().count() == 2
+    }
+
+    #[must_use]
+    pub fn name_token(&self) -> Option<SyntaxToken> {
+        self.identifier_tokens().last()
+    }
+
+    #[must_use]
+    pub fn const_type_token(&self) -> Option<SyntaxToken> {
+        self.is_const()
+            .then(|| self.identifier_tokens().next())
+            .flatten()
+    }
+
+    fn identifier_tokens(&self) -> impl DoubleEndedIterator<Item = SyntaxToken> + '_ {
+        direct_tokens(self.syntax())
+            .filter(|token| token.kind() == SyntaxKind::Identifier)
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 }
 

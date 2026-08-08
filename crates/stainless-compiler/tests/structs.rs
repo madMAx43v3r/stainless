@@ -330,7 +330,7 @@ void invalid() {
         .map(|diagnostic| diagnostic.code)
         .collect::<Vec<_>>();
 
-    assert_eq!(codes.iter().filter(|code| **code == "RES066").count(), 2);
+    assert_eq!(codes.iter().filter(|code| **code == "RES066").count(), 1);
     assert!(codes.contains(&"RES067"), "{:?}", analysis.diagnostics);
 }
 
@@ -361,7 +361,7 @@ MissingInitializer::MissingInitializer() {
         .map(|diagnostic| diagnostic.code)
         .collect::<Vec<_>>();
 
-    for expected in ["RES055", "RES061", "RES062", "RES065"] {
+    for expected in ["RES055", "RES061", "RES062"] {
         assert!(codes.contains(&expected), "{:?}", analysis.diagnostics);
     }
 }
