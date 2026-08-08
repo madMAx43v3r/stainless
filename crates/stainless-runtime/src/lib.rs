@@ -1407,6 +1407,12 @@ impl Var {
         matches!(self.0, VarRepr::Null)
     }
 
+    /// Returns whether the value is a JSON string.
+    #[must_use]
+    pub fn is_string(&self) -> bool {
+        matches!(self.0, VarRepr::String(_))
+    }
+
     /// Returns an owned object member or JSON `null` when it is unavailable.
     #[must_use]
     pub fn field(&self, name: &str) -> Self {
@@ -2387,6 +2393,8 @@ mod tests {
         ]);
 
         assert_eq!(value.field("items").index(1), Var::from("text"));
+        assert!(value.field("items").index(1).is_string());
+        assert!(!value.field("enabled").is_string());
         assert!(value.field("missing").is_null());
         assert!(value.field("items").index(99).is_null());
         assert!(Var::from(1).field("missing").is_null());

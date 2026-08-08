@@ -612,6 +612,7 @@ fn var_binding() -> NativeTypeBinding {
                 },
             },
             method("is_null", Receiver::Shared, vec![], TypeRef::Bool),
+            method("is_string", Receiver::Shared, vec![], TypeRef::Bool),
             method("clone", Receiver::Shared, vec![], var),
             method("to_json", Receiver::Shared, vec![], string),
             fallible_method(

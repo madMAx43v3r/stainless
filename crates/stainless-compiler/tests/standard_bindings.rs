@@ -1012,6 +1012,12 @@ fn var_exposes_checked_shared_mutation_methods() {
     let var = TypeRef::native("rust::stainless_runtime::Var", vec![]);
     let json_error = TypeRef::native("rust::stainless_runtime::JsonError", vec![]);
 
+    let is_string = var_binding
+        .find_callable(CallStyle::Method, "is_string", &[])
+        .expect("var exposes JSON string type inspection");
+    assert_eq!(is_string.receiver, Some(Receiver::Shared));
+    assert_eq!(is_string.return_type, TypeRef::Bool);
+
     let push = var_binding
         .find_callable(CallStyle::Method, "push", std::slice::from_ref(&var))
         .expect("var arrays expose push");
