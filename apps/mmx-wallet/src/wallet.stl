@@ -1,0 +1,406 @@
+// MMX poker protocol messages. These strings are consensus-facing: keep them
+// byte-for-byte aligned with src/contract/poker2.js in mmx-node.
+
+use rust::{String, Vec};
+
+namespace wallet {
+
+String decimal(u64 value)
+{
+    return crypto::uint_decimal(u128(value));
+}
+
+String amount_decimal(u128 value)
+{
+    return crypto::uint_decimal(value);
+}
+
+String sha256_text(const String& source)
+{
+    return crypto::sha256::hash(source);
+}
+
+String sha256_hex(const String& source)
+{
+    Vec<u8> bytes = crypto::decode_hex(source);
+    if (source.len() != bytes.len() * 2) {
+        return "";
+    }
+    return crypto::sha256::hash(bytes);
+}
+
+String public_key(const String& secret_key) throws stainless::RustError
+{
+    Vec<u8> secret_bytes = crypto::decode_hex(secret_key);
+    String key = crypto::secp256k1::public_key(secret_bytes);
+    return key;
+}
+
+String sign(const String& message_hash, const String& secret_key)
+    throws stainless::RustError
+{
+    Vec<u8> message_bytes = crypto::decode_hex(message_hash);
+    Vec<u8> secret_bytes = crypto::decode_hex(secret_key);
+    String signature = crypto::secp256k1::sign(message_bytes, secret_bytes);
+    return signature;
+}
+
+bool verify(const String& message_hash, const String& public_key,
+            const String& signature)
+{
+    Vec<u8> message_bytes = crypto::decode_hex(message_hash);
+    Vec<u8> public_bytes = crypto::decode_hex(public_key);
+    Vec<u8> signature_bytes = crypto::decode_hex(signature);
+    return crypto::secp256k1::verify(
+        message_bytes, public_bytes, signature_bytes);
+}
+
+bool is_hex(const String& value, usize byte_length)
+{
+    return crypto::is_hex(value, byte_length);
+}
+
+u32 power_of_two(u32 exponent)
+{
+    u32 value = 1;
+    for (u32 i = 0; i < exponent; i += 1) {
+        value *= 2;
+    }
+    return value;
+}
+
+u8 hex_nibble(u8 value)
+{
+    return crypto::hex_value(value);
+}
+
+Vec<u8> decode_hex(const String& source)
+{
+    return crypto::decode_hex(source);
+}
+
+Vec<u8> convert_eight_to_five(const Vec<u8>& bytes)
+{
+    Vec<u8> result;
+    u32 accumulator = 0;
+    u32 bits = 0;
+    for (const u8& byte : bytes) {
+        accumulator = accumulator * 256 + u32(byte);
+        bits += 8;
+        if (bits >= 5) {
+            bits -= 5;
+            result.push(u8((accumulator / power_of_two(bits)) % 32));
+        }
+        if (bits >= 5) {
+            bits -= 5;
+            result.push(u8((accumulator / power_of_two(bits)) % 32));
+        }
+        accumulator %= power_of_two(bits);
+    }
+    if (bits > 0) {
+        result.push(u8((accumulator * power_of_two(5 - bits)) % 32));
+    }
+    return result;
+}
+
+u8 bech32_value(u8 value)
+{
+    String alphabet = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+    Vec<u8> bytes = move(alphabet).into_bytes();
+    u8 index = 0;
+    for (const u8& character : bytes) {
+        if (character == value) {
+            return index;
+        }
+        index += 1;
+    }
+    return 255;
+}
+
+String bech32_character(u8 value)
+{
+    return switch (value) {
+        0 => "q", 1 => "p", 2 => "z", 3 => "r",
+        4 => "y", 5 => "9", 6 => "x", 7 => "8",
+        8 => "g", 9 => "f", 10 => "2", 11 => "t",
+        12 => "v", 13 => "d", 14 => "w", 15 => "0",
+        16 => "s", 17 => "3", 18 => "j", 19 => "n",
+        20 => "5", 21 => "4", 22 => "k", 23 => "h",
+        24 => "c", 25 => "e", 26 => "6", 27 => "m",
+        28 => "u", 29 => "a", 30 => "7", 31 => "l",
+        else => "",
+    };
+}
+
+Vec<u8> bech32_prefix()
+{
+    Vec<u8> values;
+    values.push(3);
+    values.push(3);
+    values.push(3);
+    values.push(0);
+    values.push(13);
+    values.push(13);
+    values.push(24);
+    return values;
+}
+
+u32 bech32_polymod(const Vec<u8>& values)
+{
+    Vec<u32> generators;
+    generators.push(996825010);
+    generators.push(642813549);
+    generators.push(513874426);
+    generators.push(1027748829);
+    generators.push(705979059);
+    u32 checksum = 1;
+    for (const u8& value : values) {
+        u32 top = checksum / 33554432;
+        checksum = ((checksum % 33554432) * 32) ^ u32(value);
+        u32 bit = 1;
+        for (const u32& generator : generators) {
+            if (((top / bit) % 2) != 0) {
+                checksum = checksum ^ generator;
+            }
+            bit *= 2;
+        }
+    }
+    return checksum;
+}
+
+String address_from_public_key(const String& public_key)
+{
+    Vec<u8> public_bytes = crypto::decode_hex(public_key);
+    if (!crypto::secp256k1::valid_public_key(public_bytes)) {
+        return "";
+    }
+    String hash = sha256_hex(public_key);
+    Vec<u8> bytes = decode_hex(hash);
+    if (bytes.len() != 32) {
+        return "";
+    }
+    Vec<u8> data = convert_eight_to_five(bytes);
+    Vec<u8> checksum_input = bech32_prefix();
+    for (const u8& value : data) {
+        checksum_input.push(value);
+    }
+    for (u32 i = 0; i < 6; i += 1) {
+        checksum_input.push(0);
+    }
+    u32 checksum = bech32_polymod(checksum_input) ^ 734539939;
+    String address = "mmx1";
+    for (const u8& value : data) {
+        address.push_str(bech32_character(value));
+    }
+    for (u32 i = 0; i < 6; i += 1) {
+        u32 exponent = 5 * (5 - i);
+        address.push_str(bech32_character(
+            u8((checksum / power_of_two(exponent)) % 32)));
+    }
+    return address;
+}
+
+bool validate_address(const String& address)
+{
+    if (address == "MMX") {
+        return true;
+    }
+    String copied = String(address);
+    Vec<u8> bytes = move(copied).into_bytes();
+    if (bytes.len() != 62 || bytes.remove(0) != 109 ||
+        bytes.remove(0) != 109 || bytes.remove(0) != 120 ||
+        bytes.remove(0) != 49) {
+        return false;
+    }
+    Vec<u8> values = bech32_prefix();
+    for (const u8& character : bytes) {
+        u8 value = bech32_value(character);
+        if (value == 255) {
+            return false;
+        }
+        values.push(value);
+    }
+    if (bech32_polymod(values) != 734539939) {
+        return false;
+    }
+    u32 accumulator = 0;
+    u32 bits = 0;
+    usize output_length = 0;
+    Vec<u8> payload = values.copy_range(7, values.len() - 6);
+    for (const u8& value : payload) {
+        accumulator = accumulator * 32 + u32(value);
+        bits += 5;
+        if (bits >= 8) {
+            bits -= 8;
+            output_length += 1;
+            accumulator %= power_of_two(bits);
+        }
+    }
+    return output_length == 32 && bits < 5 && accumulator == 0;
+}
+
+bool valid_hash(const String& value)
+{
+    return is_hex(value, 32);
+}
+
+String seed_commit(const String& table, u64 hand_id, const String& address,
+                   u64 seed_round, const String& seed)
+{
+    if (seed_round >= 5 || !valid_hash(seed)) {
+        return "";
+    }
+    String message = "MMX_PARALLEL_POKER_SEED_V1/";
+    message.push_str(table);
+    message.push_str("/");
+    message.push_str(decimal(hand_id));
+    message.push_str("/");
+    message.push_str(address);
+    message.push_str("/");
+    message.push_str(decimal(seed_round));
+    message.push_str("/");
+    message.push_str(seed);
+    return crypto::sha256::hash(message);
+}
+
+String commit_hash(const String& table, u64 hand_id, const String& address,
+                   const Vec<String>& commitments)
+{
+    if (commitments.len() != 5) {
+        return "";
+    }
+    String message = "MMX_PARALLEL_POKER_COMMIT_V1/";
+    message.push_str(table);
+    message.push_str("/");
+    message.push_str(decimal(hand_id));
+    message.push_str("/");
+    message.push_str(address);
+    for (const String& commitment : commitments) {
+        if (!valid_hash(commitment)) {
+            return "";
+        }
+        message.push_str("/");
+        message.push_str(commitment);
+    }
+    return crypto::sha256::hash(message);
+}
+
+String action_hash(const String& table, u64 hand_id, const String& address,
+                   u64 betting_round, u64 epoch, u64 action,
+                   u128 cumulative_bet, const String& checkpoint)
+{
+    if (betting_round >= 4 || action >= 3 || !valid_hash(checkpoint)) {
+        return "";
+    }
+    String message = "MMX_PARALLEL_POKER_ACTION_V1/";
+    message.push_str(table);
+    message.push_str("/");
+    message.push_str(decimal(hand_id));
+    message.push_str("/");
+    message.push_str(address);
+    message.push_str("/");
+    message.push_str(decimal(betting_round));
+    message.push_str("/");
+    message.push_str(decimal(epoch));
+    message.push_str("/");
+    message.push_str(decimal(action));
+    message.push_str("/");
+    message.push_str(amount_decimal(cumulative_bet));
+    message.push_str("/");
+    message.push_str(checkpoint);
+    return crypto::sha256::hash(message);
+}
+
+String checkpoint_step(const String& table, u64 hand_id,
+                       const String& checkpoint, u64 phase,
+                       u64 event_round, u64 epoch, const String& address,
+                       u64 event, u128 amount, const String& data_hash)
+{
+    if (!valid_hash(checkpoint) ||
+        (data_hash.len() != 0 && !valid_hash(data_hash))) {
+        return "";
+    }
+    String message = "MMX_PARALLEL_POKER_CHECKPOINT_V1/";
+    message.push_str(table);
+    message.push_str("/");
+    message.push_str(decimal(hand_id));
+    message.push_str("/");
+    message.push_str(checkpoint);
+    message.push_str("/");
+    message.push_str(decimal(phase));
+    message.push_str("/");
+    message.push_str(decimal(event_round));
+    message.push_str("/");
+    message.push_str(decimal(epoch));
+    message.push_str("/");
+    message.push_str(address);
+    message.push_str("/");
+    message.push_str(decimal(event));
+    message.push_str("/");
+    message.push_str(amount_decimal(amount));
+    message.push_str("/");
+    message.push_str(data_hash);
+    return crypto::sha256::hash(message);
+}
+
+String start_checkpoint(const String& table, u64 hand_id, u64 start_height,
+                        const Vec<String>& addresses, const Vec<u128>& stacks)
+{
+    if (addresses.len() < 2 || addresses.len() != stacks.len()) {
+        return "";
+    }
+    String message = "MMX_PARALLEL_POKER_START_V1/";
+    message.push_str(table);
+    message.push_str("/");
+    message.push_str(decimal(hand_id));
+    message.push_str("/");
+    message.push_str(decimal(start_height));
+    String checkpoint = crypto::sha256::hash(message);
+    Vec<u128> remaining_stacks = stacks.clone();
+    for (const String& address : addresses) {
+        u128 stack = remaining_stacks.remove(0);
+        checkpoint = checkpoint_step(table, hand_id, checkpoint, 0, 0, 0,
+                                     address, 1, stack, "");
+    }
+    return checkpoint;
+}
+
+String continue_hash(const String& table, u64 hand_id, const String& address,
+                     u128 result_stack, const String& checkpoint)
+{
+    if (!valid_hash(checkpoint)) {
+        return "";
+    }
+    String message = "MMX_PARALLEL_POKER_CONTINUE_V1/";
+    message.push_str(table);
+    message.push_str("/");
+    message.push_str(decimal(hand_id));
+    message.push_str("/");
+    message.push_str(address);
+    message.push_str("/");
+    message.push_str(amount_decimal(result_stack));
+    message.push_str("/");
+    message.push_str(checkpoint);
+    return crypto::sha256::hash(message);
+}
+
+String auth_hash(const String& dealer, const String& challenge,
+                 u64 expires_at, const String& address)
+{
+    String message = "MMX_POKER_DEALER_AUTH_V1/";
+    message.push_str(dealer);
+    message.push_str("/");
+    message.push_str(challenge);
+    message.push_str("/");
+    message.push_str(decimal(expires_at));
+    message.push_str("/");
+    message.push_str(address);
+    return crypto::sha256::hash(message);
+}
+
+bool public_key_matches(const String& address, const String& public_key)
+{
+    return address_from_public_key(public_key) == address;
+}
+
+} // namespace wallet

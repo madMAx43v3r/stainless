@@ -1,0 +1,6 @@
+schema = 1
+name = "mmx-wallet"
+sources = ["src/wallet.stl"]
+
+[dependencies]
+stainless-crypto = "../../crates/stainless-crypto"
