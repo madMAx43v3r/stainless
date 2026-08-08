@@ -652,6 +652,16 @@ impl Emitter {
                 };
                 Ok(quote!(if #condition #then_branch #else_branch))
             }
+            hir::Statement::While {
+                label,
+                condition,
+                body,
+            } => {
+                let label = rust_label(label);
+                let condition = self.expression(condition)?;
+                let body = self.block(body)?;
+                Ok(quote!(#label: while #condition #body))
+            }
             hir::Statement::ClassicFor {
                 label,
                 initializer,
@@ -917,6 +927,21 @@ impl Emitter {
                 Ok(quote!(#target::#constant))
             }
             hir::Expression::Literal { kind, text } => literal(*kind, text),
+            hir::Expression::Switch { scrutinee, arms } => {
+                let scrutinee = self.expression(scrutinee)?;
+                let arms = arms
+                    .iter()
+                    .map(|arm| {
+                        let pattern = match &arm.pattern {
+                            hir::SwitchPattern::Literal { kind, text } => literal(*kind, text)?,
+                            hir::SwitchPattern::Fallback => quote!(_),
+                        };
+                        let value = self.expression(&arm.value)?;
+                        Ok(quote!(#pattern => #value))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(quote!(match #scrutinee { #(#arms),* }))
+            }
             hir::Expression::JsonNull => Ok(quote!(::stainless_runtime::Var::null())),
             hir::Expression::JsonArray(elements) => {
                 let elements = elements

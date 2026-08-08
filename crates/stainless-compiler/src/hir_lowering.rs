@@ -867,6 +867,7 @@ impl Lowerer<'_> {
                     else_branch,
                 })
             }
+            StatementKind::While(while_statement) => self.lower_while(while_statement),
             StatementKind::For(for_statement) => self.lower_for(for_statement),
             StatementKind::Break => self.lower_loop_jump(false, statement.span),
             StatementKind::Continue => self.lower_loop_jump(true, statement.span),
@@ -1086,6 +1087,16 @@ impl Lowerer<'_> {
                 None
             }
         }
+    }
+
+    fn lower_while(&mut self, statement: &ast::WhileStatement) -> Option<hir::Statement> {
+        let label = format!("__stainless_loop_{}", self.loop_index);
+        self.loop_index += 1;
+        Some(hir::Statement::While {
+            condition: self.lower_condition(&statement.condition)?,
+            body: self.lower_loop_body(&label, &statement.body)?,
+            label,
+        })
     }
 
     fn lower_loop_body(&mut self, label: &str, statement: &ast::Statement) -> Option<hir::Block> {
@@ -1427,6 +1438,25 @@ impl Lowerer<'_> {
             ExpressionKind::Literal(literal) => hir::Expression::Literal {
                 kind: literal.kind,
                 text: literal.text.clone(),
+            },
+            ExpressionKind::Switch { scrutinee, arms } => hir::Expression::Switch {
+                scrutinee: Box::new(self.lower_expression(scrutinee, ExpressionMode::Value)?),
+                arms: arms
+                    .iter()
+                    .map(|arm| {
+                        let pattern = match &arm.pattern {
+                            ast::SwitchPattern::Literal(literal) => hir::SwitchPattern::Literal {
+                                kind: literal.kind,
+                                text: literal.text.clone(),
+                            },
+                            ast::SwitchPattern::Fallback => hir::SwitchPattern::Fallback,
+                        };
+                        Some(hir::SwitchArm {
+                            pattern,
+                            value: self.lower_expression(&arm.value, ExpressionMode::Value)?,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?,
             },
             ExpressionKind::JsonArray { elements } => hir::Expression::JsonArray(
                 elements

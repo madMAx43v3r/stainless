@@ -179,6 +179,10 @@ implemented:
   checked `stainless::IoError` failures.
 - [`27_tuples.stl`](docs/ref/27_tuples.stl) — compiler-known heterogeneous
   tuples used as lexicographically ordered compound map keys.
+- [`30_switch.stl`](docs/ref/30_switch.stl) — exhaustive, non-fallthrough
+  `switch` expressions with literal arms and a final `else` fallback.
+- [`31_while.stl`](docs/ref/31_while.stl) — condition-controlled loops with
+  `break` and `continue`.
 
 `01_basics.stl`, `02_structs_and_data_inheritance.stl`,
 `11_vec_and_string.stl`, `13_range_for.stl`, and `14_constructors.stl` are
@@ -190,7 +194,8 @@ currently parsed, resolved, lowered to HIR, emitted as Rust, and compiled by
 `22_pointer_family.stl` sample and the mutex/RW-lock/condition
 `23_mutex_and_condition.stl` sample, the owned/scoped thread
 `24_threads.stl` sample, and the standard-collection `25_collections.stl`
-sample. The JSON
+sample. The `30_switch.stl` and `31_while.stl` control-flow samples are also
+compiled, with focused execution tests for both. The JSON
 `21_json_support.stl` sample is compiled and executed through Cargo against
 the real `stainless-runtime` and `serde_json`. The external
 `17_external_regex_wrapper.stl` sample is compiled and executed through Cargo
@@ -303,10 +308,13 @@ The first compiler uses the following conservative grammar policy:
   Generated Rust automatically drops locals and fields using Rust scope and
   field-declaration order. Resource-owning native Rust fields retain their
   ordinary Rust `Drop` behavior.
-- Rust-style `match`, `if let`, and destructuring patterns are deferred.
-  Native `Result` values initially use ordinary non-consuming query methods,
-  compiler-adapted `.unwrap()`, target-typed checked unwrap, or a purpose-built
-  Rust adapter.
+- Stainless `switch (value) { pattern => expression, else => fallback }` is an
+  exhaustive expression. It accepts integer, character, and boolean literal
+  patterns, requires the final `else` fallback, never falls through, and lowers
+  directly to a Rust `match`. Binding/destructuring patterns, Rust-style
+  `match`, and `if let` remain deferred. Native `Result` values initially use
+  ordinary non-consuming query methods, compiler-adapted `.unwrap()`,
+  target-typed checked unwrap, or a purpose-built Rust adapter.
 
 These restrictions freeze the first parser boundary; accepting more syntax
 requires an explicit semantic and lowering extension rather than permissive
@@ -663,6 +671,19 @@ Copy and move rules apply after deduction: a named copyable initializer is
 copied, while a named non-copy value still requires `move(value)`.
 `auto value = nullptr;` is rejected because the pointee type cannot be inferred,
 and a fluent `void` chain receiver cannot be captured with `auto`.
+
+### `while` loops
+
+Stainless supports C++-style `while (condition) statement` loops. The condition
+must be `bool` or a nullable pointer test and is evaluated before every
+iteration. The body has its own statement scope, and `break` and `continue`
+target the nearest enclosing `while`, classic `for`, or range `for` loop.
+
+```cpp
+while (current < limit) {
+    current += 1;
+}
+```
 
 ### Range-based `for` loops
 
@@ -2536,6 +2557,27 @@ type; there is intentionally no platform-dependent `usize` overload.
 Cursor-based and buffered streams, rich metadata, permissions, and symlink
 operations remain for the next file-I/O layer.
 
+### Random bytes
+
+Operating-system entropy is the deliberately small native boundary for
+Stainless-written cryptographic code. `stainless::Random::bytes(length)`
+returns a `Vec<u8>` filled by the platform random source. It rejects requests
+larger than one MiB and converts entropy failures to the checked
+`stainless::RustError` exception:
+
+```cpp
+use rust::Vec;
+use stainless::Random;
+
+Vec<u8> nonce(usize length) throws stainless::RustError
+{
+    return Random::bytes(length);
+}
+```
+
+Hashing, key handling, signing, encoding, and protocol policy do not belong in
+this runtime facade.
+
 ### Versioned key/value store showcase
 
 `crates/stainless-kvstore` is the first substantial library implemented in
@@ -3050,8 +3092,8 @@ The current recursive-descent grammar handles:
 - constructor declarations, `= delete`, qualified out-of-type definitions,
   and C++-style data-base/member initializer lists;
 - blocks, initialized or default-constructed local declarations, `return`,
-  `throw`, `try` with ordered typed or catch-all handlers, `if`/`else`, `break`,
-  `continue`, and empty statements;
+  `throw`, `try` with ordered typed or catch-all handlers, `if`/`else`,
+  `while`, `break`, `continue`, and empty statements;
 - classic `for (init; condition; update)` and range
   `for (binding : expression)` statements;
 - names and paths, literals, parenthesized expressions, calls with narrowly
@@ -3157,7 +3199,7 @@ resolution and before HIR construction. For the implemented subset it:
 - ends local loans after their final source use, while retaining outer loans
   across a loop that may repeat;
 - treats consuming ranges as definite moves and checks moves inside potentially
-  repeated classic/range loop bodies;
+  repeated `while`, classic, and range loop bodies;
 - treats an explicit native `Result.unwrap()` and an inserted target-typed
   Result conversion as consuming operations and preserves their exceptional
   ownership paths;
@@ -3201,9 +3243,9 @@ the accepted subset it now:
 - lowers interfaces to Rust traits with supertraits and `Send + Sync` trait
   objects, and erases class owners using safe `Box`/`Arc` unsizing (or an
   explicit nullable-owner map);
-- lowers classic loops without breaking C++ `continue`/update ordering and
-  lowers shared, mutable, copied, and consuming `Vec<T>` range loops to the
-  corresponding Rust iterator form;
+- lowers `while` loops directly, lowers classic loops without breaking C++
+  `continue`/update ordering, and lowers shared, mutable, copied, and consuming
+  `Vec<T>` range loops to the corresponding Rust iterator form;
 - lowers checked functions and constructors to Rust `Result`, throws to a
   boxed compiler-private error carrier, and typed catches to safe base
   projection without `unsafe`;
@@ -3320,12 +3362,11 @@ Including at crate root preserves Stainless `crate::` paths and permits direct
 calls between generated and hand-written Rust modules. A duplicate Rust and
 Stainless item name is a normal compile error unless one side is placed in a
 module. Generated files are rebuildable artifacts and are never written into
-`src`. Module-aware multi-file compilation, binding-manifest selection through
-the builder, overload-signature export selectors, and runtime ABI versioning
-are deferred.
+`src`. Module-aware multi-file compilation, overload-signature export
+selectors, and runtime ABI versioning are deferred.
 
-Standalone Stainless programs need only a `.stl` source file with one root,
-non-overloaded `i32 main()` function. They do not need a Rust package,
+Standalone Stainless programs need one or more `.stl` source files and one
+root, non-overloaded `i32 main()` function. They do not need a Rust package,
 `build.rs`, or `main.rs`:
 
 ```sh
@@ -3336,6 +3377,12 @@ stainlessc --build -o hello main.stl
 stainlessc --run main.stl
 ```
 
+Multiple source arguments are concatenated into one translation unit in the
+order supplied. `--package-root DIR` loads `DIR/stainless-bindings.toml`.
+Standalone builds that use those native bindings add each backing Cargo crate
+with `--dependency NAME=PATH`; the dependency is linked only in the compiler's
+temporary build directory.
+
 `--check` validates without emitting Rust. Without `-o`, generated Rust is
 written to stdout. `--build` writes an executable to the required `-o` path.
 `--run` generates a private Rust entry point, compiles it in a temporary
@@ -3344,7 +3391,9 @@ files. Runtime-free programs still use `rustc` directly. Programs that use
 native JSON receive a hidden temporary Cargo manifest linking
 `stainless-runtime`; users still do not create `main.rs` or `build.rs`.
 Diagnostics go to stderr and use byte spans until richer source rendering is
-added. General external Cargo dependency orchestration remains deferred.
+added. Automatic Cargo metadata/version resolution for external dependencies
+remains deferred; standalone builds currently accept explicit path
+dependencies.
 
 ## Rust library survey
 

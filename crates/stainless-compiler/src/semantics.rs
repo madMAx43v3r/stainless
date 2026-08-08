@@ -179,6 +179,9 @@ impl Validator {
                     self.statement(else_branch, loop_depth, returns_void);
                 }
             }
+            StatementKind::While(while_statement) => {
+                self.statement(&while_statement.body, loop_depth + 1, returns_void);
+            }
             StatementKind::For(for_statement) => {
                 if let ForClause::Classic(classic) = &for_statement.clause
                     && let Some(ForInitializer::Local(local)) = &classic.initializer

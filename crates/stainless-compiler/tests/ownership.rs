@@ -71,6 +71,52 @@ String invalid(String value, bool condition) {
 }
 
 #[test]
+fn switch_merges_ownership_across_its_exhaustive_arms() {
+    let definite = analyze(
+        r"use rust::String;
+
+String invalid(String value, bool condition) {
+    String selected = switch (condition) {
+        true => move(value),
+        else => move(value),
+    };
+    return value;
+}
+",
+    );
+    assert_codes(&definite, &["OWN001"]);
+
+    let conditional = analyze(
+        r#"use rust::String;
+
+String invalid(String value, bool condition) {
+    String selected = switch (condition) {
+        true => move(value),
+        else => "fallback",
+    };
+    return value;
+}
+"#,
+    );
+    assert_codes(&conditional, &["OWN002"]);
+}
+
+#[test]
+fn while_checks_moves_across_repeated_iterations() {
+    let analysis = analyze(
+        r"use rust::String;
+
+void invalid(String value, bool repeat) {
+    while (repeat) {
+        String consumed = move(value);
+    }
+}
+",
+    );
+    assert_codes(&analysis, &["OWN001"]);
+}
+
+#[test]
 fn moving_function_mut_invalidates_the_source_binding() {
     let analysis = analyze(
         r"void invalid() {

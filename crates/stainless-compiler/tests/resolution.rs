@@ -93,6 +93,68 @@ fn positive_integer_literals_default_to_u32_and_infer_from_context() {
 }
 
 #[test]
+fn switch_requires_compatible_literal_patterns_and_a_final_fallback() {
+    let valid = analyze(
+        r"i32 classify(u8 value) {
+    return switch (value) { 0 => 10, 1 => 20, else => 30 };
+}
+",
+    );
+    assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);
+
+    let invalid = analyze(
+        r#"i32 missing_fallback(u8 value) {
+    return switch (value) { 0 => 10, 1 => 20 };
+}
+i32 misplaced_fallback(u8 value) {
+    return switch (value) { else => 10, 1 => 20, else => 30 };
+}
+i32 wrong_pattern(u8 value) {
+    return switch (value) { "zero" => 10, else => 20 };
+}
+"#,
+    );
+    assert!(
+        invalid
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "RES129")
+            .count()
+            >= 4,
+        "{:#?}",
+        invalid.diagnostics
+    );
+}
+
+#[test]
+fn while_requires_a_boolean_or_nullable_pointer_condition() {
+    let valid = analyze(
+        r"void count(u32& value) {
+    while (value < 3) {
+        value += 1;
+    }
+}
+",
+    );
+    assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);
+
+    let invalid = analyze(
+        r"void invalid(u32 value) {
+    while (value) {
+        break;
+    }
+}
+",
+    );
+    assert!(invalid.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "RES110"
+            && diagnostic
+                .message
+                .contains("while condition requires `bool`")
+    }));
+}
+
+#[test]
 fn resolves_reference_parser_fixtures_without_semantic_errors() {
     for source in [
         include_str!("../../../docs/ref/01_basics.stl"),
@@ -108,6 +170,7 @@ fn resolves_reference_parser_fixtures_without_semantic_errors() {
         include_str!("../../../docs/ref/22_pointer_family.stl"),
         include_str!("../../../docs/ref/23_mutex_and_condition.stl"),
         include_str!("../../../docs/ref/24_threads.stl"),
+        include_str!("../../../docs/ref/31_while.stl"),
         include_str!("../../../docs/ref/25_collections.stl"),
         include_str!("../../../docs/ref/26_file_io.stl"),
         include_str!("../../../docs/ref/27_tuples.stl"),
@@ -342,6 +405,43 @@ void decode(const Vec<u8>& bytes) {
     assert!(!invalid.semantics.calls.iter().any(|call| {
         matches!(&call.target, CallTarget::Native(native) if native.type_path.contains("NotExposed"))
     }));
+}
+
+#[test]
+fn random_bytes_use_the_runtime_facade_and_checked_native_error_conversion() {
+    let analysis = analyze(
+        r"use rust::Vec;
+use stainless::Random;
+
+Vec<u8> random_bytes(usize length) throws stainless::RustError {
+    return Random::bytes(length);
+}
+",
+    );
+
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+    let call = analysis
+        .semantics
+        .calls
+        .iter()
+        .find(|call| {
+            matches!(
+                &call.target,
+                CallTarget::Native(native)
+                    if native.type_path == "rust::stainless_runtime::Random"
+                        && native.source_name == "bytes"
+            )
+        })
+        .expect("Random::bytes call");
+    assert_eq!(
+        call.return_type,
+        TypeRef::native("rust::Vec", vec![TypeRef::U8])
+    );
+    assert_eq!(call.throws.len(), 1);
 }
 
 #[test]

@@ -30,6 +30,8 @@ pub fn standard_bindings() -> Result<NativeBindings, super::BindingError> {
         map_binding(),
         multimap_binding(),
         queue_binding(),
+        random_binding(),
+        random_error_binding(),
         set_binding(),
         string_binding(),
         string_from_utf8_error_binding(),
@@ -210,6 +212,7 @@ fn endian_binding(name: &str) -> NativeTypeBinding {
 
 pub(crate) const VAR_TYPE_PATH: &str = "rust::stainless_runtime::Var";
 const JSON_ERROR_TYPE_PATH: &str = "rust::stainless_runtime::JsonError";
+const RANDOM_ERROR_TYPE_PATH: &str = "rust::stainless_runtime::RandomError";
 const IO_ERROR_TYPE_PATH: &str = "rust::std::io::Error";
 const FILE_TYPE_PATH: &str = "rust::std::fs::File";
 const OPEN_OPTIONS_TYPE_PATH: &str = "rust::std::fs::OpenOptions";
@@ -612,6 +615,14 @@ fn var_binding() -> NativeTypeBinding {
             method("clone", Receiver::Shared, vec![], var),
             method("to_json", Receiver::Shared, vec![], string),
             fallible_method(
+                "to_u128_exact",
+                "to_u128_exact",
+                Receiver::Shared,
+                vec![],
+                TypeRef::U128,
+                json_error.clone(),
+            ),
+            fallible_method(
                 "set",
                 "set_field",
                 Receiver::Mutable,
@@ -720,6 +731,32 @@ fn json_error_binding() -> NativeTypeBinding {
     NativeTypeBinding {
         stainless_path: JSON_ERROR_TYPE_PATH.to_owned(),
         rust_path: "::stainless_runtime::JsonError".to_owned(),
+        type_parameters: vec![],
+        error_format: Some(NativeErrorFormat::Display),
+        callables: vec![],
+    }
+}
+
+fn random_binding() -> NativeTypeBinding {
+    NativeTypeBinding {
+        stainless_path: "rust::stainless_runtime::Random".to_owned(),
+        rust_path: "::stainless_runtime::Random".to_owned(),
+        type_parameters: vec![],
+        error_format: None,
+        callables: vec![fallible_associated(
+            "bytes",
+            vec![Parameter::new("length", TypeRef::Usize)],
+            vec_of(TypeRef::U8),
+            TypeRef::native(RANDOM_ERROR_TYPE_PATH, vec![]),
+            "::stainless_runtime::Random::bytes",
+        )],
+    }
+}
+
+fn random_error_binding() -> NativeTypeBinding {
+    NativeTypeBinding {
+        stainless_path: RANDOM_ERROR_TYPE_PATH.to_owned(),
+        rust_path: "::stainless_runtime::RandomError".to_owned(),
         type_parameters: vec![],
         error_format: Some(NativeErrorFormat::Display),
         callables: vec![],

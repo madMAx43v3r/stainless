@@ -592,6 +592,7 @@ impl Parser<'_> {
             Some(SyntaxKind::ThrowKw) => self.parse_throw_statement(),
             Some(SyntaxKind::TryKw) => self.parse_try_statement(),
             Some(SyntaxKind::IfKw) => self.parse_if_statement(),
+            Some(SyntaxKind::WhileKw) => self.parse_while_statement(),
             Some(SyntaxKind::ForKw) => self.parse_for_statement(),
             Some(SyntaxKind::BreakKw) => {
                 self.parse_keyword_statement(SyntaxKind::BreakStatement);
@@ -702,6 +703,16 @@ impl Parser<'_> {
         self.finish();
     }
 
+    fn parse_while_statement(&mut self) {
+        self.start(SyntaxKind::WhileStatement);
+        self.bump();
+        self.expect(SyntaxKind::LParen, "expected `(` after `while`");
+        self.parse_expression();
+        self.expect(SyntaxKind::RParen, "expected `)` after while condition");
+        self.parse_statement();
+        self.finish();
+    }
+
     fn parse_range_for_clause(&mut self) {
         self.start(SyntaxKind::RangeForClause);
         self.parse_type(true);
@@ -771,8 +782,9 @@ impl Parser<'_> {
     fn parse_expression_bp(&mut self, minimum_binding_power: u8) {
         self.eat_trivia();
         let checkpoint = self.builder.checkpoint();
+        let aggregate_allowed = self.at(SyntaxKind::Identifier);
         self.parse_prefix_or_primary();
-        self.parse_postfix(checkpoint);
+        self.parse_postfix(checkpoint, aggregate_allowed);
 
         while let Some((left_power, right_power)) = infix_binding_power(self.current()) {
             if left_power < minimum_binding_power {
@@ -831,6 +843,7 @@ impl Parser<'_> {
                 self.expect(SyntaxKind::RParen, "expected `)`");
                 self.finish();
             }
+            Some(SyntaxKind::SwitchKw) => self.parse_switch_expression(),
             Some(SyntaxKind::LBracket) if self.looks_like_lambda() => {
                 self.parse_lambda_expression();
             }
@@ -854,6 +867,36 @@ impl Parser<'_> {
                 self.finish();
             }
         }
+    }
+
+    fn parse_switch_expression(&mut self) {
+        self.start(SyntaxKind::SwitchExpression);
+        self.bump();
+        self.expect(SyntaxKind::LParen, "expected `(` after `switch`");
+        self.parse_expression();
+        self.expect(SyntaxKind::RParen, "expected `)` after switch value");
+        self.expect(SyntaxKind::LBrace, "expected `{` after switch expression");
+        while !self.at_end() && !self.at(SyntaxKind::RBrace) {
+            self.start(SyntaxKind::SwitchArm);
+            self.start(SyntaxKind::SwitchPattern);
+            if self.current().is_some_and(SyntaxKind::is_literal) || self.at(SyntaxKind::ElseKw) {
+                self.bump();
+            } else {
+                self.error("expected a literal or `else` switch pattern");
+                if !self.at_end() && !self.at_any(&[SyntaxKind::FatArrow, SyntaxKind::RBrace]) {
+                    self.bump();
+                }
+            }
+            self.finish();
+            self.expect(SyntaxKind::FatArrow, "expected `=>` after switch pattern");
+            self.parse_expression();
+            self.finish();
+            if !self.eat(SyntaxKind::Comma) {
+                break;
+            }
+        }
+        self.expect(SyntaxKind::RBrace, "expected `}` after switch arms");
+        self.finish();
     }
 
     fn parse_lambda_expression(&mut self) {
@@ -925,10 +968,11 @@ impl Parser<'_> {
         self.finish();
     }
 
-    fn parse_postfix(&mut self, checkpoint: rowan::Checkpoint) {
+    fn parse_postfix(&mut self, checkpoint: rowan::Checkpoint, mut aggregate_allowed: bool) {
         loop {
             match self.current() {
                 Some(SyntaxKind::Bang) if self.nth(1) == Some(SyntaxKind::LParen) => {
+                    aggregate_allowed = false;
                     self.builder
                         .start_node_at(checkpoint, SyntaxKind::MacroCallExpression.into());
                     self.bump();
@@ -936,18 +980,21 @@ impl Parser<'_> {
                     self.finish();
                 }
                 Some(SyntaxKind::LParen) => {
+                    aggregate_allowed = false;
                     self.builder
                         .start_node_at(checkpoint, SyntaxKind::CallExpression.into());
                     self.parse_argument_list();
                     self.finish();
                 }
-                Some(SyntaxKind::LBrace) => {
+                Some(SyntaxKind::LBrace) if aggregate_allowed => {
+                    aggregate_allowed = false;
                     self.builder
                         .start_node_at(checkpoint, SyntaxKind::AggregateExpression.into());
                     self.parse_initializer_list();
                     self.finish();
                 }
                 Some(SyntaxKind::Dot) => {
+                    aggregate_allowed = false;
                     if self.nth(1) == Some(SyntaxKind::AwaitKw) {
                         self.builder
                             .start_node_at(checkpoint, SyntaxKind::AwaitExpression.into());
@@ -970,6 +1017,7 @@ impl Parser<'_> {
                     self.finish();
                 }
                 Some(SyntaxKind::LBracket) => {
+                    aggregate_allowed = false;
                     self.builder
                         .start_node_at(checkpoint, SyntaxKind::IndexExpression.into());
                     self.bump();
@@ -978,6 +1026,7 @@ impl Parser<'_> {
                     self.finish();
                 }
                 Some(SyntaxKind::PlusPlus | SyntaxKind::MinusMinus) => {
+                    aggregate_allowed = false;
                     self.builder
                         .start_node_at(checkpoint, SyntaxKind::PostfixExpression.into());
                     self.bump();

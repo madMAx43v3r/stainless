@@ -10,6 +10,60 @@ use stainless_compiler::{DiagnosticPhase, transpile, transpile_with_bindings};
 
 static TEMPORARY_INDEX: AtomicUsize = AtomicUsize::new(0);
 
+#[test]
+fn switch_expressions_lower_to_exhaustive_rust_matches() {
+    let source = include_str!("../../../docs/ref/30_switch.stl");
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let rust = result.rust.expect("valid switch should emit Rust");
+    assert!(rust.contains("return match"), "{rust}");
+    assert!(rust.contains("_ =>"), "{rust}");
+    compile_rust("switch-expression", &rust, CrateKind::Library);
+}
+
+#[test]
+fn while_statements_lower_to_labeled_rust_loops() {
+    let source = include_str!("../../../docs/ref/31_while.stl");
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let function = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "sum_odd_before"])
+        .expect("sum_odd_before symbol")
+        .mangled_name
+        .clone();
+    let mut rust = result.rust.expect("valid while statement should emit Rust");
+    assert!(rust.contains(": while"), "{rust}");
+    write!(
+        rust,
+        "\nfn main() {{ assert_eq!(__stainless_namespace_samples::{function}(10), 8); }}\n"
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("while-statement", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .expect("generated while program should run");
+    assert!(
+        output.status.success(),
+        "status: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    remove_temporary_parent(&binary);
+}
+
 const BEHAVIOR_SOURCE: &str = r#"use rust::{String, Vec};
 
 namespace samples {
@@ -250,6 +304,7 @@ fn transpiles_and_compiles_resolved_reference_programs() {
             "class-inheritance",
             include_str!("../../../docs/ref/29_class_inheritance.stl"),
         ),
+        ("while", include_str!("../../../docs/ref/31_while.stl")),
     ] {
         let result = transpile(source);
         assert!(
@@ -1999,6 +2054,56 @@ fn cargo_executes_checked_standard_file_io() {
     assert!(
         output.status.success(),
         "Cargo rejected generated file I/O support:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(&directory)
+        .unwrap_or_else(|error| panic!("failed to remove {}: {error}", directory.display()));
+}
+
+#[test]
+fn cargo_executes_runtime_random_bytes() {
+    let source = r"use rust::Vec;
+use stainless::Random;
+
+i32 main() throws stainless::RustError
+{
+    Vec<u8> bytes = Random::bytes(32);
+    if (bytes.len() != 32usize) {
+        return 1;
+    }
+    return 0;
+}
+";
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:?}",
+        result.analysis.diagnostics
+    );
+    let entry = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["main"])
+        .expect("random sample main symbol")
+        .mangled_name
+        .clone();
+    let mut rust = result.rust.expect("random sample should emit Rust");
+    assert!(rust.contains("::stainless_runtime::Random::bytes"));
+    assert!(rust.contains("__stainless_namespace_stainless::RustError"));
+    write!(
+        rust,
+        "\nfn main() {{ assert_eq!({entry}().expect(\"operating-system entropy\"), 0); }}\n"
+    )
+    .expect("writing to a String cannot fail");
+
+    let directory = write_runtime_cargo_fixture("random-runtime", &rust);
+    let output = run_fixture_cargo(&directory, "run");
+    assert!(
+        output.status.success(),
+        "Cargo rejected generated random-byte support:\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

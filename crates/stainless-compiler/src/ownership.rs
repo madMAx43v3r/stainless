@@ -418,6 +418,10 @@ impl Analyzer<'_> {
                 self.expression(&if_statement.condition, Usage::Read);
                 self.if_statement(if_statement)
             }
+            StatementKind::While(while_statement) => {
+                self.while_statement(while_statement);
+                true
+            }
             StatementKind::For(for_statement) => {
                 self.for_statement(for_statement);
                 true
@@ -567,6 +571,39 @@ impl Analyzer<'_> {
             ForClause::Range(range) => self.range_for(range, &statement.body),
             ForClause::Error => {}
         }
+        self.loops.pop();
+        self.loop_depth -= 1;
+        self.state.pop_scope();
+        self.release_expired_loans(statement.body.span.end);
+    }
+
+    fn while_statement(&mut self, statement: &ast::WhileStatement) {
+        self.state.push_scope();
+        self.loop_depth += 1;
+        self.loops.push(LoopContext {
+            scope_depth: self.state.scopes.len(),
+            break_states: Vec::new(),
+            continue_states: Vec::new(),
+        });
+        self.expression(&statement.condition, Usage::Read);
+        let baseline = self.state.clone();
+        let first_state = self.loop_iteration(&statement.body, None, Some(&statement.condition));
+        let repeated_state = first_state.as_ref().and_then(|first_state| {
+            self.state = first_state.clone();
+            self.loop_iteration(&statement.body, None, Some(&statement.condition))
+        });
+        let mut exits = vec![baseline.clone()];
+        exits.extend(first_state);
+        exits.extend(repeated_state);
+        exits.extend(
+            self.loops
+                .last()
+                .expect("while loop has an ownership context")
+                .break_states
+                .iter()
+                .cloned(),
+        );
+        self.state = merge_many_states(&baseline, &exits);
         self.loops.pop();
         self.loop_depth -= 1;
         self.state.pop_scope();
@@ -830,6 +867,18 @@ impl Analyzer<'_> {
                 right,
             } => {
                 self.binary(left, *operator, right);
+                None
+            }
+            ExpressionKind::Switch { scrutinee, arms } => {
+                self.expression(scrutinee, Usage::Read);
+                let baseline = self.state.clone();
+                let mut arm_states = Vec::new();
+                for arm in arms {
+                    self.state = baseline.clone();
+                    self.expression(&arm.value, usage);
+                    arm_states.push(self.state.clone());
+                }
+                self.state = merge_many_states(&baseline, &arm_states);
                 None
             }
             ExpressionKind::Call { arguments, .. } => self.call(expression, arguments),
@@ -1818,6 +1867,10 @@ impl UseCollector {
                     self.branch(else_branch);
                 }
             }
+            StatementKind::While(while_statement) => {
+                self.expression(&while_statement.condition);
+                self.branch(&while_statement.body);
+            }
             StatementKind::For(for_statement) => self.for_statement(for_statement),
             StatementKind::Expression(expression) => self.expression(expression),
             StatementKind::Break
@@ -1888,6 +1941,12 @@ impl UseCollector {
             ExpressionKind::Binary { left, right, .. } => {
                 self.expression(left);
                 self.expression(right);
+            }
+            ExpressionKind::Switch { scrutinee, arms } => {
+                self.expression(scrutinee);
+                for arm in arms {
+                    self.expression(&arm.value);
+                }
             }
             ExpressionKind::Call { callee, arguments } => {
                 self.expression(callee);

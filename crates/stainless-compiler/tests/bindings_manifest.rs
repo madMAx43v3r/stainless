@@ -96,6 +96,8 @@ fn package_loader_merges_optional_manifest_with_compiler_builtins() {
             "rust::stainless_runtime::BigEndian",
             "rust::stainless_runtime::JsonError",
             "rust::stainless_runtime::LittleEndian",
+            "rust::stainless_runtime::Random",
+            "rust::stainless_runtime::RandomError",
             "rust::stainless_runtime::Var",
             "rust::std::fs",
             "rust::std::fs::File",

@@ -13,6 +13,90 @@ fn parses_the_basics_reference_file_losslessly() {
 }
 
 #[test]
+fn parses_switch_expressions_losslessly() {
+    let source = r"i32 classify(u8 value) {
+    return switch (value) {
+        0 => 10,
+        1 => 20,
+        else => 30,
+    };
+}
+";
+    let parsed = parse(source);
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(parsed.syntax().to_string(), source);
+    assert_eq!(
+        count_kind(&parsed.syntax(), SyntaxKind::SwitchExpression),
+        1
+    );
+    assert_eq!(count_kind(&parsed.syntax(), SyntaxKind::SwitchArm), 3);
+
+    let missing_parentheses =
+        parse("i32 classify(u8 value) { return switch value { else => 0 }; }");
+    assert!(
+        missing_parentheses
+            .errors()
+            .iter()
+            .any(|error| error.message == "expected `(` after `switch`")
+    );
+
+    let underscore = parse("i32 classify(u8 value) { return switch (value) { _ => 0 }; }");
+    assert!(
+        underscore
+            .errors()
+            .iter()
+            .any(|error| { error.message == "expected a literal or `else` switch pattern" })
+    );
+}
+
+#[test]
+fn parses_while_statements_and_exposes_their_typed_shape() {
+    let source = "void increment(u32& value) { while (value < 3) { value += 1; } }";
+    let parsed = parse(source);
+    let tree = parsed.tree();
+    let Item::FunctionDefinition(function) = tree.items().next().expect("function") else {
+        panic!("expected a function definition");
+    };
+    let Statement::While(statement) = function
+        .body()
+        .expect("body")
+        .statements()
+        .next()
+        .expect("while statement")
+    else {
+        panic!("expected a while statement");
+    };
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert!(matches!(statement.condition(), Some(Expression::Binary(_))));
+    assert!(matches!(statement.body(), Some(Statement::Block(_))));
+    assert_eq!(count_kind(&parsed.syntax(), SyntaxKind::WhileStatement), 1);
+    assert_eq!(parsed.syntax().to_string(), source);
+
+    let missing_parenthesis = parse("void invalid(bool ready) { while ready) {} }");
+    assert!(
+        missing_parenthesis
+            .errors()
+            .iter()
+            .any(|error| { error.message == "expected `(` after `while`" })
+    );
+}
+
+#[test]
+fn malformed_if_condition_does_not_treat_a_literal_as_an_aggregate() {
+    let source = "void test(u32 value) { if (value) != 0 { value += 1; } }";
+    let parsed = parse(source);
+
+    assert!(!parsed.errors().is_empty());
+    assert_eq!(parsed.syntax().to_string(), source);
+    assert_eq!(
+        count_kind(&parsed.syntax(), SyntaxKind::AggregateExpression),
+        0
+    );
+}
+
+#[test]
 fn parses_the_range_for_reference_file_losslessly() {
     let source = include_str!("../../../docs/ref/13_range_for.stl");
     let parsed = parse(source);

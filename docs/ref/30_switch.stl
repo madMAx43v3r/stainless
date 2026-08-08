@@ -1,0 +1,15 @@
+// Exhaustive value selection with C++-styled syntax and Rust-like expression
+// semantics. Arms do not fall through, and the final `else` arm is required.
+
+namespace samples {
+
+i32 classify(u8 value)
+{
+    return switch (value) {
+        0 => 10,
+        1 => 20,
+        else => 30,
+    };
+}
+
+} // namespace samples

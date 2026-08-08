@@ -2297,6 +2297,32 @@ impl Resolver<'_> {
                     else_falls_through,
                 );
             }
+            StatementKind::While(while_statement) => {
+                let condition = self.resolve_expression(
+                    &while_statement.condition,
+                    Some(&TypeRef::Bool),
+                    context,
+                );
+                if canonical(&condition.ty) != TypeRef::Bool
+                    && !is_nullable_pointer_test(&condition.ty)
+                {
+                    self.push(
+                        "RES110",
+                        format!(
+                            "while condition requires `bool` or a nullable pointer, found `{}`",
+                            display_type(&condition.ty)
+                        ),
+                        while_statement.condition.span,
+                    );
+                }
+
+                let before_loop = context.scopes.clone();
+                Self::refine_null_condition(&while_statement.condition, true, context);
+                context.scopes.push(BTreeMap::new());
+                self.resolve_statement(&while_statement.body, context);
+                context.scopes.pop();
+                context.scopes = merge_null_scopes(&before_loop, true, &context.scopes, true);
+            }
             StatementKind::For(for_statement) => {
                 let before_loop = context.scopes.clone();
                 context.scopes.push(BTreeMap::new());
@@ -3133,6 +3159,11 @@ impl Resolver<'_> {
                 None,
                 None,
             ),
+            ExpressionKind::Switch { scrutinee, arms } => (
+                self.resolve_switch(scrutinee, arms, expected, expression.span, context),
+                None,
+                None,
+            ),
             ExpressionKind::Call { callee, arguments } => {
                 let (info, call) =
                     self.resolve_call(callee, arguments, expected, expression.span, context);
@@ -3281,6 +3312,92 @@ impl Resolver<'_> {
             }
         }
         temporary(json_var_type())
+    }
+
+    fn resolve_switch(
+        &mut self,
+        scrutinee: &Expression,
+        arms: &[ast::SwitchArm],
+        expected: Option<&TypeRef>,
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> ExpressionInfo {
+        let scrutinee_info = self.resolve_expression(scrutinee, None, context);
+        let scrutinee_type = canonical(&scrutinee_info.ty);
+        if arms.is_empty() {
+            self.push(
+                "RES129",
+                "a switch expression requires at least one arm".to_owned(),
+                span,
+            );
+            return error_info();
+        }
+
+        let mut patterns = BTreeSet::new();
+        let mut fallback = None;
+        let mut result_type = expected.cloned();
+        for (index, arm) in arms.iter().enumerate() {
+            match &arm.pattern {
+                ast::SwitchPattern::Fallback => {
+                    if fallback.replace(arm.span).is_some() {
+                        self.push(
+                            "RES129",
+                            "a switch expression can contain only one `else` arm".to_owned(),
+                            arm.span,
+                        );
+                    }
+                    if index + 1 != arms.len() {
+                        self.push(
+                            "RES129",
+                            "the `else` switch arm must be last".to_owned(),
+                            arm.span,
+                        );
+                    }
+                }
+                ast::SwitchPattern::Literal(literal) => {
+                    if !matches!(
+                        literal.kind,
+                        LiteralKind::Integer | LiteralKind::Character | LiteralKind::Boolean
+                    ) {
+                        self.push(
+                            "RES129",
+                            "switch patterns currently support integer, character, and boolean literals"
+                                .to_owned(),
+                            arm.span,
+                        );
+                    }
+                    let pattern_type =
+                        literal_type(literal.kind, &literal.text, Some(&scrutinee_type));
+                    self.require_exact(&scrutinee_type, &pattern_type, arm.span, "switch pattern");
+                    let key = format!("{:?}:{}", literal.kind, literal.text);
+                    if !patterns.insert(key) {
+                        self.push(
+                            "RES129",
+                            format!("duplicate switch pattern `{}`", literal.text),
+                            arm.span,
+                        );
+                    }
+                }
+            }
+
+            let actual = self.resolve_expression(&arm.value, result_type.as_ref(), context);
+            if let Some(result_type) = &result_type {
+                self.require_exact(result_type, &actual.ty, arm.value.span, "switch arm");
+            } else {
+                result_type = Some(canonical(&actual.ty));
+            }
+        }
+        if fallback.is_none() {
+            self.push(
+                "RES129",
+                "a switch expression requires a final `else` arm".to_owned(),
+                span,
+            );
+        }
+        ExpressionInfo {
+            ty: result_type.unwrap_or(TypeRef::Error),
+            category: ValueCategory::Temporary,
+        }
     }
 
     fn resolve_value_name(
@@ -10488,6 +10605,12 @@ fn source_uses_exceptions(source: &SourceFile) -> bool {
             ExpressionKind::Binary { left, right, .. } => {
                 expression_uses_exceptions(left) || expression_uses_exceptions(right)
             }
+            ExpressionKind::Switch { scrutinee, arms } => {
+                expression_uses_exceptions(scrutinee)
+                    || arms
+                        .iter()
+                        .any(|arm| expression_uses_exceptions(&arm.value))
+            }
             ExpressionKind::Call { callee, arguments } => {
                 expression_uses_exceptions(callee)
                     || arguments.iter().any(expression_uses_exceptions)
@@ -10544,6 +10667,10 @@ fn source_uses_exceptions(source: &SourceFile) -> bool {
                         .else_branch
                         .as_deref()
                         .is_some_and(statement_uses_exceptions)
+            }
+            StatementKind::While(statement) => {
+                expression_uses_exceptions(&statement.condition)
+                    || statement_uses_exceptions(&statement.body)
             }
             StatementKind::For(statement) => {
                 let clause_uses_exceptions = match &statement.clause {

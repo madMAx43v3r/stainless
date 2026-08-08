@@ -57,6 +57,53 @@ impl<T> std::ops::DerefMut for ClassBase<T> {
 #[doc(hidden)]
 pub const CRATE_SOURCE_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
+/// Operating-system entropy exposed to generated Stainless code.
+pub struct Random;
+
+impl Random {
+    /// Maximum allocation accepted by [`Self::bytes`].
+    pub const MAX_BYTES: usize = 1024 * 1024;
+
+    /// Returns `length` bytes from the operating system's random source.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RandomError`] when `length` exceeds [`Self::MAX_BYTES`] or
+    /// the operating system cannot provide entropy.
+    pub fn bytes(length: usize) -> Result<Vec<u8>, RandomError> {
+        if length > Self::MAX_BYTES {
+            return Err(RandomError::new(format!(
+                "requested {length} random bytes, maximum is {}",
+                Self::MAX_BYTES
+            )));
+        }
+        let mut bytes = vec![0; length];
+        getrandom::fill(&mut bytes)
+            .map_err(|error| RandomError::new(format!("randomness unavailable: {error}")))?;
+        Ok(bytes)
+    }
+}
+
+/// Failure to obtain a bounded random-byte buffer from the operating system.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RandomError {
+    message: String,
+}
+
+impl RandomError {
+    fn new(message: String) -> Self {
+        Self { message }
+    }
+}
+
+impl fmt::Display for RandomError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for RandomError {}
+
 /// Invokes `callback` with a shared map value when `key` exists.
 ///
 /// This confines the borrow to one non-escaping callback instead of exposing
@@ -1650,6 +1697,33 @@ impl Var {
         unsigned_integer(self.js_number(), 128)
     }
 
+    /// Converts a JSON unsigned integer or decimal string to `u128` without
+    /// floating-point coercion.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JsonError`] for other JSON kinds, fractional/negative input,
+    /// or values outside the `u128` range.
+    pub fn to_u128_exact(&self) -> Result<u128, JsonError> {
+        let source = match &self.0 {
+            VarRepr::Number(value) => value.to_string(),
+            VarRepr::String(value) => value.clone(),
+            _ => {
+                return Err(JsonError::mutation(
+                    "exact u128 conversion requires a number or decimal string",
+                ));
+            }
+        };
+        if source.is_empty() || !source.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(JsonError::mutation(
+                "exact u128 conversion requires an unsigned decimal integer",
+            ));
+        }
+        source
+            .parse::<u128>()
+            .map_err(|error| JsonError::mutation(format!("u128 conversion failed: {error}")))
+    }
+
     /// Converts through JavaScript's numeric coercion and then to `usize`.
     #[must_use]
     pub fn to_usize(&self) -> usize {
@@ -2041,11 +2115,22 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        BigEndian, Fs, LittleEndian, MultiMap, PositionedFile, Var, btree_map_retain,
+        BigEndian, Fs, LittleEndian, MultiMap, PositionedFile, Random, Var, btree_map_retain,
         btree_map_retain_keys, btree_map_with_first_after, btree_map_with_first_in_range,
         btree_map_with_last_before, btree_map_with_last_in_range, btree_map_with_range,
         vec_copy_range, vec_with_range,
     };
+
+    #[test]
+    fn random_bytes_are_bounded_and_have_the_requested_length() {
+        assert!(Random::bytes(0).expect("empty random buffer").is_empty());
+        assert_eq!(
+            Random::bytes(32).expect("operating-system entropy").len(),
+            32
+        );
+        let error = Random::bytes(Random::MAX_BYTES + 1).expect_err("oversized request");
+        assert!(error.to_string().contains("maximum"));
+    }
 
     #[test]
     fn vector_ranges_are_checked_and_non_allocating() {
@@ -2375,6 +2460,26 @@ mod tests {
             Var::array([Var::from(1), Var::null(), Var::from("x")]).to_string_value(),
             "1,,x"
         );
+    }
+
+    #[test]
+    fn exact_u128_conversion_preserves_wapi_decimal_amounts() {
+        let maximum = u128::MAX.to_string();
+        assert_eq!(
+            Var::from(maximum.clone())
+                .to_u128_exact()
+                .expect("decimal string"),
+            u128::MAX
+        );
+        assert_eq!(
+            Var::parse(&maximum)
+                .expect("arbitrary precision JSON number")
+                .to_u128_exact()
+                .expect("exact JSON number"),
+            u128::MAX
+        );
+        assert!(Var::from("1.5").to_u128_exact().is_err());
+        assert!(Var::from("-1").to_u128_exact().is_err());
     }
 
     #[test]

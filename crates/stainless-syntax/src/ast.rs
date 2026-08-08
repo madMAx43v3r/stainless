@@ -85,6 +85,7 @@ ast_node!(TryStatement, TryStatement);
 ast_node!(CatchClause, CatchClause);
 ast_node!(IfStatement, IfStatement);
 ast_node!(ElseClause, ElseClause);
+ast_node!(WhileStatement, WhileStatement);
 ast_node!(ForStatement, ForStatement);
 ast_node!(RangeForClause, RangeForClause);
 ast_node!(ClassicForClause, ClassicForClause);
@@ -98,6 +99,9 @@ ast_node!(ParenthesizedExpression, ParenthesizedExpression);
 ast_node!(PrefixExpression, PrefixExpression);
 ast_node!(PostfixExpression, PostfixExpression);
 ast_node!(BinaryExpression, BinaryExpression);
+ast_node!(SwitchExpression, SwitchExpression);
+ast_node!(SwitchArm, SwitchArm);
+ast_node!(SwitchPattern, SwitchPattern);
 ast_node!(CallExpression, CallExpression);
 ast_node!(MacroCallExpression, MacroCallExpression);
 ast_node!(ArgumentList, ArgumentList);
@@ -241,6 +245,7 @@ pub enum Statement {
     Throw(ThrowStatement),
     Try(TryStatement),
     If(IfStatement),
+    While(WhileStatement),
     For(ForStatement),
     Break(BreakStatement),
     Continue(ContinueStatement),
@@ -259,6 +264,7 @@ impl AstNode for Statement {
                 | SyntaxKind::ThrowStatement
                 | SyntaxKind::TryStatement
                 | SyntaxKind::IfStatement
+                | SyntaxKind::WhileStatement
                 | SyntaxKind::ForStatement
                 | SyntaxKind::BreakStatement
                 | SyntaxKind::ContinueStatement
@@ -276,6 +282,7 @@ impl AstNode for Statement {
             SyntaxKind::ThrowStatement => ThrowStatement::cast(syntax).map(Self::Throw),
             SyntaxKind::TryStatement => TryStatement::cast(syntax).map(Self::Try),
             SyntaxKind::IfStatement => IfStatement::cast(syntax).map(Self::If),
+            SyntaxKind::WhileStatement => WhileStatement::cast(syntax).map(Self::While),
             SyntaxKind::ForStatement => ForStatement::cast(syntax).map(Self::For),
             SyntaxKind::BreakStatement => BreakStatement::cast(syntax).map(Self::Break),
             SyntaxKind::ContinueStatement => ContinueStatement::cast(syntax).map(Self::Continue),
@@ -296,6 +303,7 @@ impl AstNode for Statement {
             Self::Throw(node) => node.syntax(),
             Self::Try(node) => node.syntax(),
             Self::If(node) => node.syntax(),
+            Self::While(node) => node.syntax(),
             Self::For(node) => node.syntax(),
             Self::Break(node) => node.syntax(),
             Self::Continue(node) => node.syntax(),
@@ -355,6 +363,7 @@ pub enum Expression {
     Prefix(PrefixExpression),
     Postfix(PostfixExpression),
     Binary(BinaryExpression),
+    Switch(SwitchExpression),
     Call(CallExpression),
     MacroCall(MacroCallExpression),
     Aggregate(AggregateExpression),
@@ -377,6 +386,7 @@ impl AstNode for Expression {
                 | SyntaxKind::PrefixExpression
                 | SyntaxKind::PostfixExpression
                 | SyntaxKind::BinaryExpression
+                | SyntaxKind::SwitchExpression
                 | SyntaxKind::CallExpression
                 | SyntaxKind::MacroCallExpression
                 | SyntaxKind::AggregateExpression
@@ -400,6 +410,7 @@ impl AstNode for Expression {
             SyntaxKind::PrefixExpression => PrefixExpression::cast(syntax).map(Self::Prefix),
             SyntaxKind::PostfixExpression => PostfixExpression::cast(syntax).map(Self::Postfix),
             SyntaxKind::BinaryExpression => BinaryExpression::cast(syntax).map(Self::Binary),
+            SyntaxKind::SwitchExpression => SwitchExpression::cast(syntax).map(Self::Switch),
             SyntaxKind::CallExpression => CallExpression::cast(syntax).map(Self::Call),
             SyntaxKind::MacroCallExpression => {
                 MacroCallExpression::cast(syntax).map(Self::MacroCall)
@@ -430,6 +441,7 @@ impl AstNode for Expression {
             Self::Prefix(node) => node.syntax(),
             Self::Postfix(node) => node.syntax(),
             Self::Binary(node) => node.syntax(),
+            Self::Switch(node) => node.syntax(),
             Self::Call(node) => node.syntax(),
             Self::MacroCall(node) => node.syntax(),
             Self::Aggregate(node) => node.syntax(),
@@ -1040,6 +1052,18 @@ impl ElseClause {
     }
 }
 
+impl WhileStatement {
+    #[must_use]
+    pub fn condition(&self) -> Option<Expression> {
+        expression_children(self.syntax()).next()
+    }
+
+    #[must_use]
+    pub fn body(&self) -> Option<Statement> {
+        self.syntax().children().find_map(Statement::cast)
+    }
+}
+
 impl ForStatement {
     #[must_use]
     pub fn clause(&self) -> Option<ForClause> {
@@ -1199,6 +1223,40 @@ impl BinaryExpression {
     #[must_use]
     pub fn operator_token(&self) -> Option<SyntaxToken> {
         direct_tokens(self.syntax()).find(|token| is_binary_operator(token.kind()))
+    }
+}
+
+impl SwitchExpression {
+    #[must_use]
+    pub fn scrutinee(&self) -> Option<Expression> {
+        expression_children(self.syntax()).next()
+    }
+
+    #[must_use]
+    pub fn arms(&self) -> AstChildren<SwitchArm> {
+        children(self.syntax())
+    }
+}
+
+impl SwitchArm {
+    #[must_use]
+    pub fn pattern(&self) -> Option<SwitchPattern> {
+        child(self.syntax())
+    }
+
+    #[must_use]
+    pub fn value(&self) -> Option<Expression> {
+        expression_children(self.syntax()).next()
+    }
+}
+
+impl SwitchPattern {
+    #[must_use]
+    pub fn token(&self) -> Option<SyntaxToken> {
+        direct_tokens(self.syntax()).find(|token| {
+            token.kind().is_literal()
+                || (token.kind() == SyntaxKind::Identifier && token.text() == "_")
+        })
     }
 }
 

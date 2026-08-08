@@ -27,6 +27,8 @@ fn standard_registry_contains_builtin_types_in_path_order() {
             "rust::stainless_runtime::BigEndian",
             "rust::stainless_runtime::JsonError",
             "rust::stainless_runtime::LittleEndian",
+            "rust::stainless_runtime::Random",
+            "rust::stainless_runtime::RandomError",
             "rust::stainless_runtime::Var",
             "rust::std::fs",
             "rust::std::fs::File",
@@ -35,6 +37,35 @@ fn standard_registry_contains_builtin_types_in_path_order() {
             "rust::std::string::FromUtf8Error",
         ]
     );
+}
+
+#[test]
+fn random_bytes_have_one_bounded_fallible_binding() {
+    let bindings = standard_bindings().unwrap();
+    let random = bindings
+        .type_by_path("rust::stainless_runtime::Random")
+        .unwrap();
+    let call = random
+        .find_callable(CallStyle::AssociatedFunction, "bytes", &[TypeRef::Usize])
+        .unwrap();
+
+    assert_eq!(
+        call.return_type,
+        TypeRef::native("rust::Vec", vec![TypeRef::U8])
+    );
+    assert_eq!(
+        call.rust_result_error,
+        Some(TypeRef::native(
+            "rust::stainless_runtime::RandomError",
+            vec![]
+        ))
+    );
+    assert_eq!(random.callables.len(), 1);
+
+    let error = bindings
+        .type_by_path("rust::stainless_runtime::RandomError")
+        .unwrap();
+    assert_eq!(error.error_format, Some(NativeErrorFormat::Display));
 }
 
 #[test]
@@ -989,11 +1020,18 @@ fn var_exposes_checked_shared_mutation_methods() {
     let set_field = var_binding
         .find_callable(CallStyle::Method, "set", &[string_ref, var])
         .expect("var objects expose dynamic member set");
-    assert_eq!(set_field.rust_result_error, Some(json_error));
+    assert_eq!(set_field.rust_result_error, Some(json_error.clone()));
     assert!(matches!(
         &set_field.lowering,
         RustLowering::Method { rust_name } if rust_name == "set_field"
     ));
+
+    let exact_u128 = var_binding
+        .find_callable(CallStyle::Method, "to_u128_exact", &[])
+        .expect("var exposes exact WAPI amount conversion");
+    assert_eq!(exact_u128.receiver, Some(Receiver::Shared));
+    assert_eq!(exact_u128.return_type, TypeRef::U128);
+    assert_eq!(exact_u128.rust_result_error, Some(json_error.clone()));
 
     let bytes_ref = TypeRef::shared_ref(TypeRef::native("rust::Vec", vec![TypeRef::U8]));
     let parse_bytes = var_binding

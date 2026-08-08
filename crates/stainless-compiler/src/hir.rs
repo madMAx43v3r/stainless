@@ -375,6 +375,15 @@ pub enum Statement {
         /// Optional false branch.
         else_branch: Option<Box<Statement>>,
     },
+    /// A condition-controlled loop.
+    While {
+        /// Generated Rust loop label used by `break`, `continue`, and nested try blocks.
+        label: String,
+        /// Boolean loop condition.
+        condition: Expression,
+        /// Repeated block.
+        body: Block,
+    },
     /// A three-clause loop.
     ClassicFor {
         /// Generated Rust loop label used by nested try blocks.
@@ -530,6 +539,11 @@ pub enum Expression {
         kind: LiteralKind,
         /// Source spelling.
         text: String,
+    },
+    /// A value-selecting switch expression.
+    Switch {
+        scrutinee: Box<Expression>,
+        arms: Vec<SwitchArm>,
     },
     /// JSON `null`.
     JsonNull,
@@ -875,6 +889,20 @@ pub enum Expression {
         /// Destination type.
         target: Type,
     },
+}
+
+/// One lowered switch pattern.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SwitchPattern {
+    Literal { kind: LiteralKind, text: String },
+    Fallback,
+}
+
+/// One lowered switch arm.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SwitchArm {
+    pub pattern: SwitchPattern,
+    pub value: Expression,
 }
 
 /// Supported Rust formatting macro with statically defined Stainless syntax.

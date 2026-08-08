@@ -75,6 +75,8 @@ enum RawToken {
     ReturnKw,
     #[token("if")]
     IfKw,
+    #[token("switch")]
+    SwitchKw,
     #[token("else")]
     ElseKw,
     #[token("for")]
@@ -137,6 +139,8 @@ enum RawToken {
     EqEq,
     #[token("!=")]
     NotEq,
+    #[token("=>")]
+    FatArrow,
     #[token("&&")]
     AndAnd,
     #[token("||")]
@@ -237,6 +241,7 @@ impl From<RawToken> for SyntaxKind {
             RawToken::UseKw => Self::UseKw,
             RawToken::ReturnKw => Self::ReturnKw,
             RawToken::IfKw => Self::IfKw,
+            RawToken::SwitchKw => Self::SwitchKw,
             RawToken::ElseKw => Self::ElseKw,
             RawToken::ForKw => Self::ForKw,
             RawToken::ConstKw => Self::ConstKw,
@@ -274,6 +279,7 @@ impl From<RawToken> for SyntaxKind {
             RawToken::GreaterEq => Self::GreaterEq,
             RawToken::EqEq => Self::EqEq,
             RawToken::NotEq => Self::NotEq,
+            RawToken::FatArrow => Self::FatArrow,
             RawToken::Plus => Self::Plus,
             RawToken::Minus => Self::Minus,
             RawToken::Star => Self::Star,

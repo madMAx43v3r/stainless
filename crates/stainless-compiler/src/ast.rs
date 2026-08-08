@@ -333,6 +333,8 @@ pub enum StatementKind {
     Try(TryStatement),
     /// Conditional control flow.
     If(IfStatement),
+    /// Condition-controlled iteration.
+    While(WhileStatement),
     /// Classic or range iteration.
     For(ForStatement),
     /// `break;`.
@@ -400,6 +402,15 @@ pub struct IfStatement {
     pub then_branch: Box<Statement>,
     /// Statement selected when the condition is false.
     pub else_branch: Option<Box<Statement>>,
+}
+
+/// A `while` statement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WhileStatement {
+    /// Condition checked before every iteration.
+    pub condition: Expression,
+    /// Repeated statement.
+    pub body: Box<Statement>,
 }
 
 /// A `for` statement.
@@ -471,6 +482,23 @@ pub struct Expression {
     pub span: Span,
 }
 
+/// One non-binding pattern accepted by a switch expression.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SwitchPattern {
+    /// A scalar or string literal.
+    Literal(Literal),
+    /// The exhaustive `else` fallback.
+    Fallback,
+}
+
+/// One pattern and value branch of a switch expression.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SwitchArm {
+    pub pattern: SwitchPattern,
+    pub value: Expression,
+    pub span: Span,
+}
+
 /// One explicit lambda capture.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LambdaCapture {
@@ -531,6 +559,13 @@ pub enum ExpressionKind {
         operator: BinaryOperator,
         /// Right operand.
         right: Box<Expression>,
+    },
+    /// Select one value using literal patterns and an exhaustive `_` arm.
+    Switch {
+        /// Value compared against each literal pattern.
+        scrutinee: Box<Expression>,
+        /// Arms in source order.
+        arms: Vec<SwitchArm>,
     },
     /// A function or constructor call.
     Call {

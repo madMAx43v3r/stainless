@@ -424,6 +424,9 @@ fn lower_statement(statement: cst::Statement) -> Statement {
                 else_branch,
             })
         }
+        cst::Statement::While(while_statement) => {
+            lower_while_statement(&while_statement, statement_span)
+        }
         cst::Statement::For(for_statement) => {
             let clause = for_statement
                 .clause()
@@ -451,6 +454,19 @@ fn lower_statement(statement: cst::Statement) -> Statement {
         kind,
         span: statement_span,
     }
+}
+
+fn lower_while_statement(statement: &cst::WhileStatement, statement_span: Span) -> StatementKind {
+    let condition = statement
+        .condition()
+        .map_or_else(|| error_expression(statement_span), lower_expression);
+    let body = statement
+        .body()
+        .map_or_else(|| error_statement(statement_span), lower_statement);
+    StatementKind::While(ast::WhileStatement {
+        condition,
+        body: Box::new(body),
+    })
 }
 
 fn lower_local(local: &cst::LocalDeclaration) -> ast::LocalDeclaration {
@@ -541,6 +557,40 @@ fn lower_expression(expression: cst::Expression) -> Expression {
             lower_postfix(&postfix).unwrap_or(ExpressionKind::Error)
         }
         cst::Expression::Binary(binary) => lower_binary(&binary).unwrap_or(ExpressionKind::Error),
+        cst::Expression::Switch(switch) => {
+            let Some(scrutinee) = switch.scrutinee() else {
+                return error_expression(expression_span);
+            };
+            ExpressionKind::Switch {
+                scrutinee: Box::new(lower_expression(scrutinee)),
+                arms: switch
+                    .arms()
+                    .map(|arm| {
+                        let pattern = arm.pattern().and_then(|pattern| pattern.token()).map_or(
+                            ast::SwitchPattern::Fallback,
+                            |token| {
+                                if token.kind() == SyntaxKind::ElseKw {
+                                    ast::SwitchPattern::Fallback
+                                } else {
+                                    literal_from_token(&token).map_or(
+                                        ast::SwitchPattern::Fallback,
+                                        ast::SwitchPattern::Literal,
+                                    )
+                                }
+                            },
+                        );
+                        let value = arm
+                            .value()
+                            .map_or_else(|| error_expression(span(&arm)), lower_expression);
+                        ast::SwitchArm {
+                            pattern,
+                            value,
+                            span: span(&arm),
+                        }
+                    })
+                    .collect(),
+            }
+        }
         cst::Expression::Call(call) => {
             let Some(callee) = call.callee() else {
                 return error_expression(expression_span);
@@ -695,6 +745,10 @@ fn lower_expression(expression: cst::Expression) -> Expression {
 
 fn lower_literal(literal: &cst::LiteralExpression) -> Option<ExpressionKind> {
     let token = literal.literal_token()?;
+    literal_from_token(&token).map(ExpressionKind::Literal)
+}
+
+fn literal_from_token(token: &stainless_syntax::SyntaxToken) -> Option<ast::Literal> {
     let kind = match token.kind() {
         SyntaxKind::Integer => LiteralKind::Integer,
         SyntaxKind::Float => LiteralKind::Float,
@@ -704,10 +758,10 @@ fn lower_literal(literal: &cst::LiteralExpression) -> Option<ExpressionKind> {
         SyntaxKind::NullKw => LiteralKind::Null,
         _ => return None,
     };
-    Some(ExpressionKind::Literal(ast::Literal {
+    Some(ast::Literal {
         kind,
         text: token.text().to_owned(),
-    }))
+    })
 }
 
 fn lower_prefix(prefix: &cst::PrefixExpression) -> Option<ExpressionKind> {
