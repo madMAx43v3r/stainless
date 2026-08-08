@@ -1,0 +1,291 @@
+// Complete Stainless entry point for the MMX poker dealer.
+
+use rust::{Map, String, eprintln, println};
+use rust::std::fs;
+use rust::stainless_http::{Client, Server};
+use kvstore::{JsonTable1};
+
+namespace poker {
+
+String state_path(const String& directory, const String& name)
+{
+    String path = directory.clone();
+    if (!path.ends_with("/")) {
+        path.push_str("/");
+    }
+    path.push_str(name);
+    return path;
+}
+
+void initialize_chain_store(const JsonTable1<String>& store)
+    throws stainless::Exception
+{
+    if (store.current_version() != 0) {
+        return;
+    }
+    var existing = null;
+    if (store.find("chain", existing)) {
+        throw ConfigError{stainless::Exception(
+            "uncommitted chain state exists at the baseline version")};
+    }
+    store.insert("chain", empty_chain());
+    if (!store.commit(1)) {
+        throw ConfigError{stainless::Exception(
+            "kvstore refused the empty chain baseline")};
+    }
+}
+
+void append_checkpoint(var& chain, u64 height, const String& hash)
+    throws stainless::JsonError
+{
+    chain.checkpoints.push({height: decimal(height), hash: String(hash)});
+    for (; chain.checkpoints.len() > 256;) {
+        chain.checkpoints.remove(0usize);
+    }
+}
+
+void save_chain(const JsonTable1<String>& store, u64 height, const var& chain)
+    throws stainless::Exception
+{
+    if (height >= 4294967295) {
+        throw ConfigError{stainless::Exception(
+            "chain height exceeds the kvstore version range")};
+    }
+    u32 version = u32(height + 1);
+    store.insert("chain", chain.clone());
+    if (store.current_version() != version && !store.commit(version)) {
+        throw ConfigError{stainless::Exception(
+            "kvstore refused the chain snapshot version")};
+    }
+}
+
+void scale_tables(const Client& node, const var& config, const var& chain,
+                  var& pending, const JsonTable1<String>& pending_store)
+    throws stainless::Exception
+{
+    if (u64(chain.synced) == 0) {
+        return;
+    }
+    u64 deployed = 0;
+    u64 limit = u64(config.max_deploy_per_sync);
+    for (usize i = 0; i < config.templates.len() && deployed < limit;) {
+        if (scale_template(node, config, chain, pending, pending_store,
+                           config.templates[i])) {
+            deployed += 1;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+bool synchronize(const Client& node, const Server& server, const var& config,
+                 const JsonTable1<String>& chain_store,
+                 const JsonTable1<String>& pending_store,
+                 var& chain, var& pending, const Map<u64, var>& sessions)
+    throws stainless::Exception
+{
+    var info = node_get(node, "/wapi/node/info");
+    u64 tip_height = u64(info.height);
+    var old_chain = chain;
+    String pending_before = pending.to_json();
+    bool rolled_back = rollback_if_needed(node, chain_store, tip_height, chain);
+    if (rolled_back) {
+        recover_reorg_deployments(old_chain, chain, pending, tip_height);
+    }
+    bool new_tip = tip_height != integer(chain.height) || String(chain.hash).len() == 0;
+    chain.time = decimal(u64(info.time));
+    chain.synced = info.is_synced;
+
+    if (new_tip || rolled_back) {
+        var header = node_get(node, header_path(tip_height));
+        chain.height = decimal(tip_height);
+        chain.hash = header.hash;
+        refresh_tables(node, chain);
+        merge_pending(node, config, chain, pending);
+        append_checkpoint(chain, tip_height, String(header.hash));
+        save_chain(chain_store, tip_height, chain);
+        if (pending.to_json() != pending_before) {
+            save_pending(pending_store, pending);
+        }
+        broadcast_authenticated(server, sessions, {
+            type: "chain",
+            reorg: rolled_back,
+            state: public_chain(chain),
+        });
+    }
+    scale_tables(node, config, chain, pending, pending_store);
+    return rolled_back;
+}
+
+void send_ws_error(const Server& server, u64 connection_id,
+                   const String& code, const String& message)
+{
+    ws_send(server, connection_id, {
+        type: "error",
+        code: String(code),
+        message: String(message),
+    });
+}
+
+void broadcast_authenticated(const Server& server, const Map<u64, var>& sessions,
+                             const var& message)
+    throws stainless::JsonError
+{
+    for (const auto& [connection_id, session] : sessions) {
+        if (u64(session.authenticated) != 0) {
+            ws_send(server, connection_id, message);
+        }
+    }
+}
+
+void broadcast_table(const Server& server, const Map<u64, var>& sessions,
+                     const String& table,
+                     const var& message) throws stainless::JsonError
+{
+    for (const auto& [connection_id, session] : sessions) {
+        if (u64(session.authenticated) != 0 &&
+            String(session.table) == table) {
+            ws_send(server, connection_id, message);
+        }
+    }
+}
+
+void dispatch_event(const Client& node, const Server& server, const var& config,
+                    const var& chain, const var& pending, const var& event,
+                    Map<u64, var>& sessions, var& inbox,
+                    const var& hands) throws stainless::Exception
+{
+    String kind = String(event.type);
+    u64 connection_id = u64(event.connection_id);
+    if (kind == "http") {
+        handle_http(server, event, config, chain, pending);
+        return;
+    }
+    if (kind == "ws_open") {
+        var session = open_session(server, config, connection_id,
+                                   integer(chain.time));
+        sessions.insert(connection_id, session);
+        return;
+    }
+    if (kind == "ws_close") {
+        sessions.remove(connection_id);
+        return;
+    }
+    if (kind == "server_error") {
+        eprintln!("HTTP server error: {}", String(event.message));
+        return;
+    }
+    var session = null;
+    bool found = sessions.with(connection_id, [&session](const var& value) {
+        session = value.clone();
+    });
+    if (kind != "ws_message" || !found) {
+        send_ws_error(server, connection_id, "session_not_found", "unknown session");
+        return;
+    }
+
+    var message = var::parse(String(event.text));
+    String message_kind = String(message.type);
+    if (message_kind == "commit" || message_kind == "reveal" ||
+        message_kind == "action" || message_kind == "show" ||
+        message_kind == "muck" || message_kind == "continue" ||
+        message_kind == "leave") {
+        String error = submission_error(node, hands, session, message);
+        if (error.len() != 0) {
+            send_ws_error(server, connection_id, "submission_rejected", error);
+            return;
+        }
+    }
+    handle_session_message(node, server, config, chain, connection_id, session,
+                           message, inbox, integer(chain.time));
+    sessions.insert(connection_id, session);
+    if (message_kind == "subscribe") {
+        var hand = find_hand(hands, String(session.table));
+        if (hand != null) {
+            ws_send(server, connection_id, hand_event(hand));
+        }
+    }
+}
+
+void relay_hand_events(const Server& server, const Map<u64, var>& sessions,
+                       const var& events)
+    throws stainless::JsonError
+{
+    for (usize i = 0; i < events.len(); i += 1) {
+        var event = events[i];
+        broadcast_table(server, sessions, String(event.table), event);
+    }
+}
+
+void run() throws stainless::Exception
+{
+    var config = var::parse_file("poker.json");
+    validate_config(config);
+    String data_dir = String(config.data_dir);
+    fs::create_dir_all(data_dir);
+
+    JsonTable1<String> chain_store = JsonTable1<String>(
+        state_path(data_dir, "chain.log"), kvstore::codecs::string_key());
+    JsonTable1<String> pending_store = JsonTable1<String>(
+        state_path(data_dir, "pending.log"), kvstore::codecs::string_key());
+    JsonTable1<String> hands_store = JsonTable1<String>(
+        state_path(data_dir, "hands.log"), kvstore::codecs::string_key());
+    initialize_chain_store(chain_store);
+
+    var chain = load_state(chain_store, "chain", empty_chain());
+    var pending = load_state(pending_store, "pending", []);
+    var hands = load_state(hands_store, "hands", empty_hands());
+    var inbox = {};
+    Map<u64, var> sessions;
+
+    u64 request_timeout = integer(config.request_timeout_ms);
+    Client node = http::connect(String(config.node_url), String(config.api_token),
+                                request_timeout);
+    Server server = http::listen(String(config.listen), "/v1/ws",
+                                 request_timeout, 1048576);
+    println!("MMX poker dealer listening on {}", http::local_address(server));
+
+    u64 elapsed_ms = integer(config.poll_interval_ms);
+    for (; true;) {
+        if (elapsed_ms >= integer(config.poll_interval_ms)) {
+            try {
+                bool rolled_back = synchronize(
+                    node, server, config, chain_store, pending_store,
+                    chain, pending, sessions);
+                if (rolled_back) {
+                    reset_hands(hands_store, hands, inbox);
+                }
+            } catch (const stainless::Exception& error) {
+                eprintln!("node synchronization failed: {}", error.message);
+            }
+            elapsed_ms = 0;
+        }
+
+        try {
+            var event = http::receive(server, 100);
+            if (event != null) {
+                dispatch_event(node, server, config, chain, pending, event,
+                               sessions, inbox, hands);
+            }
+        } catch (const stainless::Exception& error) {
+            eprintln!("player request failed: {}", error.message);
+        }
+
+        try {
+            var events = tick_hands(node, config, chain, hands_store, hands,
+                                    inbox, integer(chain.time));
+            relay_hand_events(server, sessions, events);
+        } catch (const stainless::Exception& error) {
+            eprintln!("hand coordinator failed: {}", error.message);
+        }
+        elapsed_ms += 100;
+    }
+}
+
+} // namespace poker
+
+i32 main() throws stainless::Exception
+{
+    poker::run();
+    return 0;
+}

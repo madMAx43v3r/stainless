@@ -1,0 +1,139 @@
+// Stainless policy tests for the dealer and hand coordinator.
+
+use rust::String;
+
+bool test_contract_hex()
+{
+    return crypto::uint_hex(0) == "0x0" &&
+        crypto::uint_hex(15) == "0xf" &&
+        crypto::uint_hex(16) == "0x10" &&
+        crypto::uint_hex(340282366920938463463374607431768211455) ==
+            "0xffffffffffffffffffffffffffffffff";
+}
+
+bool test_payout_and_public_integer_encoding() throws stainless::Exception
+{
+    var hand = {
+        table: "mmx1table",
+        hand_id: "9007199254740993",
+        start_height: "9007199254740994",
+        refund_height: "9007199254741095",
+        small_blind: "10",
+        player_timeout: "30",
+        rake_bps: 0,
+        min_rake: "0",
+        checkpoint: "",
+        round: "0",
+        epoch: "0",
+        deadline: "9007199254741195",
+        phase: "continue",
+        players: [
+            {address: "alice", stack: "100", bet: "10", folded: false,
+             payout: null, show: {rank: [1, [14]]}},
+            {address: "bob", stack: "100", bet: "10", folded: true,
+             payout: null, show: null},
+        ],
+        betting: [[], [], [], []],
+        dealer_rake: "0",
+        settlement_height: null,
+    };
+    poker::allocate_payouts(hand);
+    if (poker::amount(hand.players[0].payout) != 110 ||
+        poker::amount(hand.players[1].payout) != 90) {
+        return false;
+    }
+
+    var event = poker::hand_event(hand);
+    String json = event.to_json();
+    return json.contains("\"hand_id\":\"9007199254740993\"") &&
+        json.contains("\"start_height\":\"9007199254740994\"") &&
+        json.contains("\"deadline\":\"9007199254741195\"") &&
+        json.contains("\"stack\":\"100\"") &&
+        json.contains("\"payout\":\"110\"");
+}
+
+bool test_exact_decimal_input() throws stainless::Exception
+{
+    var maximum = "18446744073709551615";
+    if (poker::integer(maximum) != 18446744073709551615) {
+        return false;
+    }
+    var overflow = "18446744073709551616";
+    try {
+        poker::integer(overflow);
+    } catch (const poker::ConfigError& error) {
+        var numeric = 10;
+        try {
+            poker::amount(numeric);
+        } catch (const poker::ConfigError& numeric_error) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool test_contract_betting_encoding() throws stainless::Exception
+{
+    var betting = [[[[1, 2, "4294967297", "signature"]]]];
+    var encoded = poker::contract_betting(betting);
+    return String(encoded[0][0][0][0]) == "0x1" &&
+        String(encoded[0][0][0][1]) == "0x2" &&
+        String(encoded[0][0][0][2]) == "0x100000001";
+}
+
+bool test_available_table_count() throws stainless::JsonError
+{
+    var chain = {tables: [
+        {
+            template_id: "fast",
+            confirmed: true,
+            reachable: false,
+            status: {table_open: true, active_count: 0, waiting_count: 0},
+            config: {max_players: 2},
+        },
+        {
+            template_id: "fast",
+            confirmed: true,
+            reachable: true,
+            status: {table_open: true, active_count: 1, waiting_count: 0},
+            config: {max_players: 2},
+        },
+    ]};
+    var pending = [];
+    if (poker::available_for_template(chain, pending, "fast") != 1) {
+        return false;
+    }
+    chain.tables[1].status.active_count = 2;
+    pending.push({template_id: "fast"});
+    return poker::available_for_template(chain, pending, "fast") == 1;
+}
+
+bool test_reorg_deployments_return_to_pending() throws stainless::Exception
+{
+    var old_chain = {tables: [
+        {address: "mmx1orphan", template_id: "fast"},
+        {address: "mmx1stable", template_id: "slow"},
+    ]};
+    var chain = {tables: [
+        {address: "mmx1stable", template_id: "slow"},
+    ]};
+    var pending = [];
+    poker::recover_reorg_deployments(old_chain, chain, pending, 9007199254740993);
+    return pending.len() == 1 &&
+        String(pending[0].address) == "mmx1orphan" &&
+        String(pending[0].template_id) == "fast" &&
+        poker::integer(pending[0].deployment_height) == 9007199254740993;
+}
+
+i32 main() throws stainless::Exception
+{
+    if (!test_contract_hex() ||
+        !test_payout_and_public_integer_encoding() ||
+        !test_exact_decimal_input() ||
+        !test_contract_betting_encoding() ||
+        !test_available_table_count() ||
+        !test_reorg_deployments_return_to_pending()) {
+        return 1;
+    }
+    return 0;
+}

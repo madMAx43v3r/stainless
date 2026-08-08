@@ -1,0 +1,7 @@
+schema = 1
+name = "poker-test"
+sources = []
+main = "poker_test.stl"
+
+[dependencies]
+poker = ".."

@@ -1,0 +1,13 @@
+schema = 1
+name = "poker"
+sources = [
+    "src/poker.stl",
+    "src/hand.stl",
+]
+main = "src/main.stl"
+
+[dependencies]
+mmx-wallet = "../mmx-wallet"
+stainless-crypto = "../../crates/stainless-crypto"
+stainless-http = "../../crates/stainless-http"
+stainless-kvstore = "../../crates/stainless-kvstore"

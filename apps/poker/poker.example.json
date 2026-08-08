@@ -1,0 +1,28 @@
+{
+  "listen": "127.0.0.1:8088",
+  "node_url": "http://127.0.0.1:11380",
+  "api_token": "replace-with-a-spending-wapi-token",
+  "data_dir": "./poker-data",
+  "poker_binary": "mmx1e4jtzj0u0ntjj5e69nq2hhf9vch6q2fskq875jyznnxyjah4cp3qpkk558",
+  "dealer": "mmx1e4jtzj0u0ntjj5e69nq2hhf9vch6q2fskq875jyznnxyjah4cp3qpkk558",
+  "wallet_index": 0,
+  "poll_interval_ms": "1000",
+  "request_timeout_ms": "10000",
+  "pending_timeout_blocks": "20",
+  "max_deploy_per_sync": 1,
+  "templates": [
+    {
+      "id": "micro-fast-6",
+      "currency": "MMX",
+      "small_blind": "1000",
+      "min_stack_blinds": 20,
+      "max_players": 6,
+      "start_delay": "5",
+      "game_timeout": "100",
+      "player_timeout": "20",
+      "rake_bps": 100,
+      "min_rake": "10",
+      "min_available": 2
+    }
+  ]
+}
