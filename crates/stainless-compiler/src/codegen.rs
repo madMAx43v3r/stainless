@@ -1095,9 +1095,12 @@ impl Emitter {
                 mutable,
                 expression,
             } => {
-                let mutable = mutable.then(|| quote!(mut));
                 let expression = self.expression(expression)?;
-                Ok(quote!(& #mutable #expression))
+                if *mutable {
+                    Ok(quote!(&mut (#expression)))
+                } else {
+                    Ok(quote!(&(#expression)))
+                }
             }
             hir::Expression::Dereference(expression) => {
                 let expression = self.expression(expression)?;

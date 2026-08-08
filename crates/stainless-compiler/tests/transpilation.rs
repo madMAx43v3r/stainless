@@ -271,6 +271,14 @@ i32 use_reference_return(i32 value) {
     return identity_ref(value);
 }
 
+u128 identity_wide(const u128& value) {
+    return value;
+}
+
+u128 borrow_computed_value(const u64 value) {
+    return identity_wide(u128(value));
+}
+
 }
 
 namespace samples {
@@ -690,6 +698,7 @@ fn generated_program_preserves_current_subset_behavior() {
     let greeting = find_name("greeting");
     let borrow_moved_text = find_name("borrow_moved_text");
     let use_reference_return = find_name("use_reference_return");
+    let borrow_computed_value = find_name("borrow_computed_value");
     let reopened_namespace = find_name("reopened_namespace");
     let qualified_definition = find_name("qualified_definition");
     write!(
@@ -716,6 +725,7 @@ fn main() {{
         5
     );
     assert_eq!(__stainless_namespace_samples::{use_reference_return}(17), 17);
+    assert_eq!(__stainless_namespace_samples::{borrow_computed_value}(19), 19u128);
     assert_eq!(__stainless_namespace_samples::{reopened_namespace}(), 23);
     assert_eq!(__stainless_namespace_samples::{qualified_definition}(), 29);
 }}
