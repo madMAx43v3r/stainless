@@ -569,8 +569,12 @@ pub enum Expression {
     },
     /// A value-selecting switch expression.
     Switch {
+        /// Value selected by the patterns.
         scrutinee: Box<Expression>,
+        /// Ordered, non-fallthrough arms.
         arms: Vec<SwitchArm>,
+        /// Whether Rust lowering must borrow an owned `String` as `str`.
+        string_scrutinee: bool,
     },
     /// JSON `null`.
     JsonNull,
@@ -928,8 +932,17 @@ pub enum Expression {
 /// One lowered switch pattern.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SwitchPattern {
-    Literal { kind: LiteralKind, text: String },
+    Literals(Vec<SwitchLiteral>),
     Fallback,
+}
+
+/// One literal within a lowered switch pattern.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SwitchLiteral {
+    /// Broad literal category.
+    pub kind: LiteralKind,
+    /// Exact source spelling.
+    pub text: String,
 }
 
 /// One lowered switch arm.

@@ -12,17 +12,64 @@ static TEMPORARY_INDEX: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
 fn switch_expressions_lower_to_exhaustive_rust_matches() {
-    let source = include_str!("../../../docs/ref/30_switch.stl");
-    let result = transpile(source);
+    let source = format!(
+        "{}\n{}",
+        include_str!("../../../docs/ref/30_switch.stl"),
+        r"usize fallback_string_length(String value) {
+    i32 selected = switch (value) { else => 0 };
+    return value.len() + usize(selected);
+}
+"
+    );
+    let result = transpile(&source);
     assert!(
         result.analysis.diagnostics.is_empty(),
         "{:#?}",
         result.analysis.diagnostics
     );
-    let rust = result.rust.expect("valid switch should emit Rust");
+    let classify = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "classify"])
+        .expect("classify symbol")
+        .mangled_name
+        .clone();
+    let classify_event = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "classify_event"])
+        .expect("classify_event symbol")
+        .mangled_name
+        .clone();
+    let fallback_string_length = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["fallback_string_length"])
+        .expect("fallback_string_length symbol")
+        .mangled_name
+        .clone();
+    let mut rust = result.rust.expect("valid switch should emit Rust");
     assert!(rust.contains("return match"), "{rust}");
+    assert!(rust.contains(".as_str()"), "{rust}");
+    assert!(rust.contains("\"http\" | \"ws_open\""), "{rust}");
     assert!(rust.contains("_ =>"), "{rust}");
-    compile_rust("switch-expression", &rust, CrateKind::Library);
+    write!(
+        rust,
+        "\nfn main() {{ use __stainless_namespace_samples as samples; assert_eq!(samples::{classify}(1), 20); assert_eq!(samples::{classify_event}(&::std::string::String::from(\"http\")), 1); assert_eq!(samples::{classify_event}(&::std::string::String::from(\"server_error\")), 3); assert_eq!(samples::{classify_event}(&::std::string::String::from(\"unknown\")), 0); assert_eq!({fallback_string_length}(::std::string::String::from(\"test\")), 4); }}\n"
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("switch-expression", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .expect("generated switch program should run");
+    assert!(output.status.success(), "{output:?}");
+    remove_temporary_parent(&binary);
 }
 
 #[test]
@@ -1258,13 +1305,15 @@ Derived::Derived(i32 initial_value, const String& label)
 
 struct Defaults {
     Vec<i32> values;
+    i32 offset = 4;
+    Defaults() = default;
 };
 
 i32 constructor_result() {
     Derived value = Derived(7, "abc");
     Defaults defaults;
     defaults.values.push(5);
-    return value.value + i32(value.label.len()) + i32(defaults.values.len());
+    return value.value + i32(value.label.len()) + i32(defaults.values.len()) + defaults.offset;
 }
 
 }
@@ -1287,7 +1336,7 @@ i32 constructor_result() {
     let mut rust = result.rust.expect("constructors should emit Rust");
     write!(
         rust,
-        "\nfn main() {{ assert_eq!(__stainless_namespace_samples::{function}(), 12); }}\n"
+        "\nfn main() {{ assert_eq!(__stainless_namespace_samples::{function}(), 16); }}\n"
     )
     .expect("writing to a String cannot fail");
     let binary = compile_rust("constructors", &rust, CrateKind::Binary);

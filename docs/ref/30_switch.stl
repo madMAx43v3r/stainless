@@ -1,5 +1,8 @@
 // Exhaustive value selection with C++-styled syntax and Rust-like expression
-// semantics. Arms do not fall through, and the final `else` arm is required.
+// semantics. Arms do not fall through, `|` combines literal alternatives, and
+// the final `else` arm is required.
+
+use rust::String;
 
 namespace samples {
 
@@ -9,6 +12,16 @@ i32 classify(u8 value)
         0 => 10,
         1 => 20,
         else => 30,
+    };
+}
+
+i32 classify_event(const String& event)
+{
+    return switch (event) {
+        "http" | "ws_open" => 1,
+        "ws_message" => 2,
+        "ws_close" | "server_error" => 3,
+        else => 0,
     };
 }
 

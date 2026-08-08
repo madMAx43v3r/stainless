@@ -134,8 +134,8 @@ implemented:
 - [`13_range_for.stl`](docs/ref/13_range_for.stl) — shared, mutable, copied,
   and explicitly consumed C++-style range loops.
 - [`14_constructors.stl`](docs/ref/14_constructors.stl) — user-defined
-  constructors, base/member initializer lists, deleted constructors, and
-  synthesized struct defaults.
+  constructors, base/member initializer lists, default member initializers,
+  defaulted/deleted constructors, and synthesized struct defaults.
 - [`15_checked_exception_subset.stl`](docs/ref/15_checked_exception_subset.stl)
   — the currently compiler-supported checked exception, throwing constructor,
   typed catch, base catch, and bare-rethrow subset.
@@ -184,7 +184,8 @@ implemented:
 - [`29_class_inheritance.stl`](docs/ref/29_class_inheritance.stl) — single
   class inheritance, explicit base calls, and owner upcasts.
 - [`30_switch.stl`](docs/ref/30_switch.stl) — exhaustive, non-fallthrough
-  `switch` expressions with literal arms and a final `else` fallback.
+  `switch` expressions with scalar and string literal arms, `|` alternatives,
+  and a final `else` fallback.
 - [`31_while.stl`](docs/ref/31_while.stl) — condition-controlled loops with
   `break` and `continue`.
 - [`32_arrays.stl`](docs/ref/32_arrays.stl) — compiler-native fixed-size
@@ -322,12 +323,15 @@ The first compiler uses the following conservative grammar policy:
   field-declaration order. Resource-owning native Rust fields retain their
   ordinary Rust `Drop` behavior.
 - Stainless `switch (value) { pattern => expression, else => fallback }` is an
-  exhaustive expression. It accepts integer, character, and boolean literal
-  patterns, requires the final `else` fallback, never falls through, and lowers
-  directly to a Rust `match`. Binding/destructuring patterns, Rust-style
-  `match`, and `if let` remain deferred. Native `Result` values initially use
-  ordinary non-consuming query methods, compiler-adapted `.unwrap()`,
-  target-typed checked unwrap, or a purpose-built Rust adapter.
+  exhaustive expression. It accepts integer, character, boolean, and string
+  literal patterns; `pattern1 | pattern2` selects one arm for multiple literal
+  alternatives. It requires the final `else` fallback, never falls through,
+  requires every alternative to have the exact scrutinee type, rejects
+  duplicate alternatives, and lowers directly to a Rust `match`.
+  Binding/destructuring patterns, Rust-style `match`, and `if let` remain
+  deferred. Native `Result` values initially use ordinary non-consuming query
+  methods, compiler-adapted `.unwrap()`, target-typed checked unwrap, or a
+  purpose-built Rust adapter.
 
 These restrictions freeze the first parser boundary; accepting more syntax
 requires an explicit semantic and lowering extension rather than permissive
@@ -953,10 +957,13 @@ initializer.
 
 When no constructor prevents it, a default constructor may be synthesized only
 if the struct data base, when present, and every field can themselves be
-default-constructed. Otherwise it is implicitly deleted and a
-default-construction attempt is a compile error. Stainless may use C++-style
-`= delete` syntax to make a constructor unavailable explicitly. Aggregate
-initialization remains valid only when it initializes every required field.
+default-constructed or has a default member initializer. `Type() = default;`
+explicitly requests that same compiler-generated parameterless constructor;
+parameterized constructors cannot be defaulted. Otherwise the constructor is
+implicitly deleted and a default-construction attempt is a compile error.
+Stainless may use C++-style `= delete` syntax to make a constructor unavailable
+explicitly. Aggregate initialization remains valid only when it initializes
+every required field.
 
 User constructors retain C++ declaration and initializer-list syntax:
 

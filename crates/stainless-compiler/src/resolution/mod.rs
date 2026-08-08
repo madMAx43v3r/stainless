@@ -41,6 +41,8 @@ pub struct FieldSymbol {
     pub is_public: bool,
     /// Resolved field type.
     pub ty: TypeRef,
+    /// Default member initializer retained for constructor generation.
+    pub initializer: Option<crate::ast::Expression>,
     /// Source range.
     pub span: Span,
 }
@@ -120,6 +122,8 @@ pub struct ConstructorSymbol {
     pub has_member_declaration: bool,
     /// Whether construction is explicitly or implicitly deleted.
     pub is_deleted: bool,
+    /// Whether source explicitly requested compiler-generated construction.
+    pub is_defaulted: bool,
     /// Whether the compiler synthesized this default constructor.
     pub synthesized: bool,
     /// Base and direct-field construction in representation order.
@@ -133,10 +137,21 @@ pub struct ConstructorFieldInitialization {
     pub rust_name: String,
     /// Field type.
     pub ty: TypeRef,
-    /// Explicit initializer span, absent for implicit default construction.
-    pub source: Option<Span>,
+    /// Source of the arguments used to construct this slot.
+    pub source: ConstructorInitializationSource,
     /// Selected construction operation.
     pub call: ResolvedCall,
+}
+
+/// Syntax source used for one resolved base or field construction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConstructorInitializationSource {
+    /// No source expression; invoke the slot's default constructor.
+    Default,
+    /// An explicit constructor initializer-list entry.
+    Constructor(Span),
+    /// A default member initializer on the field declaration.
+    Field(Span),
 }
 
 /// A resolved function parameter.

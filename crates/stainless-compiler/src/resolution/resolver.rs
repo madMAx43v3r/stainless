@@ -15,12 +15,13 @@ use super::imports::ImportTable;
 use super::mangle;
 use super::{
     BindingResolution, CallTarget, CallbackTarget, ConstructorFieldInitialization, ConstructorId,
-    ConstructorSymbol, ExpressionResolution, FieldSymbol, FunctionId, FunctionSymbol,
-    InterfaceImplementation, Intrinsic, LambdaCaptureMode, NativeCall, NativeCallResultAdaptation,
-    NativeResultException, ParameterSymbol, Resolution, ResolvedCall, ResolvedCallback,
-    ResolvedField, ResolvedLambdaCapture, ResolvedNativeType, ResolvedStaticConstant,
-    ResolvedTraitRequirement, RustErrorMessage, RustResultAdaptation, SemanticModel,
-    StaticConstantSymbol, StructId, StructReceiver, StructSymbol, UserTypeBase, ValueCategory,
+    ConstructorInitializationSource, ConstructorSymbol, ExpressionResolution, FieldSymbol,
+    FunctionId, FunctionSymbol, InterfaceImplementation, Intrinsic, LambdaCaptureMode, NativeCall,
+    NativeCallResultAdaptation, NativeResultException, ParameterSymbol, Resolution, ResolvedCall,
+    ResolvedCallback, ResolvedField, ResolvedLambdaCapture, ResolvedNativeType,
+    ResolvedStaticConstant, ResolvedTraitRequirement, RustErrorMessage, RustResultAdaptation,
+    SemanticModel, StaticConstantSymbol, StructId, StructReceiver, StructSymbol, UserTypeBase,
+    ValueCategory,
 };
 
 /// Resolves names and types using an explicit native binding registry.
@@ -135,6 +136,13 @@ struct StructFieldLookup {
 }
 
 #[derive(Clone, Debug)]
+struct ConstructorSlot {
+    rust_name: String,
+    ty: TypeRef,
+    initializer: Option<ast::Expression>,
+}
+
+#[derive(Clone, Debug)]
 struct NativeInstance {
     type_path: String,
     arguments: Vec<TypeRef>,
@@ -175,6 +183,7 @@ impl Resolver<'_> {
                     path: "rust::String".to_owned(),
                     arguments: Vec::new(),
                 },
+                initializer: None,
                 span: Span::default(),
             }],
             static_constants: Vec::new(),
@@ -481,6 +490,7 @@ impl Resolver<'_> {
                                 name: field.name.clone(),
                                 is_public: field.is_public,
                                 ty,
+                                initializer: field.initializer.clone(),
                                 span: field.span,
                             }
                         })
@@ -903,6 +913,17 @@ impl Resolver<'_> {
                 constructor.span,
             );
         }
+        if constructor.is_defaulted
+            && (!parameters.is_empty()
+                || !constructor.throws.is_empty()
+                || !constructor.initializers.is_empty())
+        {
+            self.push(
+                "RES131",
+                "`= default` requires a parameterless constructor without `throws` or an initializer list".to_owned(),
+                constructor.span,
+            );
+        }
         let signature = parameters
             .iter()
             .map(|parameter| canonical(&parameter.ty))
@@ -928,6 +949,8 @@ impl Resolver<'_> {
                 .eq(parameters.iter().map(|parameter| &parameter.ty));
             let has_definition = self.model.constructors[id.0].has_definition;
             let is_deleted = self.model.constructors[id.0].is_deleted;
+            let is_defaulted = self.model.constructors[id.0].is_defaulted;
+            let incoming_definition = constructor.body.is_some() || constructor.is_defaulted;
             let definition_inherits_throws =
                 constructor.body.is_some() && constructor.throws.is_empty();
             let different_throws =
@@ -939,19 +962,20 @@ impl Resolver<'_> {
                     constructor.span,
                 );
             }
-            if has_definition && constructor.body.is_some() {
+            if has_definition && incoming_definition {
                 self.push(
                     "RES056",
                     "duplicate constructor definition".to_owned(),
                     constructor.span,
                 );
             }
-            if (is_deleted && constructor.body.is_some())
+            if (is_deleted && incoming_definition)
                 || (constructor.is_deleted && has_definition)
+                || (is_defaulted && constructor.is_deleted)
             {
                 self.push(
                     "RES057",
-                    "a deleted constructor cannot have a definition".to_owned(),
+                    "a deleted constructor cannot have a body or defaulted definition".to_owned(),
                     constructor.span,
                 );
             }
@@ -967,9 +991,10 @@ impl Resolver<'_> {
                 symbol.is_public = constructor.is_public;
             }
             symbol.declarations.push(constructor.span);
-            symbol.has_definition |= constructor.body.is_some();
+            symbol.has_definition |= incoming_definition;
             symbol.has_member_declaration |= declared_owner.is_some();
             symbol.is_deleted |= constructor.is_deleted;
+            symbol.is_defaulted |= constructor.is_defaulted;
             self.constructor_by_span.insert(constructor.span, id);
             return;
         }
@@ -989,9 +1014,10 @@ impl Resolver<'_> {
             throws,
             mangled_name,
             declarations: vec![constructor.span],
-            has_definition: constructor.body.is_some(),
+            has_definition: constructor.body.is_some() || constructor.is_defaulted,
             has_member_declaration: declared_owner.is_some(),
             is_deleted: constructor.is_deleted,
+            is_defaulted: constructor.is_defaulted,
             synthesized: false,
             initializations: Vec::new(),
         });
@@ -1031,6 +1057,7 @@ impl Resolver<'_> {
                 has_definition: true,
                 has_member_declaration: true,
                 is_deleted: false,
+                is_defaulted: false,
                 synthesized: true,
                 initializations: Vec::new(),
             });
@@ -1047,7 +1074,10 @@ impl Resolver<'_> {
                 .get(&structure)
                 .into_iter()
                 .flatten()
-                .find(|id| self.model.constructors[id.0].synthesized)
+                .find(|id| {
+                    let constructor = &self.model.constructors[id.0];
+                    constructor.synthesized || constructor.is_defaulted
+                })
                 .copied()
             {
                 self.model.constructors[constructor.0].is_deleted = !available;
@@ -1071,6 +1101,7 @@ impl Resolver<'_> {
         if constructors.iter().any(|id| {
             let constructor = &self.model.constructors[id.0];
             !constructor.synthesized
+                && !constructor.is_defaulted
                 && constructor.parameters.is_empty()
                 && !constructor.is_deleted
                 && constructor.has_definition
@@ -1079,9 +1110,10 @@ impl Resolver<'_> {
             visiting.remove(&structure);
             return true;
         }
-        let synthesized = constructors
-            .iter()
-            .any(|id| self.model.constructors[id.0].synthesized);
+        let synthesized = constructors.iter().any(|id| {
+            let constructor = &self.model.constructors[id.0];
+            constructor.synthesized || constructor.is_defaulted
+        });
         if !synthesized {
             visiting.remove(&structure);
             return false;
@@ -1091,10 +1123,10 @@ impl Resolver<'_> {
             .base
             .as_ref()
             .is_none_or(|base| self.struct_has_default_constructor(base.structure, visiting))
-            && symbol
-                .fields
-                .iter()
-                .all(|field| self.type_has_default_constructor(&field.ty, visiting));
+            && symbol.fields.iter().all(|field| {
+                field.initializer.is_some()
+                    || self.type_has_default_constructor(&field.ty, visiting)
+            });
         visiting.remove(&structure);
         available
     }
@@ -1613,21 +1645,35 @@ impl Resolver<'_> {
             }
         }
         let mut initializations = Vec::new();
-        for (index, (rust_name, ty)) in slots.into_iter().enumerate() {
+        for (index, slot) in slots.into_iter().enumerate() {
             let (source, call) = if let Some(initializer) = explicit.get(&index) {
                 (
-                    Some(initializer.span),
+                    ConstructorInitializationSource::Constructor(initializer.span),
                     self.resolve_slot_construction(
-                        &ty,
+                        &slot.ty,
                         &initializer.arguments,
+                        initializer.span,
+                        &mut initialization_context,
+                    ),
+                )
+            } else if let Some(initializer) = &slot.initializer {
+                (
+                    ConstructorInitializationSource::Field(initializer.span),
+                    self.resolve_slot_construction(
+                        &slot.ty,
+                        std::slice::from_ref(initializer),
                         initializer.span,
                         &mut initialization_context,
                     ),
                 )
             } else {
                 (
-                    None,
-                    self.resolve_default_call(&ty, constructor.span, &mut initialization_context),
+                    ConstructorInitializationSource::Default,
+                    self.resolve_default_call(
+                        &slot.ty,
+                        constructor.span,
+                        &mut initialization_context,
+                    ),
                 )
             };
             if let Some(call) = call {
@@ -1636,8 +1682,8 @@ impl Resolver<'_> {
                 }
                 self.model.calls.push(call.clone());
                 initializations.push(ConstructorFieldInitialization {
-                    rust_name,
-                    ty,
+                    rust_name: slot.rust_name,
+                    ty: slot.ty,
                     source,
                     call,
                 });
@@ -1672,7 +1718,9 @@ impl Resolver<'_> {
             .model
             .constructors
             .iter()
-            .filter(|constructor| constructor.synthesized && !constructor.is_deleted)
+            .filter(|constructor| {
+                (constructor.synthesized || constructor.is_defaulted) && !constructor.is_deleted
+            })
             .map(|constructor| constructor.id)
             .collect::<Vec<_>>();
         for id in constructors {
@@ -1693,13 +1741,32 @@ impl Resolver<'_> {
                 awaiting_call: None,
             };
             let mut initializations = Vec::new();
-            for (rust_name, ty) in self.constructor_slots(symbol.structure) {
-                if let Some(call) = self.resolve_default_call(&ty, structure.span, &mut context) {
+            for slot in self.constructor_slots(symbol.structure) {
+                let (source, call) = if let Some(initializer) = &slot.initializer {
+                    (
+                        ConstructorInitializationSource::Field(initializer.span),
+                        self.resolve_slot_construction(
+                            &slot.ty,
+                            std::slice::from_ref(initializer),
+                            initializer.span,
+                            &mut context,
+                        ),
+                    )
+                } else {
+                    (
+                        ConstructorInitializationSource::Default,
+                        self.resolve_default_call(&slot.ty, structure.span, &mut context),
+                    )
+                };
+                if let Some(call) = call {
+                    for thrown in &call.throws {
+                        self.validate_checked_effect(*thrown, call.span, &context);
+                    }
                     self.model.calls.push(call.clone());
                     initializations.push(ConstructorFieldInitialization {
-                        rust_name,
-                        ty,
-                        source: None,
+                        rust_name: slot.rust_name,
+                        ty: slot.ty,
+                        source,
                         call,
                     });
                 }
@@ -1708,22 +1775,22 @@ impl Resolver<'_> {
         }
     }
 
-    fn constructor_slots(&self, structure: StructId) -> Vec<(String, TypeRef)> {
+    fn constructor_slots(&self, structure: StructId) -> Vec<ConstructorSlot> {
         let symbol = &self.model.structs[structure.0];
         let mut slots = Vec::new();
         if let Some(base) = &symbol.base {
             let base_symbol = &self.model.structs[base.structure.0];
-            slots.push((
-                base_field_name(base_symbol),
-                user_type(base_symbol, base.arguments.clone()),
-            ));
+            slots.push(ConstructorSlot {
+                rust_name: base_field_name(base_symbol),
+                ty: user_type(base_symbol, base.arguments.clone()),
+                initializer: None,
+            });
         }
-        slots.extend(
-            symbol
-                .fields
-                .iter()
-                .map(|field| (field.name.clone(), field.ty.clone())),
-        );
+        slots.extend(symbol.fields.iter().map(|field| ConstructorSlot {
+            rust_name: field.name.clone(),
+            ty: field.ty.clone(),
+            initializer: field.initializer.clone(),
+        }));
         slots
     }
 
@@ -3571,28 +3638,38 @@ impl Resolver<'_> {
                         );
                     }
                 }
-                ast::SwitchPattern::Literal(literal) => {
-                    if !matches!(
-                        literal.kind,
-                        LiteralKind::Integer | LiteralKind::Character | LiteralKind::Boolean
-                    ) {
-                        self.push(
-                            "RES129",
-                            "switch patterns currently support integer, character, and boolean literals"
-                                .to_owned(),
+                ast::SwitchPattern::Literals(literals) => {
+                    for literal in literals {
+                        if !matches!(
+                            literal.kind,
+                            LiteralKind::Integer
+                                | LiteralKind::Character
+                                | LiteralKind::Boolean
+                                | LiteralKind::String
+                        ) {
+                            self.push(
+                                "RES129",
+                                "switch patterns support integer, character, boolean, and string literals"
+                                    .to_owned(),
+                                arm.span,
+                            );
+                        }
+                        let pattern_type =
+                            literal_type(literal.kind, &literal.text, Some(&scrutinee_type));
+                        self.require_exact(
+                            &scrutinee_type,
+                            &pattern_type,
                             arm.span,
+                            "switch pattern",
                         );
-                    }
-                    let pattern_type =
-                        literal_type(literal.kind, &literal.text, Some(&scrutinee_type));
-                    self.require_exact(&scrutinee_type, &pattern_type, arm.span, "switch pattern");
-                    let key = format!("{:?}:{}", literal.kind, literal.text);
-                    if !patterns.insert(key) {
-                        self.push(
-                            "RES129",
-                            format!("duplicate switch pattern `{}`", literal.text),
-                            arm.span,
-                        );
+                        let key = format!("{:?}:{}", literal.kind, literal.text);
+                        if !patterns.insert(key) {
+                            self.push(
+                                "RES129",
+                                format!("duplicate switch pattern `{}`", literal.text),
+                                arm.span,
+                            );
+                        }
                     }
                 }
             }
@@ -11407,32 +11484,39 @@ fn source_uses_exceptions(source: &SourceFile) -> bool {
         items.iter().any(|item| match item {
             Item::Namespace(namespace) => items_use_exceptions(&namespace.items),
             Item::Struct(structure) => {
-                structure.bases.iter().any(|base| {
-                    matches!(
-                        &base.kind,
-                        TypeKind::Named(base)
-                            if matches!(
-                                base.path.segments.as_slice(),
-                                [namespace, name]
-                                    if namespace == "stainless"
-                                        && matches!(
-                                            name.as_str(),
-                                            "Exception"
-                                                | "RustError"
-                                                | "IoError"
-                                                | "FormatError"
-                                                | "JsonError"
-                                                | "ThreadError"
-                                        )
-                            )
-                    )
-                }) || structure.constructors.iter().any(|constructor| {
-                    !constructor.throws.is_empty()
-                        || constructor.body.as_ref().is_some_and(block_uses_exceptions)
-                }) || structure.functions.iter().any(|function| {
-                    !function.throws.is_empty()
-                        || function.body.as_ref().is_some_and(block_uses_exceptions)
-                })
+                structure
+                    .fields
+                    .iter()
+                    .filter_map(|field| field.initializer.as_ref())
+                    .any(expression_uses_exceptions)
+                    || structure.bases.iter().any(|base| {
+                        matches!(
+                            &base.kind,
+                            TypeKind::Named(base)
+                                if matches!(
+                                    base.path.segments.as_slice(),
+                                    [namespace, name]
+                                        if namespace == "stainless"
+                                            && matches!(
+                                                name.as_str(),
+                                                "Exception"
+                                                    | "RustError"
+                                                    | "IoError"
+                                                    | "FormatError"
+                                                    | "JsonError"
+                                                    | "ThreadError"
+                                            )
+                                )
+                        )
+                    })
+                    || structure.constructors.iter().any(|constructor| {
+                        !constructor.throws.is_empty()
+                            || constructor.body.as_ref().is_some_and(block_uses_exceptions)
+                    })
+                    || structure.functions.iter().any(|function| {
+                        !function.throws.is_empty()
+                            || function.body.as_ref().is_some_and(block_uses_exceptions)
+                    })
             }
             Item::Constructor(constructor) => {
                 !constructor.throws.is_empty()

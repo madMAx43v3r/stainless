@@ -304,6 +304,49 @@ i32 build() {
 }
 
 #[test]
+fn explicitly_defaulted_constructor_uses_compiler_generated_initialization() {
+    let analysis = analyze(
+        r"use rust::Vec;
+
+struct Values {
+    Vec<u32> items;
+    Values() = default;
+};
+
+u32 count() {
+    Values values;
+    return u32(values.items.len());
+}
+",
+    );
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+    let constructor = analysis
+        .semantics
+        .constructors
+        .iter()
+        .find(|constructor| constructor.structure.0 == 0)
+        .expect("Values constructor");
+    assert!(constructor.is_defaulted);
+    assert!(!constructor.synthesized);
+    assert!(constructor.has_definition);
+    assert!(!constructor.is_deleted);
+
+    let invalid = analyze("struct Bad { Bad(i32 value) = default; };\n");
+    assert!(
+        invalid
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "RES131"),
+        "{:#?}",
+        invalid.diagnostics
+    );
+}
+
+#[test]
 fn diagnoses_deleted_and_undefined_default_constructors_when_selected() {
     let source = r"struct PrimitiveField {
     i32 value;

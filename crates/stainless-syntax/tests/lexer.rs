@@ -105,7 +105,7 @@ fn lexer_reserves_json_null() {
 
 #[test]
 fn lexer_recognizes_switch_arms() {
-    let lexed = lex("switch (value) { 1 => 10, else => 20 }");
+    let lexed = lex("switch (value) { \"open\" | \"close\" => 10, else => 20 }");
 
     assert!(lexed.errors.is_empty(), "{:?}", lexed.errors);
     let significant = lexed
@@ -116,5 +116,7 @@ fn lexer_recognizes_switch_arms() {
         .collect::<Vec<_>>();
     assert_eq!(significant[0], SyntaxKind::SwitchKw);
     assert!(significant.contains(&SyntaxKind::FatArrow));
+    assert!(significant.contains(&SyntaxKind::Pipe));
+    assert!(significant.contains(&SyntaxKind::String));
     assert!(significant.contains(&SyntaxKind::ElseKw));
 }

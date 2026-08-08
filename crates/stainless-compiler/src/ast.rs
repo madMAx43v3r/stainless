@@ -140,6 +140,8 @@ pub struct Constructor {
     pub initializers: Vec<ConstructorInitializer>,
     /// Body, absent for an in-struct declaration.
     pub body: Option<Block>,
+    /// Whether this declaration uses `= default`.
+    pub is_defaulted: bool,
     /// Whether this declaration uses `= delete`.
     pub is_deleted: bool,
     /// Complete declaration or definition range.
@@ -166,6 +168,8 @@ pub struct Field {
     pub ty: Type,
     /// Source field name.
     pub name: String,
+    /// Default member initializer used when a constructor does not name this field.
+    pub initializer: Option<Expression>,
     /// Complete declaration range.
     pub span: Span,
 }
@@ -489,8 +493,8 @@ pub struct Expression {
 /// One non-binding pattern accepted by a switch expression.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SwitchPattern {
-    /// A scalar or string literal.
-    Literal(Literal),
+    /// One or more scalar or string literals joined by `|`.
+    Literals(Vec<Literal>),
     /// The exhaustive `else` fallback.
     Fallback,
 }

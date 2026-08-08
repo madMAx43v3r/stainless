@@ -31,6 +31,9 @@ NamedDimensions::NamedDimensions(i32 width, i32 height, const String& name)
 
 struct StringList {
     Vec<String> values;
+    i32 expected_size = 4;
+
+    StringList() = default;
 };
 
 struct NoDefault {
@@ -41,12 +44,12 @@ i32 constructor_example()
 {
     NamedDimensions dimensions = NamedDimensions(3, 4, "preview");
 
-    // StringList receives a synthesized default constructor because Vec can
-    // be default-constructed.
+    // StringList explicitly requests generated construction. Vec uses its
+    // default constructor and expected_size uses its member initializer.
     StringList names;
     names.values.push("first");
 
-    return dimensions.width + dimensions.height + i32(names.values.len());
+    return dimensions.width + dimensions.height + i32(names.values.len()) + names.expected_size;
 }
 
 } // namespace samples

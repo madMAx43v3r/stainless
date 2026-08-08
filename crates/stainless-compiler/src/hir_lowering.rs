@@ -8,8 +8,9 @@ use crate::interop::{
     TypeRef, VAR_TYPE_PATH,
 };
 use crate::resolution::{
-    CallTarget, CallbackTarget, FunctionSymbol, Intrinsic, LambdaCaptureMode, NativeCall,
-    ResolvedCall, ResolvedLambdaCapture, SemanticModel, StructSymbol, ValueCategory,
+    CallTarget, CallbackTarget, ConstructorInitializationSource, FunctionSymbol, Intrinsic,
+    LambdaCaptureMode, NativeCall, ResolvedCall, ResolvedLambdaCapture, SemanticModel,
+    StructSymbol, ValueCategory,
 };
 
 pub(crate) fn lower(
@@ -59,11 +60,9 @@ pub(crate) fn lower(
     }
     let mut lowered_functions = lowerer.lower_functions(&source.items);
     lowered_functions.extend(lowerer.lower_constructors(&source.items));
-    for constructor in semantics
-        .constructors
-        .iter()
-        .filter(|constructor| constructor.synthesized && !constructor.is_deleted)
-    {
+    for constructor in semantics.constructors.iter().filter(|constructor| {
+        (constructor.synthesized || constructor.is_defaulted) && !constructor.is_deleted
+    }) {
         if let Some(constructor) = lowerer.lower_constructor_symbol(constructor, None) {
             lowered_functions.push(constructor);
         }
@@ -576,15 +575,24 @@ impl Lowerer<'_> {
             .iter()
             .map(|initialization| {
                 let arguments = match initialization.source {
-                    Some(source) => syntax?
+                    ConstructorInitializationSource::Default => Vec::new(),
+                    ConstructorInitializationSource::Constructor(source) => syntax?
                         .initializers
                         .iter()
                         .find(|initializer| initializer.span == source)?
                         .arguments
-                        .as_slice(),
-                    None => &[],
+                        .clone(),
+                    ConstructorInitializationSource::Field(source) => vec![
+                        self.semantics
+                            .structs
+                            .iter()
+                            .flat_map(|structure| &structure.fields)
+                            .filter_map(|field| field.initializer.as_ref())
+                            .find(|initializer| initializer.span == source)?
+                            .clone(),
+                    ],
                 };
-                let value = self.lower_resolved_call(&initialization.call, None, arguments)?;
+                let value = self.lower_resolved_call(&initialization.call, None, &arguments)?;
                 Some((
                     initialization.rust_name.clone(),
                     if class_base_field.as_ref() == Some(&initialization.rust_name) {
@@ -1469,25 +1477,39 @@ impl Lowerer<'_> {
                 kind: literal.kind,
                 text: literal.text.clone(),
             },
-            ExpressionKind::Switch { scrutinee, arms } => hir::Expression::Switch {
-                scrutinee: Box::new(self.lower_expression(scrutinee, ExpressionMode::Value)?),
-                arms: arms
-                    .iter()
-                    .map(|arm| {
-                        let pattern = match &arm.pattern {
-                            ast::SwitchPattern::Literal(literal) => hir::SwitchPattern::Literal {
-                                kind: literal.kind,
-                                text: literal.text.clone(),
-                            },
-                            ast::SwitchPattern::Fallback => hir::SwitchPattern::Fallback,
-                        };
-                        Some(hir::SwitchArm {
-                            pattern,
-                            value: self.lower_expression(&arm.value, ExpressionMode::Value)?,
+            ExpressionKind::Switch { scrutinee, arms } => {
+                let string_scrutinee = self
+                    .semantics
+                    .expression(scrutinee.span)
+                    .is_some_and(|resolution| is_rust_string(&resolution.ty));
+                hir::Expression::Switch {
+                    scrutinee: Box::new(self.lower_expression(scrutinee, ExpressionMode::Value)?),
+                    arms: arms
+                        .iter()
+                        .map(|arm| {
+                            let pattern = match &arm.pattern {
+                                ast::SwitchPattern::Literals(literals) => {
+                                    hir::SwitchPattern::Literals(
+                                        literals
+                                            .iter()
+                                            .map(|literal| hir::SwitchLiteral {
+                                                kind: literal.kind,
+                                                text: literal.text.clone(),
+                                            })
+                                            .collect(),
+                                    )
+                                }
+                                ast::SwitchPattern::Fallback => hir::SwitchPattern::Fallback,
+                            };
+                            Some(hir::SwitchArm {
+                                pattern,
+                                value: self.lower_expression(&arm.value, ExpressionMode::Value)?,
+                            })
                         })
-                    })
-                    .collect::<Option<Vec<_>>>()?,
-            },
+                        .collect::<Option<Vec<_>>>()?,
+                    string_scrutinee,
+                }
+            }
             ExpressionKind::JsonArray { elements } => hir::Expression::JsonArray(
                 elements
                     .iter()

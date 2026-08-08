@@ -176,6 +176,7 @@ fn lower_struct_like_definition(
                     name: field
                         .name_token()
                         .map_or_else(missing_name, |token| token.text().to_owned()),
+                    initializer: field.initializer().map(lower_expression),
                     span: field_span,
                 }
             })
@@ -267,6 +268,7 @@ fn lower_constructor(constructor: &cst::Constructor) -> ast::Constructor {
             })
             .collect(),
         body: constructor.body().map(|body| lower_block(&body)),
+        is_defaulted: constructor.is_defaulted(),
         is_deleted: constructor.is_deleted(),
         span: constructor_span,
     }
@@ -574,19 +576,20 @@ fn lower_expression(expression: cst::Expression) -> Expression {
                 arms: switch
                     .arms()
                     .map(|arm| {
-                        let pattern = arm.pattern().and_then(|pattern| pattern.token()).map_or(
-                            ast::SwitchPattern::Fallback,
-                            |token| {
-                                if token.kind() == SyntaxKind::ElseKw {
-                                    ast::SwitchPattern::Fallback
-                                } else {
-                                    literal_from_token(&token).map_or(
-                                        ast::SwitchPattern::Fallback,
-                                        ast::SwitchPattern::Literal,
-                                    )
-                                }
-                            },
-                        );
+                        let pattern =
+                            arm.pattern()
+                                .map_or(ast::SwitchPattern::Fallback, |pattern| {
+                                    if pattern.is_fallback() {
+                                        ast::SwitchPattern::Fallback
+                                    } else {
+                                        ast::SwitchPattern::Literals(
+                                            pattern
+                                                .literals()
+                                                .filter_map(|token| literal_from_token(&token))
+                                                .collect(),
+                                        )
+                                    }
+                                });
                         let value = arm
                             .value()
                             .map_or_else(|| error_expression(span(&arm)), lower_expression);

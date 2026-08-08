@@ -953,13 +953,28 @@ impl Emitter {
                 Ok(quote!(#target::#constant))
             }
             hir::Expression::Literal { kind, text } => literal(*kind, text),
-            hir::Expression::Switch { scrutinee, arms } => {
+            hir::Expression::Switch {
+                scrutinee,
+                arms,
+                string_scrutinee,
+            } => {
                 let scrutinee = self.expression(scrutinee)?;
+                let scrutinee = if *string_scrutinee {
+                    quote!((#scrutinee).as_str())
+                } else {
+                    scrutinee
+                };
                 let arms = arms
                     .iter()
                     .map(|arm| {
                         let pattern = match &arm.pattern {
-                            hir::SwitchPattern::Literal { kind, text } => literal(*kind, text)?,
+                            hir::SwitchPattern::Literals(literals) => {
+                                let alternatives = literals
+                                    .iter()
+                                    .map(|literal| switch_literal(literal.kind, &literal.text))
+                                    .collect::<Result<Vec<_>, String>>()?;
+                                quote!(#(#alternatives)|*)
+                            }
                             hir::SwitchPattern::Fallback => quote!(_),
                         };
                         let value = self.expression(&arm.value)?;
@@ -2003,6 +2018,16 @@ fn literal(kind: LiteralKind, text: &str) -> Result<TokenStream, String> {
         LiteralKind::Boolean => TokenStream::from_str(text)
             .map_err(|error| format!("invalid boolean literal `{text}`: {error}")),
         LiteralKind::Null => Err("JSON null reached scalar literal emission".to_owned()),
+    }
+}
+
+fn switch_literal(kind: LiteralKind, text: &str) -> Result<TokenStream, String> {
+    if kind == LiteralKind::String {
+        let literal = syn::parse_str::<syn::LitStr>(text)
+            .map_err(|error| format!("invalid string literal `{text}`: {error}"))?;
+        Ok(quote!(#literal))
+    } else {
+        literal(kind, text)
     }
 }
 

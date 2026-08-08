@@ -14,14 +14,16 @@ fn parses_the_basics_reference_file_losslessly() {
 
 #[test]
 fn parses_switch_expressions_losslessly() {
-    let source = r"i32 classify(u8 value) {
+    let source = r#"use rust::String;
+
+i32 classify(const String& value) {
     return switch (value) {
-        0 => 10,
-        1 => 20,
+        "http" | "ws_open" => 10,
+        "ws_close" => 20,
         else => 30,
     };
 }
-";
+"#;
     let parsed = parse(source);
 
     assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
@@ -47,6 +49,15 @@ fn parses_switch_expressions_losslessly() {
             .errors()
             .iter()
             .any(|error| { error.message == "expected a literal or `else` switch pattern" })
+    );
+
+    let dangling_alternative =
+        parse("i32 classify(u8 value) { return switch (value) { 0 | => 1, else => 0 }; }");
+    assert!(
+        dangling_alternative
+            .errors()
+            .iter()
+            .any(|error| { error.message == "expected a literal after `|` in switch pattern" })
     );
 }
 
@@ -247,6 +258,7 @@ fn parses_braced_owner_allocation_with_nested_generic_targets() {
 fn parses_constructor_declarations_definitions_deletions_and_initializers() {
     let source = r"struct Base {
     Base(i32 value);
+    Base() = default;
     Base() = delete;
     i32 value;
 };
@@ -266,7 +278,7 @@ Derived::Derived(i32 value) : Base(value) {
 
     assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
     assert_eq!(root.to_string(), source);
-    assert_eq!(count_kind(&root, SyntaxKind::ConstructorDeclaration), 3);
+    assert_eq!(count_kind(&root, SyntaxKind::ConstructorDeclaration), 4);
     assert_eq!(count_kind(&root, SyntaxKind::ConstructorDefinition), 2);
     assert_eq!(count_kind(&root, SyntaxKind::ConstructorInitializerList), 2);
     assert_eq!(count_kind(&root, SyntaxKind::ConstructorInitializer), 2);
@@ -352,14 +364,14 @@ fn parses_usize_const_parameters_and_integer_generic_arguments() {
 }
 
 #[test]
-fn deleted_constructor_requires_the_contextual_delete_spelling() {
+fn defaulted_or_deleted_constructor_requires_a_supported_contextual_spelling() {
     let parsed = parse("struct Value { Value() = unavailable; };\n");
 
     assert!(
         parsed
             .errors()
             .iter()
-            .any(|error| error.message.contains("expected `delete`"))
+            .any(|error| error.message.contains("expected `default` or `delete`"))
     );
 }
 

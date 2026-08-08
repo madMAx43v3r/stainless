@@ -116,15 +116,27 @@ fn positive_integer_literals_default_to_u32_and_infer_from_context() {
 #[test]
 fn switch_requires_compatible_literal_patterns_and_a_final_fallback() {
     let valid = analyze(
-        r"i32 classify(u8 value) {
+        r#"use rust::String;
+
+i32 classify(u8 value) {
     return switch (value) { 0 => 10, 1 => 20, else => 30 };
 }
-",
+
+i32 classify_event(const String& value) {
+    return switch (value) {
+        "http" | "ws_open" => 10,
+        "ws_close" => 20,
+        else => 30,
+    };
+}
+"#,
     );
     assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);
 
     let invalid = analyze(
-        r#"i32 missing_fallback(u8 value) {
+        r#"use rust::String;
+
+i32 missing_fallback(u8 value) {
     return switch (value) { 0 => 10, 1 => 20 };
 }
 i32 misplaced_fallback(u8 value) {
@@ -132,6 +144,14 @@ i32 misplaced_fallback(u8 value) {
 }
 i32 wrong_pattern(u8 value) {
     return switch (value) { "zero" => 10, else => 20 };
+}
+
+i32 duplicate_alternative(const String& value) {
+    return switch (value) {
+        "http" | "ws_open" => 10,
+        "ws_open" => 20,
+        else => 30,
+    };
 }
 "#,
     );
@@ -144,6 +164,12 @@ i32 wrong_pattern(u8 value) {
             >= 4,
         "{:#?}",
         invalid.diagnostics
+    );
+    assert!(
+        invalid
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message == "duplicate switch pattern `\"ws_open\"`" })
     );
 }
 

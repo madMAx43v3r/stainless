@@ -615,7 +615,7 @@ macro_rules! constructor_accessors {
                     matches!(
                         token.kind(),
                         SyntaxKind::Identifier | SyntaxKind::ColonColon
-                    ) && token.text() != "delete"
+                    ) && !matches!(token.text(), "default" | "delete")
                 })
             }
 
@@ -654,6 +654,12 @@ impl ConstructorDefinition {
 }
 
 impl ConstructorDeclaration {
+    #[must_use]
+    pub fn is_defaulted(&self) -> bool {
+        direct_tokens(self.syntax())
+            .any(|token| token.kind() == SyntaxKind::Identifier && token.text() == "default")
+    }
+
     #[must_use]
     pub fn is_deleted(&self) -> bool {
         direct_tokens(self.syntax())
@@ -713,6 +719,11 @@ impl Constructor {
     #[must_use]
     pub fn is_deleted(&self) -> bool {
         matches!(self, Self::Declaration(node) if node.is_deleted())
+    }
+
+    #[must_use]
+    pub fn is_defaulted(&self) -> bool {
+        matches!(self, Self::Declaration(node) if node.is_defaulted())
     }
 }
 
@@ -1280,12 +1291,15 @@ impl SwitchArm {
 }
 
 impl SwitchPattern {
+    /// Returns whether this is the final `else` fallback pattern.
     #[must_use]
-    pub fn token(&self) -> Option<SyntaxToken> {
-        direct_tokens(self.syntax()).find(|token| {
-            token.kind().is_literal()
-                || (token.kind() == SyntaxKind::Identifier && token.text() == "_")
-        })
+    pub fn is_fallback(&self) -> bool {
+        direct_tokens(self.syntax()).any(|token| token.kind() == SyntaxKind::ElseKw)
+    }
+
+    /// Returns the literal alternatives in source order.
+    pub fn literals(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
+        direct_tokens(self.syntax()).filter(|token| token.kind().is_literal())
     }
 }
 

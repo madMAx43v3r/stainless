@@ -260,7 +260,7 @@
       "patterns": [
         {
           "name": "keyword.control.stainless",
-          "match": "\\b(?:return|if|else|for|while|break|continue|try|catch|throw|await)\\b"
+          "match": "\\b(?:return|if|else|switch|for|while|break|continue|try|catch|throw|await)\\b"
         },
         {
           "name": "keyword.control.exception.stainless",

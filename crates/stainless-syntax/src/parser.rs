@@ -275,12 +275,10 @@ impl Parser<'_> {
         }
         self.parse_type(false);
         self.expect(SyntaxKind::Identifier, "expected a field name");
-        if is_static {
-            if self.eat(SyntaxKind::Eq) {
-                self.parse_expression();
-            } else {
-                self.error("expected an initializer for static constant");
-            }
+        if self.eat(SyntaxKind::Eq) {
+            self.parse_expression();
+        } else if is_static {
+            self.error("expected an initializer for static constant");
         }
         self.expect(
             SyntaxKind::Semicolon,
@@ -303,21 +301,21 @@ impl Parser<'_> {
             self.parse_block();
         } else if self.eat(SyntaxKind::Eq) {
             if self.at(SyntaxKind::Identifier) {
-                if self.current_text() != Some("delete") {
-                    self.error("expected `delete` after `=`");
+                if !matches!(self.current_text(), Some("default" | "delete")) {
+                    self.error("expected `default` or `delete` after `=`");
                 }
                 self.bump();
             } else {
-                self.error("expected `delete` after `=`");
+                self.error("expected `default` or `delete` after `=`");
             }
             self.expect(
                 SyntaxKind::Semicolon,
-                "expected `;` after deleted constructor",
+                "expected `;` after defaulted or deleted constructor",
             );
         } else {
             self.expect(
                 SyntaxKind::Semicolon,
-                "expected a constructor body, `= delete;`, or `;`",
+                "expected a constructor body, `= default;`, `= delete;`, or `;`",
             );
         }
         self.finish();
@@ -899,8 +897,18 @@ impl Parser<'_> {
         while !self.at_end() && !self.at(SyntaxKind::RBrace) {
             self.start(SyntaxKind::SwitchArm);
             self.start(SyntaxKind::SwitchPattern);
-            if self.current().is_some_and(SyntaxKind::is_literal) || self.at(SyntaxKind::ElseKw) {
+            if self.at(SyntaxKind::ElseKw) {
                 self.bump();
+            } else if self.current().is_some_and(SyntaxKind::is_literal) {
+                self.bump();
+                while self.eat(SyntaxKind::Pipe) {
+                    if self.current().is_some_and(SyntaxKind::is_literal) {
+                        self.bump();
+                    } else {
+                        self.error("expected a literal after `|` in switch pattern");
+                        break;
+                    }
+                }
             } else {
                 self.error("expected a literal or `else` switch pattern");
                 if !self.at_end() && !self.at_any(&[SyntaxKind::FatArrow, SyntaxKind::RBrace]) {
