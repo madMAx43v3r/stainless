@@ -1,0 +1,52 @@
+// Compact ECDSA facade backed directly by the secp256k1 crate.
+
+use rust::{String, Vec};
+use rust::secp256k1::{Message, PublicKey, SecretKey};
+use rust::secp256k1::ecdsa::Signature;
+
+namespace crypto {
+namespace secp256k1 {
+
+String public_key(const Vec<u8>& secret_key) throws stainless::RustError
+{
+    auto secret = SecretKey::from_slice(secret_key);
+    auto key = PublicKey::from_secret_key_global(secret);
+    return key.to_string();
+}
+
+bool valid_public_key(const Vec<u8>& public_key)
+{
+    try {
+        auto key = PublicKey::from_slice(public_key);
+        return key.to_string() == crypto::hex_bytes(public_key);
+    } catch (const stainless::RustError& error) {
+        return false;
+    }
+}
+
+String sign(const Vec<u8>& message_hash, const Vec<u8>& secret_key)
+    throws stainless::RustError
+{
+    Message message = Message::from_digest_slice(message_hash);
+    SecretKey secret = SecretKey::from_slice(secret_key);
+    Signature signature = secret.sign_ecdsa(move(message));
+    Vec<u8> compact = signature.serialize_compact();
+    return crypto::hex_bytes(compact);
+}
+
+bool verify(const Vec<u8>& message_hash, const Vec<u8>& public_key,
+            const Vec<u8>& signature)
+{
+    try {
+        Message message = Message::from_digest_slice(message_hash);
+        PublicKey key = PublicKey::from_slice(public_key);
+        Signature parsed = Signature::from_compact(signature);
+        parsed.verify(move(message), key).unwrap();
+        return true;
+    } catch (const stainless::RustError& error) {
+        return false;
+    }
+}
+
+} // namespace secp256k1
+} // namespace crypto

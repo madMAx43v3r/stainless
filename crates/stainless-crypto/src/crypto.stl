@@ -1,0 +1,205 @@
+// Generic byte, integer, and random utilities implemented in Stainless.
+
+use rust::{String, Vec};
+use stainless::Random;
+
+namespace crypto {
+
+struct DecimalError : stainless::Exception {
+};
+
+String hex_digit(u8 value)
+{
+    return switch (value) {
+        0 => "0", 1 => "1", 2 => "2", 3 => "3",
+        4 => "4", 5 => "5", 6 => "6", 7 => "7",
+        8 => "8", 9 => "9", 10 => "a", 11 => "b",
+        12 => "c", 13 => "d", 14 => "e", 15 => "f",
+        else => "",
+    };
+}
+
+u8 hex_value(u8 value)
+{
+    if (value >= 48 && value <= 57) {
+        return value - 48;
+    }
+    if (value >= 65 && value <= 70) {
+        return value - 55;
+    }
+    if (value >= 97 && value <= 102) {
+        return value - 87;
+    }
+    return 255;
+}
+
+String hex_bytes(const Vec<u8>& bytes)
+{
+    String encoded;
+    for (const u8& byte : bytes) {
+        encoded.push_str(hex_digit(byte / 16));
+        encoded.push_str(hex_digit(byte % 16));
+    }
+    return encoded;
+}
+
+Vec<u8> decode_hex(const String& source)
+{
+    String copied = String(source);
+    Vec<u8> encoded = move(copied).into_bytes();
+    Vec<u8> decoded;
+    u8 high = 0;
+    bool needs_high = true;
+    for (const u8& byte : encoded) {
+        u8 nibble = hex_value(byte);
+        if (nibble == 255) {
+            decoded.clear();
+            return decoded;
+        }
+        if (needs_high) {
+            high = nibble;
+            needs_high = false;
+        } else {
+            decoded.push(high * 16 + nibble);
+            needs_high = true;
+        }
+    }
+    if (!needs_high) {
+        decoded.clear();
+    }
+    return decoded;
+}
+
+bool is_hex(const String& source, usize byte_length)
+{
+    return source.len() == byte_length * 2 &&
+        decode_hex(source).len() == byte_length;
+}
+
+String random_hex(usize length) throws stainless::RustError
+{
+    Vec<u8> bytes = Random::bytes(length);
+    return hex_bytes(bytes);
+}
+
+u128 parse_decimal(const String& source) throws DecimalError
+{
+    String copied = String(source);
+    Vec<u8> bytes = move(copied).into_bytes();
+    if (bytes.len() == 0) {
+        throw DecimalError{stainless::Exception(
+            "decimal string cannot be empty")};
+    }
+    u128 maximum = 340282366920938463463374607431768211455;
+    u128 value = 0;
+    for (const u8& byte : bytes) {
+        if (byte < 48 || byte > 57) {
+            throw DecimalError{stainless::Exception(
+                "decimal string contains a non-digit")};
+        }
+        u128 digit = u128(byte - 48);
+        if (value > (maximum - digit) / 10) {
+            throw DecimalError{stainless::Exception(
+                "decimal string exceeds the u128 range")};
+        }
+        value = value * 10 + digit;
+    }
+    return value;
+}
+
+String uint_decimal(u128 value)
+{
+    String encoded;
+    u128 divisor = 1;
+    for (u32 i = 1; i < 39; i += 1) {
+        divisor *= 10;
+    }
+    bool started = false;
+    for (u32 i = 0; i < 39; i += 1) {
+        u8 digit = u8((value / divisor) % 10);
+        if (digit != 0 || started || i == 38) {
+            encoded.push_str(hex_digit(digit));
+            started = true;
+        }
+        if (divisor > 1) {
+            divisor /= 10;
+        }
+    }
+    return encoded;
+}
+
+String uint_hex(u128 value)
+{
+    String encoded = "0x";
+    u128 divisor = 1;
+    for (u32 i = 1; i < 32; i += 1) {
+        divisor *= 16;
+    }
+    bool started = false;
+    for (u32 i = 0; i < 32; i += 1) {
+        u8 digit = u8((value / divisor) % 16);
+        if (digit != 0 || started || i == 31) {
+            encoded.push_str(hex_digit(digit));
+            started = true;
+        }
+        if (divisor > 1) {
+            divisor /= 16;
+        }
+    }
+    return encoded;
+}
+
+u128 mul_div_floor(u128 left, u128 right, u128 divisor)
+    throws DecimalError
+{
+    if (divisor == 0) {
+        throw DecimalError{stainless::Exception(
+            "wide multiplication divides by zero")};
+    }
+    u128 maximum = 340282366920938463463374607431768211455;
+    u128 unit_quotient = left / divisor;
+    u128 unit_remainder = left % divisor;
+    u128 multiplier = right;
+    u128 result = 0;
+    u128 remainder = 0;
+    while (multiplier > 0) {
+        if (multiplier % 2 == 1) {
+            if (result > maximum - unit_quotient) {
+                throw DecimalError{stainless::Exception(
+                    "wide multiplication quotient overflow")};
+            }
+            result += unit_quotient;
+            if (remainder >= divisor - unit_remainder) {
+                remainder -= divisor - unit_remainder;
+                if (result == maximum) {
+                    throw DecimalError{stainless::Exception(
+                        "wide multiplication quotient overflow")};
+                }
+                result += 1;
+            } else {
+                remainder += unit_remainder;
+            }
+        }
+        multiplier /= 2;
+        if (multiplier > 0) {
+            if (unit_quotient > maximum - unit_quotient) {
+                throw DecimalError{stainless::Exception(
+                    "wide multiplication quotient overflow")};
+            }
+            unit_quotient += unit_quotient;
+            if (unit_remainder >= divisor - unit_remainder) {
+                unit_remainder -= divisor - unit_remainder;
+                if (unit_quotient == maximum) {
+                    throw DecimalError{stainless::Exception(
+                        "wide multiplication quotient overflow")};
+                }
+                unit_quotient += 1;
+            } else {
+                unit_remainder += unit_remainder;
+            }
+        }
+    }
+    return result;
+}
+
+} // namespace crypto

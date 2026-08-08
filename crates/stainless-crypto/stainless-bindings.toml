@@ -1,0 +1,133 @@
+schema = 1
+
+[[cargo_dependency]]
+name = "sha256"
+version = "1.6.0"
+default_features = false
+
+[[cargo_dependency]]
+name = "secp256k1"
+version = "0.31.1"
+features = ["global-context"]
+
+[[type]]
+dependency = "sha256"
+rust_path = "sha256::Sha256Digest"
+stainless_path = "rust::sha256::Digest"
+representation = "opaque"
+
+[[function]]
+dependency = "sha256"
+rust_path = "sha256::digest"
+stainless_path = "rust::sha256::Digest::hash"
+parameters = ["const rust::String&"]
+return = "rust::String"
+
+[[function]]
+dependency = "sha256"
+rust_path = "sha256::digest"
+stainless_path = "rust::sha256::Digest::hash"
+parameters = ["const rust::Vec<u8>&"]
+return = "rust::String"
+
+[[type]]
+dependency = "secp256k1"
+rust_path = "secp256k1::Error"
+stainless_path = "rust::secp256k1::Error"
+representation = "opaque"
+error_format = "display"
+
+[[type]]
+dependency = "secp256k1"
+rust_path = "secp256k1::Message"
+stainless_path = "rust::secp256k1::Message"
+representation = "opaque"
+
+[[type]]
+dependency = "secp256k1"
+rust_path = "secp256k1::SecretKey"
+stainless_path = "rust::secp256k1::SecretKey"
+representation = "opaque"
+
+[[type]]
+dependency = "secp256k1"
+rust_path = "secp256k1::PublicKey"
+stainless_path = "rust::secp256k1::PublicKey"
+representation = "opaque"
+
+[[type]]
+dependency = "secp256k1"
+rust_path = "secp256k1::ecdsa::Signature"
+stainless_path = "rust::secp256k1::ecdsa::Signature"
+representation = "opaque"
+
+[[function]]
+dependency = "secp256k1"
+rust_path = "secp256k1::Message::from_digest_slice"
+stainless_path = "rust::secp256k1::Message::from_digest_slice"
+parameters = ["const rust::Vec<u8>&"]
+return = "rust::Result<rust::secp256k1::Message, rust::secp256k1::Error>"
+
+[[function]]
+dependency = "secp256k1"
+rust_path = "secp256k1::SecretKey::from_slice"
+stainless_path = "rust::secp256k1::SecretKey::from_slice"
+parameters = ["const rust::Vec<u8>&"]
+return = "rust::Result<rust::secp256k1::SecretKey, rust::secp256k1::Error>"
+
+[[method]]
+receiver_type = "rust::secp256k1::SecretKey"
+rust_name = "sign_ecdsa"
+stainless_name = "sign_ecdsa"
+receiver = "const"
+parameters = ["rust::secp256k1::Message"]
+return = "rust::secp256k1::ecdsa::Signature"
+
+[[function]]
+dependency = "secp256k1"
+rust_path = "secp256k1::PublicKey::from_secret_key_global"
+stainless_path = "rust::secp256k1::PublicKey::from_secret_key_global"
+parameters = ["const rust::secp256k1::SecretKey&"]
+return = "rust::secp256k1::PublicKey"
+
+[[function]]
+dependency = "secp256k1"
+rust_path = "secp256k1::PublicKey::from_slice"
+stainless_path = "rust::secp256k1::PublicKey::from_slice"
+parameters = ["const rust::Vec<u8>&"]
+return = "rust::Result<rust::secp256k1::PublicKey, rust::secp256k1::Error>"
+
+[[method]]
+receiver_type = "rust::secp256k1::PublicKey"
+rust_name = "to_string"
+stainless_name = "to_string"
+receiver = "const"
+parameters = []
+return = "rust::String"
+
+[[function]]
+dependency = "secp256k1"
+rust_path = "secp256k1::ecdsa::Signature::from_compact"
+stainless_path = "rust::secp256k1::ecdsa::Signature::from_compact"
+parameters = ["const rust::Vec<u8>&"]
+return = "rust::Result<rust::secp256k1::ecdsa::Signature, rust::secp256k1::Error>"
+
+[[method]]
+receiver_type = "rust::secp256k1::ecdsa::Signature"
+rust_name = "serialize_compact"
+stainless_name = "serialize_compact"
+receiver = "const"
+parameters = []
+return = "rust::Vec<u8>"
+return_conversion = "into"
+
+[[method]]
+receiver_type = "rust::secp256k1::ecdsa::Signature"
+rust_name = "verify"
+stainless_name = "verify"
+receiver = "const"
+parameters = [
+    "rust::secp256k1::Message",
+    "const rust::secp256k1::PublicKey&",
+]
+return = "rust::Result<void, rust::secp256k1::Error>"

@@ -1,0 +1,7 @@
+schema = 1
+name = "stainless-crypto"
+sources = [
+    "src/crypto.stl",
+    "src/sha256.stl",
+    "src/secp256k1.stl",
+]

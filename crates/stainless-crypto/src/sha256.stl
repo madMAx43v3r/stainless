@@ -1,0 +1,20 @@
+// SHA-256 facade backed directly by the sha256 crate.
+
+use rust::{String, Vec};
+use rust::sha256::Digest;
+
+namespace crypto {
+namespace sha256 {
+
+String hash(const String& source)
+{
+    return Digest::hash(source);
+}
+
+String hash(const Vec<u8>& source)
+{
+    return Digest::hash(source);
+}
+
+} // namespace sha256
+} // namespace crypto
