@@ -11,6 +11,22 @@ bool test_contract_hex()
             "0xffffffffffffffffffffffffffffffff";
 }
 
+bool test_consensus_messages()
+{
+    String zero_hash =
+        "0000000000000000000000000000000000000000000000000000000000000000";
+    String action = poker::protocol::action_hash(
+        "mmx1table", 7, "mmx1player", 2, 3, 1, 4294967297, zero_hash);
+    String expected =
+        "MMX_PARALLEL_POKER_ACTION_V1/mmx1table/7/mmx1player/2/3/1/4294967297/";
+    expected.push_str(zero_hash);
+    return crypto::sha256::hash("abc") ==
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" &&
+        action == crypto::sha256::hash(expected) &&
+        poker::protocol::action_hash(
+            "mmx1table", 7, "mmx1player", 4, 0, 1, 0, zero_hash) == "";
+}
+
 bool test_payout_and_public_integer_encoding() throws stainless::Exception
 {
     var hand = {
@@ -128,6 +144,7 @@ bool test_reorg_deployments_return_to_pending() throws stainless::Exception
 i32 main() throws stainless::Exception
 {
     if (!test_contract_hex() ||
+        !test_consensus_messages() ||
         !test_payout_and_public_integer_encoding() ||
         !test_exact_decimal_input() ||
         !test_contract_betting_encoding() ||

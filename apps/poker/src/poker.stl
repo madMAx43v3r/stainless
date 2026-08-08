@@ -612,8 +612,8 @@ void handle_http(const Server& server, const var& event,
 String auth_hash(const var& config, const var& session, const String& address)
     throws ConfigError
 {
-    return wallet::auth_hash(String(config.dealer), String(session.challenge),
-                             integer(session.expires_at), address);
+    return protocol::auth_hash(String(config.dealer), String(session.challenge),
+                               integer(session.expires_at), address);
 }
 
 void ws_send(const Server& server, const u64 connection_id, const var& message)

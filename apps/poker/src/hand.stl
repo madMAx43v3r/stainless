@@ -117,8 +117,8 @@ var take_message(var& inbox, const String& key) throws stainless::JsonError
 String seed_commit(const var& hand, const var& player, const u64 round,
                    const String& seed) throws ConfigError
 {
-    return wallet::seed_commit(String(hand.table), integer(hand.hand_id),
-                               String(player.address), round, seed);
+    return protocol::seed_commit(String(hand.table), integer(hand.hand_id),
+                                 String(player.address), round, seed);
 }
 
 String commit_hash(const var& hand, const var& player,
@@ -136,15 +136,15 @@ String commit_hash(const var& hand, const var& player,
         }
         values.push(move(value));
     }
-    return wallet::commit_hash(String(hand.table), integer(hand.hand_id),
-                               String(player.address), values);
+    return protocol::commit_hash(String(hand.table), integer(hand.hand_id),
+                                 String(player.address), values);
 }
 
 void checkpoint_step(var& hand, const usize player_index, const u64 phase, const u64 event_round,
                      const u64 epoch, const u64 event, const u128& amount, const String& data_hash)
     throws stainless::JsonError, ConfigError
 {
-    hand.checkpoint = wallet::checkpoint_step(
+    hand.checkpoint = protocol::checkpoint_step(
         String(hand.table), integer(hand.hand_id), String(hand.checkpoint), phase,
         event_round, epoch, String(hand.players[player_index].address), event,
         amount, data_hash);

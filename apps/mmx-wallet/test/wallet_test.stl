@@ -11,20 +11,6 @@ bool test_hex_helpers()
         wallet::bech32_character(32) == "";
 }
 
-bool test_consensus_messages()
-{
-    String zero_hash =
-        "0000000000000000000000000000000000000000000000000000000000000000";
-    String action = wallet::action_hash(
-        "mmx1table", 7, "mmx1player", 2, 3, 1, 4294967297, zero_hash);
-    return wallet::sha256_text("abc") ==
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" &&
-        action == wallet::sha256_text(
-            "MMX_PARALLEL_POKER_ACTION_V1/mmx1table/7/mmx1player/2/3/1/4294967297/0000000000000000000000000000000000000000000000000000000000000000") &&
-        wallet::action_hash(
-            "mmx1table", 7, "mmx1player", 4, 0, 1, 0, zero_hash) == "";
-}
-
 bool test_identity() throws stainless::RustError
 {
     String secret =
@@ -40,7 +26,7 @@ bool test_identity() throws stainless::RustError
 
 i32 main() throws stainless::RustError
 {
-    if (!test_hex_helpers() || !test_consensus_messages() || !test_identity()) {
+    if (!test_hex_helpers() || !test_identity()) {
         return 1;
     }
     return 0;

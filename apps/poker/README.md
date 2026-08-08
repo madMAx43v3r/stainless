@@ -11,13 +11,12 @@ walks the saved checkpoints to the newest common ancestor and reverts the
 store before resynchronizing. Pending deployments and in-progress hand state
 are durable in separate logs.
 
-The dealer is implemented in Stainless. `poker.stl` owns the player API,
+The dealer is implemented in Stainless. `protocol.stl` owns the
+consensus-facing `poker2.js` hashes; `poker.stl` owns the player API,
 authentication, WAPI calls, rollback handling, table discovery, and scaling;
 `hand.stl` owns the hand state machine, transcript checkpoints, timeouts,
 showdown, side pots/rake, and settlement payload; and `main.stl` owns the
-server event loop. Consensus-facing hashes are implemented once in the
-`mmx-wallet` Stainless source and compiled directly into the dealer's
-translation unit.
+server event loop.
 
 ## Running
 
@@ -112,7 +111,8 @@ and computed result stacks before continuation.
 
 Every submission includes `type`, `hand_id`, `round`, and `epoch`. Signatures
 are compact 64-byte secp256k1 signatures. Hash construction is available from
-the `mmx-wallet` crate and is byte-for-byte aligned with `poker2.js`.
+the poker package's `poker::protocol` namespace and is byte-for-byte aligned
+with `poker2.js`.
 
 - Commit: `{"type":"commit","hand_id":"7","round":"0","epoch":"0","commitments":["..."],"signature":"..."}`
 - Reveal: `{"type":"reveal","hand_id":"7","round":"0","epoch":"0","seed":"32-byte-hex"}`
