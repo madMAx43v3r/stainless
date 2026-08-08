@@ -9933,12 +9933,25 @@ impl Resolver<'_> {
             paths.push(relative);
             paths.push(path.segments.clone());
         } else if let Some(name) = path.segments.first() {
-            paths.extend(self.imports.candidates(namespace, name));
             for depth in (0..=namespace.len()).rev() {
-                let mut candidate = namespace[..depth].to_vec();
-                candidate.push(name.clone());
-                paths.push(candidate);
+                let scope = &namespace[..depth];
+                let mut scoped_paths = self.imports.candidates_in_scope(scope, name);
+                let mut direct = scope.to_vec();
+                direct.push(name.clone());
+                scoped_paths.push(direct);
+                let mut ids = scoped_paths
+                    .iter()
+                    .filter_map(|candidate| self.function_sets.get(candidate))
+                    .flatten()
+                    .copied()
+                    .collect::<Vec<_>>();
+                ids.sort();
+                ids.dedup();
+                if !ids.is_empty() {
+                    return ids;
+                }
             }
+            return Vec::new();
         }
         paths.sort();
         paths.dedup();

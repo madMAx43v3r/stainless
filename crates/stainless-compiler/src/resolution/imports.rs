@@ -37,28 +37,33 @@ impl ImportTable {
     pub(super) fn candidates(&self, namespace: &[String], name: &str) -> Vec<Vec<String>> {
         for depth in (0..=namespace.len()).rev() {
             let scope_path = namespace[..depth].to_vec();
-            let Some(scope) = self.scopes.get(&scope_path) else {
-                continue;
-            };
-            let mut candidates = scope
-                .aliases
-                .get(name)
-                .into_iter()
-                .flatten()
-                .map(|import| import.path.clone())
-                .collect::<Vec<_>>();
-            candidates.extend(scope.globs.iter().map(|import| {
-                let mut path = import.path.clone();
-                path.push(name.to_owned());
-                path
-            }));
-            candidates.sort();
-            candidates.dedup();
+            let candidates = self.candidates_in_scope(&scope_path, name);
             if !candidates.is_empty() {
                 return candidates;
             }
         }
         Vec::new()
+    }
+
+    pub(super) fn candidates_in_scope(&self, namespace: &[String], name: &str) -> Vec<Vec<String>> {
+        let Some(scope) = self.scopes.get(namespace) else {
+            return Vec::new();
+        };
+        let mut candidates = scope
+            .aliases
+            .get(name)
+            .into_iter()
+            .flatten()
+            .map(|import| import.path.clone())
+            .collect::<Vec<_>>();
+        candidates.extend(scope.globs.iter().map(|import| {
+            let mut path = import.path.clone();
+            path.push(name.to_owned());
+            path
+        }));
+        candidates.sort();
+        candidates.dedup();
+        candidates
     }
 
     fn collect_items(

@@ -279,6 +279,22 @@ u128 borrow_computed_value(const u64 value) {
     return identity_wide(u128(value));
 }
 
+i32 decimal(const i32 value) {
+    return value + 1;
+}
+
+namespace protocol {
+
+i32 decimal(const i32 value) {
+    return value + 2;
+}
+
+i32 local_function_hides_outer() {
+    return decimal(10);
+}
+
+}
+
 }
 
 namespace samples {
@@ -699,6 +715,15 @@ fn generated_program_preserves_current_subset_behavior() {
     let borrow_moved_text = find_name("borrow_moved_text");
     let use_reference_return = find_name("use_reference_return");
     let borrow_computed_value = find_name("borrow_computed_value");
+    let local_function_hides_outer = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "protocol", "local_function_hides_outer"])
+        .expect("missing `local_function_hides_outer`")
+        .mangled_name
+        .clone();
     let reopened_namespace = find_name("reopened_namespace");
     let qualified_definition = find_name("qualified_definition");
     write!(
@@ -726,6 +751,10 @@ fn main() {{
     );
     assert_eq!(__stainless_namespace_samples::{use_reference_return}(17), 17);
     assert_eq!(__stainless_namespace_samples::{borrow_computed_value}(19), 19u128);
+    assert_eq!(
+        __stainless_namespace_samples::__stainless_namespace_protocol::{local_function_hides_outer}(),
+        12
+    );
     assert_eq!(__stainless_namespace_samples::{reopened_namespace}(), 23);
     assert_eq!(__stainless_namespace_samples::{qualified_definition}(), 29);
 }}
