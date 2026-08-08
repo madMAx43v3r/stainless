@@ -1789,8 +1789,8 @@ impl Lowerer<'_> {
                     .semantics
                     .expression(receiver.span)
                     .map(|resolution| canonical_ref(&resolution.ty));
-                if matches!(receiver_type, Some(TypeRef::Array { .. })) {
-                    hir::Expression::ArrayIndex {
+                if receiver_type.is_some_and(is_sequence_type) {
+                    hir::Expression::SequenceIndex {
                         receiver: Box::new(
                             self.lower_expression(receiver, ExpressionMode::Reference)?,
                         ),
@@ -2827,6 +2827,32 @@ impl Lowerer<'_> {
                     arguments: lowered_arguments,
                 })
             }
+            RustLowering::ClonedReceiverMethod { rust_name } => {
+                let Some(ast::Expression {
+                    kind: ExpressionKind::Field { receiver, .. },
+                    ..
+                }) = callee
+                else {
+                    self.push(
+                        "HIR011",
+                        "native cloned-receiver method call has no receiver".to_owned(),
+                        span,
+                    );
+                    return None;
+                };
+                let cloned_receiver = hir::Expression::MethodCall {
+                    receiver: Box::new(self.lower_expression(receiver, ExpressionMode::Reference)?),
+                    rust_name: "clone".to_owned(),
+                    receiver_mode: Receiver::Shared,
+                    arguments: Vec::new(),
+                };
+                Some(hir::Expression::MethodCall {
+                    receiver: Box::new(cloned_receiver),
+                    rust_name: rust_name.clone(),
+                    receiver_mode: Receiver::Value,
+                    arguments: lowered_arguments,
+                })
+            }
             RustLowering::FunctionWithReceiver { rust_path } => {
                 let Some(ast::Expression {
                     kind: ExpressionKind::Field { receiver, .. },
@@ -3304,6 +3330,15 @@ fn is_json_type(ty: &TypeRef) -> bool {
         TypeRef::Native { path, arguments }
             if path == VAR_TYPE_PATH && arguments.is_empty()
     )
+}
+
+fn is_sequence_type(ty: &TypeRef) -> bool {
+    matches!(ty, TypeRef::Array { .. })
+        || matches!(
+            ty,
+            TypeRef::Native { path, arguments }
+                if path == "rust::Vec" && arguments.len() == 1
+        )
 }
 
 fn is_rust_string(ty: &TypeRef) -> bool {

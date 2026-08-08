@@ -437,6 +437,8 @@ pub enum RustLowering {
     AssociatedFunction { rust_path: String },
     /// Invoke a Rust method on the lowered receiver.
     Method { rust_name: String },
+    /// Clone a shared receiver, then invoke a consuming Rust method on the clone.
+    ClonedReceiverMethod { rust_name: String },
     /// Call a fully qualified safe Rust function with the source receiver as
     /// its first argument.
     FunctionWithReceiver { rust_path: String },

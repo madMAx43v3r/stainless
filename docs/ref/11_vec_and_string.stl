@@ -24,6 +24,17 @@ usize vec_basics()
     return values.len();
 }
 
+u32 vec_indexing()
+{
+    Vec<u32> values;
+    values.push(10);
+    values.push(20);
+
+    u32 first = values[0];
+    values[1] = 32;
+    return first + values[1];
+}
+
 String string_basics(const String& suffix)
 {
     String text = "stainless";

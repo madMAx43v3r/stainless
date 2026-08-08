@@ -1002,7 +1002,7 @@ impl Emitter {
                 let index = self.expression(index)?;
                 Ok(quote!((#receiver).index(#index)))
             }
-            hir::Expression::ArrayIndex { receiver, index } => {
+            hir::Expression::SequenceIndex { receiver, index } => {
                 let receiver = self.expression(receiver)?;
                 let index = self.expression(index)?;
                 Ok(quote!((#receiver)[#index]))

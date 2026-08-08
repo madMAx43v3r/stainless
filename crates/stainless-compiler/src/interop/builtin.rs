@@ -29,6 +29,7 @@ pub fn standard_bindings() -> Result<NativeBindings, super::BindingError> {
         list_binding(),
         map_binding(),
         multimap_binding(),
+        option_binding(),
         queue_binding(),
         random_binding(),
         random_error_binding(),
@@ -2026,4 +2027,62 @@ fn set_of(element: TypeRef) -> TypeRef {
 
 fn option_of(value: TypeRef) -> TypeRef {
     TypeRef::native("rust::Option", vec![value])
+}
+
+fn option_binding() -> NativeTypeBinding {
+    let t = TypeRef::Parameter(T.to_owned());
+    let option = option_of(t.clone());
+
+    NativeTypeBinding {
+        stainless_path: "rust::Option".to_owned(),
+        rust_path: "::core::option::Option".to_owned(),
+        type_parameters: vec![T.to_owned()],
+        error_format: None,
+        callables: vec![
+            constructor(
+                "Option",
+                vec![],
+                option.clone(),
+                RustLowering::AssociatedFunction {
+                    rust_path: "::core::option::Option::default".to_owned(),
+                },
+            ),
+            constructor(
+                "Option",
+                vec![Parameter::new("value", t.clone())],
+                option.clone(),
+                RustLowering::AssociatedFunction {
+                    rust_path: "::core::option::Option::Some".to_owned(),
+                },
+            ),
+            renamed_method(
+                "has_value",
+                "is_some",
+                Receiver::Shared,
+                vec![],
+                TypeRef::Bool,
+            ),
+            CallableBinding {
+                source_name: "value_or".to_owned(),
+                style: CallStyle::Method,
+                receiver: Some(Receiver::Shared),
+                parameters: vec![Parameter::new("fallback", t.clone())],
+                is_async: false,
+                return_type: t.clone(),
+                rust_result_error: None,
+                return_borrow: None,
+                requirements: vec![requirement(T, "::core::clone::Clone")],
+                lowering: RustLowering::ClonedReceiverMethod {
+                    rust_name: "unwrap_or".to_owned(),
+                },
+            },
+            method_with_requirements(
+                "clone",
+                Receiver::Shared,
+                vec![],
+                option,
+                vec![requirement(T, "::core::clone::Clone")],
+            ),
+        ],
+    }
 }

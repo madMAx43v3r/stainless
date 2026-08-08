@@ -29,6 +29,27 @@ Vec<u8> make_vec() {
 }
 
 #[test]
+fn optional_is_available_without_an_import() {
+    let analysis = analyze(
+        r"u32 optional_values() {
+    optional<u32> empty;
+    optional<u32> populated = optional<u32>(7);
+    optional<u32> copied = populated.clone();
+    if (!populated.has_value()) {
+        return 0;
+    }
+    return empty.value_or(3) + copied.value_or(4);
+}
+",
+    );
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
 fn positive_integer_literals_default_to_u32_and_infer_from_context() {
     let analysis = analyze(
         r"void literals() {
@@ -1575,6 +1596,49 @@ usize native_calls(const String& suffix) {
             .calls
             .iter()
             .any(|call| call.target == CallTarget::Intrinsic(Intrinsic::Move))
+    );
+}
+
+#[test]
+fn vec_indexing_preserves_shared_and_mutable_place_semantics() {
+    let valid = analyze(
+        r"use rust::Vec;
+
+u32 access(Vec<u32>& values, const Vec<u32>& shared) {
+    u32 first = shared[0];
+    values[1] = first;
+    return values[1];
+}
+",
+    );
+    assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);
+
+    let invalid = analyze(
+        r"use rust::Vec;
+
+void mutate_shared(const Vec<u32>& values) {
+    values[0] = 1;
+}
+
+u32 wrong_index(const Vec<u32>& values) {
+    u32 index = 0;
+    return values[index];
+}
+",
+    );
+    assert!(
+        invalid
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "RES013"),
+        "{:#?}",
+        invalid.diagnostics
+    );
+    assert!(
+        invalid
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("index requires `usize`"))
     );
 }
 

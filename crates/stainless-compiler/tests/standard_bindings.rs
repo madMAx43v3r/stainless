@@ -20,6 +20,7 @@ fn standard_registry_contains_builtin_types_in_path_order() {
             "rust::List",
             "rust::Map",
             "rust::MultiMap",
+            "rust::Option",
             "rust::Queue",
             "rust::Set",
             "rust::String",
@@ -37,6 +38,41 @@ fn standard_registry_contains_builtin_types_in_path_order() {
             "rust::std::string::FromUtf8Error",
         ]
     );
+}
+
+#[test]
+fn option_exposes_cpp_style_construction_and_queries() {
+    let bindings = standard_bindings().unwrap();
+    let option = bindings.type_by_path("rust::Option").unwrap();
+    let t = TypeRef::Parameter("T".to_owned());
+    let option_t = TypeRef::native("rust::Option", vec![t.clone()]);
+
+    assert!(
+        option
+            .find_callable(CallStyle::Constructor, "Option", &[])
+            .is_some()
+    );
+    assert!(
+        option
+            .find_callable(CallStyle::Constructor, "Option", std::slice::from_ref(&t))
+            .is_some()
+    );
+    let has_value = option
+        .find_callable(CallStyle::Method, "has_value", &[])
+        .unwrap();
+    assert_eq!(has_value.receiver, Some(Receiver::Shared));
+    assert_eq!(has_value.return_type, TypeRef::Bool);
+    let value_or = option
+        .find_callable(CallStyle::Method, "value_or", std::slice::from_ref(&t))
+        .unwrap();
+    assert_eq!(value_or.receiver, Some(Receiver::Shared));
+    assert_eq!(value_or.return_type, t);
+    assert_eq!(value_or.requirements[0].rust_trait, "::core::clone::Clone");
+    let clone = option
+        .find_callable(CallStyle::Method, "clone", &[])
+        .unwrap();
+    assert_eq!(clone.return_type, option_t);
+    assert_eq!(clone.requirements[0].rust_trait, "::core::clone::Clone");
 }
 
 #[test]

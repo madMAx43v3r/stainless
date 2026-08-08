@@ -103,6 +103,64 @@ fn fixed_arrays_and_const_generics_lower_to_rust_arrays() {
     remove_temporary_parent(&binary);
 }
 
+#[test]
+fn vec_indexing_reads_and_mutates_elements() {
+    let result = transpile(
+        r"use rust::Vec;
+
+u32 vec_indexing() {
+    Vec<u32> values;
+    values.push(10);
+    values.push(20);
+
+    u32 first = values[0];
+    values[1] = 32;
+    return first + values[1];
+}
+
+u32 vec_out_of_bounds() {
+    Vec<u32> values;
+    return values[0];
+}
+",
+    );
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let function = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["vec_indexing"])
+        .expect("vec_indexing symbol")
+        .mangled_name
+        .clone();
+    let out_of_bounds = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["vec_out_of_bounds"])
+        .expect("vec_out_of_bounds symbol")
+        .mangled_name
+        .clone();
+    let mut rust = result.rust.expect("Vec indexing should emit Rust");
+    write!(
+        rust,
+        "\nfn main() {{ assert_eq!({function}(), 42); assert!(::std::panic::catch_unwind(|| {out_of_bounds}()).is_err()); }}\n"
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("vec-indexing", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .expect("generated Vec indexing program should run");
+    assert!(output.status.success(), "{output:?}");
+    remove_temporary_parent(&binary);
+}
+
 const BEHAVIOR_SOURCE: &str = r#"use rust::{String, Vec};
 
 namespace samples {

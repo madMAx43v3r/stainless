@@ -236,6 +236,8 @@ constructs with direct Rust equivalents:
 - compiler-native `var`, `null`, and JSON literals backed by the compact
   runtime, with checked parsing/mutation and reference-counted object/array
   identity;
+- built-in `optional<T>` values with empty and value construction,
+  `has_value()`, `value_or()`, and `clone()`; these lower to Rust `Option<T>`;
 - direct use of safe Rust `core`, `alloc`, and `std` APIs plus generated,
   compile-checked wrappers for external Cargo dependencies, all reached through
   the reserved `rust` namespace;
@@ -749,6 +751,14 @@ for (const auto& [key, value] : values) {
     println!("{} = {}", key, value);
 }
 ```
+
+Dynamic `var` values can be iterated as JSON arrays with an explicit `var`
+binding. The operation takes an owned element snapshot and therefore raises
+the checked `stainless::JsonError` when the runtime value is not an array.
+`const var&` borrows each snapshot element, while `var` consumes the snapshot's
+owned clones. The original array may change during either loop without
+changing the current iteration. Mutable `var&` bindings are rejected because
+they would expose references through the runtime array lock.
 
 `auto& [key, value]` permits mutation through `value` while `key` remains a
 constant reference, preserving key order. A multimap yields one flat pair per
@@ -2301,7 +2311,9 @@ The compiler crate currently registers the following source-visible APIs:
   slice adapter. `copy_range(begin, end)` clones a checked half-open range into
   a new owned `Vec<T>` and requires `T: Clone`. `with_range` visits the range
   without allocating or exposing a storable Rust slice and returns `false` for
-  invalid bounds.
+  invalid bounds. `values[index]` provides shared or mutable indexed-place
+  access, requires an exact `usize` index (with integer literals inferred from
+  context), and uses Rust's bounds-checked indexing behavior.
 - `rust::String`: `String()`, the explicit copy constructor
   `String(const String&)`, `String::with_capacity`, `clone`, `into_bytes`,
   `len`, `is_empty`, `capacity`, `reserve`, `reserve_exact`, `shrink_to`,
@@ -2363,15 +2375,17 @@ The binding model supports direct reference returns and records whether their
 borrow originates from the receiver or the callable's one reference parameter.
 Map lookup deliberately uses non-escaping callbacks because the language does
 not yet admit reference-bearing values such as `Option<const V&>`.
-Reference-bearing values, iterator-producing APIs, and indexing are not exposed
-in this first subset: `Vec::get` returns `Option<&T>`, `Vec::iter` returns a
-borrowing iterator, and `String::as_str`, `String::split`, and `String::chars`
-also require either `str` or a borrowing iterator. Adding these requires the
-deferred reference-bearing-value model rather than merely placing their names
-in the registry. The semantic resolver now instantiates this metadata for
-constructors, associated functions, and methods, including receiver mode,
-argument adaptations, generic substitutions, and retained trait obligations.
-The Rust emitter uses this metadata for direct standard-library calls.
+Reference-bearing values and iterator-producing APIs are not exposed in this
+first subset: `Vec::get` returns `Option<&T>`, `Vec::iter` returns a borrowing
+iterator, and `String::as_str`, `String::split`, and `String::chars` also require
+either `str` or a borrowing iterator. Direct `Vec` indexing is compiler-known
+syntax rather than an exposed reference-bearing Rust return value. Adding the
+remaining APIs requires the deferred reference-bearing-value model rather than
+merely placing their names in the registry. The semantic resolver now
+instantiates this metadata for constructors, associated functions, and methods,
+including receiver mode, argument adaptations, generic substitutions, and
+retained trait obligations. The Rust emitter uses this metadata for direct
+standard-library calls.
 
 #### Native JSON and `var`
 
@@ -3305,7 +3319,8 @@ the accepted subset it now:
   explicit nullable-owner map);
 - lowers `while` loops directly, lowers classic loops without breaking C++
   `continue`/update ordering, and lowers shared, mutable, copied, and consuming
-  `Vec<T>` range loops to the corresponding Rust iterator form;
+  native-collection range loops plus checked JSON-array snapshot loops to the
+  corresponding Rust iterator form;
 - lowers checked functions and constructors to Rust `Result`, throws to a
   boxed compiler-private error carrier, and typed catches to safe base
   projection without `unsafe`;
@@ -3477,6 +3492,23 @@ native JSON receive a hidden temporary Cargo manifest linking
 `stainless-runtime`; users still do not create `main.rs` or `build.rs`.
 Diagnostics go to stderr and use byte spans until richer source rendering is
 added.
+
+### Stainless test packages
+
+A Stainless test is an ordinary executable package whose `main` returns zero on success. Run the checked-in test
+packages directly with:
+
+```sh
+stainlessc --run --package crates/stainless-crypto/test
+stainlessc --run --package crates/stainless-http/test
+stainlessc --run --package crates/stainless-kvstore/test
+stainlessc --run --package apps/mmx-wallet/test
+stainlessc --run --package apps/poker/test
+```
+
+Each test directory has its own `stainless-package.toml` and declares the package under test as a source dependency.
+When working from an uninstalled workspace build, replace `stainlessc` with
+`cargo run -q -p stainlessc --`.
 
 ## Rust library survey
 

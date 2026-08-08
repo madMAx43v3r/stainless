@@ -594,9 +594,9 @@ pub enum Expression {
         /// Array index.
         index: Box<Expression>,
     },
-    /// Fixed-size array indexing.
-    ArrayIndex {
-        /// Array place or value.
+    /// Fixed-size array or vector indexing.
+    SequenceIndex {
+        /// Array or vector place or value.
         receiver: Box<Expression>,
         /// Checked `usize` index.
         index: Box<Expression>,

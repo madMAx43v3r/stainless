@@ -3395,16 +3395,26 @@ impl Resolver<'_> {
                 let receiver = self.resolve_expression(receiver, None, context);
                 let index = self.resolve_expression(index, Some(&TypeRef::Usize), context);
                 self.require_exact(&TypeRef::Usize, &index.ty, expression.span, "index");
-                if let TypeRef::Array { element, .. } = canonical(&receiver.ty) {
+                let receiver_type = canonical(&receiver.ty);
+                let indexed_element = match &receiver_type {
+                    TypeRef::Array { element, .. } => Some(element.as_ref()),
+                    TypeRef::Native { path, arguments }
+                        if path == "rust::Vec" && arguments.len() == 1 =>
+                    {
+                        arguments.first()
+                    }
+                    _ => None,
+                };
+                if let Some(element) = indexed_element {
                     (
                         ExpressionInfo {
-                            ty: element.as_ref().clone(),
+                            ty: element.clone(),
                             category: receiver.category,
                         },
                         None,
                         None,
                     )
-                } else if is_json_var(&canonical(&receiver.ty)) {
+                } else if is_json_var(&receiver_type) {
                     (
                         ExpressionInfo {
                             ty: json_var_type(),
@@ -3414,11 +3424,11 @@ impl Resolver<'_> {
                         None,
                     )
                 } else {
-                    if canonical(&receiver.ty) != TypeRef::Error {
+                    if receiver_type != TypeRef::Error {
                         self.push(
                             "RES011",
                             format!(
-                                "indexing requires `Array<T, N>` or `var`, found `{}`",
+                                "indexing requires `Array<T, N>`, `rust::Vec<T>`, or `var`, found `{}`",
                                 display_type(&receiver.ty)
                             ),
                             expression.span,
@@ -9265,6 +9275,9 @@ impl Resolver<'_> {
     ) -> Option<String> {
         if matches!(segments, [name] if name == "var") {
             return Some(VAR_TYPE_PATH.to_owned());
+        }
+        if matches!(segments, [name] if name == "optional") {
+            return Some("rust::Option".to_owned());
         }
         let candidates = if segments
             .first()

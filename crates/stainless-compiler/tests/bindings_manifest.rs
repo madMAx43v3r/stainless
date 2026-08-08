@@ -88,6 +88,7 @@ fn package_loader_merges_optional_manifest_with_compiler_builtins() {
             "rust::List",
             "rust::Map",
             "rust::MultiMap",
+            "rust::Option",
             "rust::Queue",
             "rust::Set",
             "rust::String",
