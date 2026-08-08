@@ -86,7 +86,8 @@ impl Error for ServerError {}
 
 impl Server {
     /// Binds one listener and starts its asynchronous runtime on a background
-    /// thread. `address` may contain port zero to select a free local port.
+    /// thread. `address` may contain port zero to select a free local port. An
+    /// empty `websocket_path` disables WebSocket upgrades.
     ///
     /// # Errors
     ///
@@ -98,11 +99,14 @@ impl Server {
         request_timeout_ms: u64,
         max_body_bytes: usize,
     ) -> Result<Self, ServerError> {
-        if !websocket_path.starts_with('/') || websocket_path.contains(['?', '#']) {
+        if !websocket_path.is_empty()
+            && (!websocket_path.starts_with('/') || websocket_path.contains(['?', '#']))
+        {
             return Err(ServerError::new(
                 "the WebSocket path must be an absolute path without a query or fragment",
             ));
         }
+        let websocket_path = (!websocket_path.is_empty()).then(|| websocket_path.to_owned());
         if max_body_bytes == 0 {
             return Err(ServerError::new(
                 "the maximum HTTP request body size must be greater than zero",
@@ -137,7 +141,6 @@ impl Server {
             max_body_bytes,
         });
         let runtime_state = Arc::clone(&state);
-        let websocket_path = websocket_path.to_owned();
         let runtime_thread = std::thread::Builder::new()
             .name("stainless-http-runtime".to_owned())
             .spawn(move || {
@@ -242,7 +245,7 @@ impl Server {
 
     /// Requests graceful shutdown. Calling this more than once is harmless.
     pub fn shutdown(&self) {
-        let _ = self.state.shutdown.send(true);
+        let _ = self.state.shutdown.send_replace(true);
     }
 }
 
@@ -255,7 +258,11 @@ impl Drop for Server {
     }
 }
 
-async fn run_server(listener: TcpListener, websocket_path: String, state: Arc<SharedState>) {
+async fn run_server(
+    listener: TcpListener,
+    websocket_path: Option<String>,
+    state: Arc<SharedState>,
+) {
     let listener = match tokio::net::TcpListener::from_std(listener) {
         Ok(listener) => listener,
         Err(error) => {
@@ -269,10 +276,12 @@ async fn run_server(listener: TcpListener, websocket_path: String, state: Arc<Sh
     let app_state = AppState {
         shared: Arc::clone(&state),
     };
-    let app = Router::new()
-        .route(&websocket_path, get(upgrade_websocket))
-        .fallback(handle_http)
-        .with_state(app_state);
+    let app = match websocket_path {
+        Some(path) => Router::new().route(&path, get(upgrade_websocket)),
+        None => Router::new(),
+    }
+    .fallback(handle_http)
+    .with_state(app_state);
     let mut shutdown = state.shutdown.subscribe();
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {

@@ -24,15 +24,9 @@ String append(const String& left, const String& right)
     return result;
 }
 
-String decimal(const u64 value)
+u128 amount(const var& value) throws ConfigError
 {
-    return crypto::uint_decimal(u128(value));
-}
-
-u128 decimal_value(const var& value) throws ConfigError
-{
-    String json = value.to_json();
-    require_config(json.starts_with("\""),
+    require_config(value.is_string(),
                    "u64/u128 JSON values must be decimal strings");
     try {
         return crypto::parse_decimal_u128(String(value));
@@ -41,16 +35,10 @@ u128 decimal_value(const var& value) throws ConfigError
     }
 }
 
-u128 amount(const var& value) throws ConfigError
-{
-    return decimal_value(value);
-}
-
 u64 integer(const var& value) throws ConfigError
 {
-    u128 exact = decimal_value(value);
-    require_config(exact <= 18446744073709551615,
-                   "integer exceeds the u64 range");
+    u128 exact = amount(value);
+    require_config(exact <= 18446744073709551615, "integer exceeds the u64 range");
     return u64(exact);
 }
 
@@ -62,6 +50,11 @@ String contract_u64(const u64 value)
 String contract_amount(const u128& value)
 {
     return crypto::uint_hex(value);
+}
+
+String decimal(const u64 value)
+{
+    return crypto::uint_decimal(u128(value));
 }
 
 String quantity(const u128& value)
@@ -86,8 +79,7 @@ var public_template(const var& item)
     };
 }
 
-var public_table_status(const var& status)
-    throws stainless::JsonError, ConfigError
+var public_table_status(const var& status) throws stainless::JsonError, ConfigError
 {
     var start_height = null;
     var refund_height = null;
@@ -126,8 +118,7 @@ var public_table_config(const var& config)
     };
 }
 
-var public_table(const var& table)
-    throws stainless::JsonError, ConfigError
+var public_table(const var& table) throws stainless::JsonError, ConfigError
 {
     var result = {
         address: String(table.address),
@@ -148,12 +139,11 @@ var public_table(const var& table)
     return result;
 }
 
-var public_chain(const var& chain)
-    throws stainless::JsonError, ConfigError
+var public_chain(const var& chain) throws stainless::JsonError, ConfigError
 {
     var tables = [];
-    for (usize i = 0; i < chain.tables.len(); i += 1) {
-        tables.push(public_table(chain.tables[i]));
+    for (const var& table : chain.tables) {
+        tables.push(public_table(table));
     }
     return {
         height: decimal(integer(chain.height)),
@@ -215,8 +205,8 @@ void validate_config(const var& config) throws ConfigError, stainless::JsonError
 var public_config(const var& config) throws stainless::JsonError
 {
     var templates = [];
-    for (usize i = 0; i < config.templates.len(); i += 1) {
-        templates.push(public_template(config.templates[i]));
+    for (const var& item : config.templates) {
+        templates.push(public_template(item));
     }
     return {
         dealer: String(config.dealer),
@@ -300,8 +290,8 @@ String header_path(const u64 height)
 
 bool table_known(const var& chain, const String& address) throws stainless::JsonError
 {
-    for (usize i = 0; i < chain.tables.len(); i += 1) {
-        if (String(chain.tables[i].address) == address) {
+    for (const var& table : chain.tables) {
+        if (String(table.address) == address) {
             return true;
         }
     }
@@ -311,8 +301,8 @@ bool table_known(const var& chain, const String& address) throws stainless::Json
 bool pending_known(const var& pending, const String& address)
     throws stainless::JsonError
 {
-    for (usize i = 0; i < pending.len(); i += 1) {
-        if (String(pending[i].address) == address) {
+    for (const var& table : pending) {
+        if (String(table.address) == address) {
             return true;
         }
     }
@@ -323,8 +313,7 @@ void recover_reorg_deployments(const var& old_chain, const var& chain,
                                var& pending, const u64 tip_height)
     throws stainless::JsonError
 {
-    for (usize i = 0; i < old_chain.tables.len(); i += 1) {
-        var table = old_chain.tables[i];
+    for (const var& table : old_chain.tables) {
         String address = String(table.address);
         if (!table_known(chain, address) && !pending_known(pending, address)) {
             pending.push({
@@ -339,8 +328,7 @@ void recover_reorg_deployments(const var& old_chain, const var& chain,
 
 var get_table(const var& chain, const String& address) throws stainless::JsonError
 {
-    for (usize i = 0; i < chain.tables.len(); i += 1) {
-        var table = chain.tables[i];
+    for (const var& table : chain.tables) {
         if (String(table.address) == address) {
             return table;
         }
@@ -351,8 +339,7 @@ var get_table(const var& chain, const String& address) throws stainless::JsonErr
 void refresh_tables(const Client& node, var& chain)
     throws stainless::JsonError, ConfigError
 {
-    for (usize i = 0; i < chain.tables.len(); i += 1) {
-        var table = chain.tables[i];
+    for (var table : chain.tables) {
         try {
             table.status = contract_call(node, String(table.address),
                                          "get_table_status", []);
@@ -376,8 +363,7 @@ void merge_pending(const Client& node, const var& config, var& chain,
     var remaining = [];
     bool changed = false;
     u64 height = integer(chain.height);
-    for (usize i = 0; i < pending.len(); i += 1) {
-        var table = pending[i];
+    for (var table : pending) {
         bool confirmed = false;
         try {
             var status = contract_call(node, String(table.address),
@@ -473,8 +459,7 @@ usize available_for_template(const var& chain, const var& pending,
     throws stainless::JsonError
 {
     usize count = 0;
-    for (usize i = 0; i < chain.tables.len(); i += 1) {
-        var table = chain.tables[i];
+    for (const var& table : chain.tables) {
         if (String(table.template_id) == template_id && u64(table.confirmed) != 0 &&
             u64(table.reachable) != 0 &&
             u64(table.status.table_open) != 0 &&
@@ -483,8 +468,8 @@ usize available_for_template(const var& chain, const var& pending,
             count += 1;
         }
     }
-    for (usize i = 0; i < pending.len(); i += 1) {
-        if (String(pending[i].template_id) == template_id) {
+    for (const var& table : pending) {
+        if (String(table.template_id) == template_id) {
             count += 1;
         }
     }

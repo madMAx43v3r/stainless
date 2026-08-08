@@ -17,7 +17,11 @@ error_format = "display"
 dependency = "stainless-http"
 rust_path = "stainless_http::Client::new"
 stainless_path = "rust::stainless_http::Client::new"
-parameters = ["const rust::String&", "const rust::String&", "u64"]
+parameters = [
+    "const rust::String&",
+    "u64",
+    "const rust::Map<rust::String, rust::String>&",
+]
 return = "rust::Result<rust::stainless_http::Client, rust::stainless_http::ClientError>"
 
 [[method]]

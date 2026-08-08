@@ -47,7 +47,9 @@ stainlessc --run --package apps/poker/test
 `poker_binary` is the already-deployed `poker2.js` binary address. The dealer
 deploys executable table instances; it does not deploy the binary. `dealer`
 must be an address controlled by `wallet_index`. The WAPI token needs spending
-permission and that wallet must be available for unattended signing.
+permission and that wallet must be available for unattended signing. Poker
+adds the token to its HTTP `ClientConfig` as the MMX-specific `x-api-token`
+header; the generic HTTP client has no MMX authentication policy.
 
 Template fields map directly to the contract initializer. `start_delay` and
 `game_timeout` are block counts. `player_timeout` is seconds and is also stored

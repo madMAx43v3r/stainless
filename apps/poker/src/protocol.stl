@@ -6,12 +6,12 @@ use rust::{String, Vec};
 namespace poker {
 namespace protocol {
 
-String decimal_u64(const u64 value)
+String decimal(const u64 value)
 {
     return crypto::uint_decimal(u128(value));
 }
 
-String decimal_u128(const u128& value)
+String decimal(const u128& value)
 {
     return crypto::uint_decimal(value);
 }
@@ -35,9 +35,9 @@ String seed_commit(const String& table, const u64 hand_id, const String& address
     }
     String message = "MMX_PARALLEL_POKER_SEED_V1";
     append_segment(message, table);
-    append_segment(message, decimal_u64(hand_id));
+    append_segment(message, decimal(hand_id));
     append_segment(message, address);
-    append_segment(message, decimal_u64(seed_round));
+    append_segment(message, decimal(seed_round));
     append_segment(message, seed);
     return crypto::sha256::hash(message);
 }
@@ -50,7 +50,7 @@ String commit_hash(const String& table, const u64 hand_id, const String& address
     }
     String message = "MMX_PARALLEL_POKER_COMMIT_V1";
     append_segment(message, table);
-    append_segment(message, decimal_u64(hand_id));
+    append_segment(message, decimal(hand_id));
     append_segment(message, address);
     for (const String& commitment : commitments) {
         if (!valid_hash(commitment)) {
@@ -69,12 +69,12 @@ String action_hash(const String& table, const u64 hand_id, const String& address
     }
     String message = "MMX_PARALLEL_POKER_ACTION_V1";
     append_segment(message, table);
-    append_segment(message, decimal_u64(hand_id));
+    append_segment(message, decimal(hand_id));
     append_segment(message, address);
-    append_segment(message, decimal_u64(betting_round));
-    append_segment(message, decimal_u64(epoch));
-    append_segment(message, decimal_u64(action));
-    append_segment(message, decimal_u128(cumulative_bet));
+    append_segment(message, decimal(betting_round));
+    append_segment(message, decimal(epoch));
+    append_segment(message, decimal(action));
+    append_segment(message, decimal(cumulative_bet));
     append_segment(message, checkpoint);
     return crypto::sha256::hash(message);
 }
@@ -88,14 +88,14 @@ String checkpoint_step(const String& table, const u64 hand_id, const String& che
     }
     String message = "MMX_PARALLEL_POKER_CHECKPOINT_V1";
     append_segment(message, table);
-    append_segment(message, decimal_u64(hand_id));
+    append_segment(message, decimal(hand_id));
     append_segment(message, checkpoint);
-    append_segment(message, decimal_u64(phase));
-    append_segment(message, decimal_u64(event_round));
-    append_segment(message, decimal_u64(epoch));
+    append_segment(message, decimal(phase));
+    append_segment(message, decimal(event_round));
+    append_segment(message, decimal(epoch));
     append_segment(message, address);
-    append_segment(message, decimal_u64(event));
-    append_segment(message, decimal_u128(amount));
+    append_segment(message, decimal(event));
+    append_segment(message, decimal(amount));
     append_segment(message, data_hash);
     return crypto::sha256::hash(message);
 }
@@ -108,8 +108,8 @@ String start_checkpoint(const String& table, const u64 hand_id, const u64 start_
     }
     String message = "MMX_PARALLEL_POKER_START_V1";
     append_segment(message, table);
-    append_segment(message, decimal_u64(hand_id));
-    append_segment(message, decimal_u64(start_height));
+    append_segment(message, decimal(hand_id));
+    append_segment(message, decimal(start_height));
     String checkpoint = crypto::sha256::hash(message);
     Vec<u128> remaining_stacks = stacks.clone();
     for (const String& address : addresses) {
@@ -127,9 +127,9 @@ String continue_hash(const String& table, const u64 hand_id, const String& addre
     }
     String message = "MMX_PARALLEL_POKER_CONTINUE_V1";
     append_segment(message, table);
-    append_segment(message, decimal_u64(hand_id));
+    append_segment(message, decimal(hand_id));
     append_segment(message, address);
-    append_segment(message, decimal_u128(result_stack));
+    append_segment(message, decimal(result_stack));
     append_segment(message, checkpoint);
     return crypto::sha256::hash(message);
 }
@@ -139,7 +139,7 @@ String auth_hash(const String& dealer, const String& challenge, const u64 expire
     String message = "MMX_POKER_DEALER_AUTH_V1";
     append_segment(message, dealer);
     append_segment(message, challenge);
-    append_segment(message, decimal_u64(expires_at));
+    append_segment(message, decimal(expires_at));
     append_segment(message, address);
     return crypto::sha256::hash(message);
 }

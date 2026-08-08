@@ -13,9 +13,14 @@ are enforced by the transport.
 `websocket_path` has no value for HTTP-only servers and contains the upgrade
 path when HTTP and WebSocket traffic should share the listener.
 
-The crate also exposes a reusable synchronous JSON client with optional
-`x-api-token` authentication. It is used by the poker dealer for MMX WAPI
-calls through generated Rust bindings.
+The crate also exposes a reusable synchronous JSON client configured through
+`http::ClientConfig`. Applications can populate its `Map<String, String>`
+headers without placing authentication policy in the transport crate. The
+poker dealer uses this generic interface for MMX WAPI calls.
+
+The client owns a connection-pooling agent. A later request opens a new
+connection when no reusable connection is available, but the HTTP facade does
+not retry a failed request or add application-level backoff.
 
 Run its Stainless integration test from the workspace root with:
 

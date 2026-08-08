@@ -23,8 +23,7 @@ var empty_hands()
     return [];
 }
 
-void save_hands(const JsonTable1<String>& store, const var& hands)
-    throws stainless::Exception
+void save_hands(const JsonTable1<String>& store, const var& hands) throws stainless::Exception
 {
     store.insert("hands", hands.clone());
     u32 next = store.current_version() + 1;
@@ -37,8 +36,7 @@ void save_hands(const JsonTable1<String>& store, const var& hands)
     }
 }
 
-usize find_hand_index(const var& hands, const String& table)
-    throws stainless::JsonError
+usize find_hand_index(const var& hands, const String& table) throws stainless::JsonError
 {
     for (usize i = 0; i < hands.len(); i += 1) {
         if (String(hands[i].table) == table) {
@@ -48,8 +46,7 @@ usize find_hand_index(const var& hands, const String& table)
     return hands.len();
 }
 
-var find_hand(const var& hands, const String& table)
-    throws stainless::JsonError
+var find_hand(const var& hands, const String& table) throws stainless::JsonError
 {
     usize index = find_hand_index(hands, table);
     if (index == hands.len()) {
@@ -93,15 +90,6 @@ String hand_key(const var& hand, const String& address, const String& kind,
 {
     return inbox_key(String(hand.table), integer(hand.hand_id), address,
                      kind, round, epoch);
-}
-
-var peek_message(var& inbox, const String& key) throws stainless::JsonError
-{
-    var message = inbox.remove(key);
-    if (message != null) {
-        inbox.set(key, message);
-    }
-    return message;
 }
 
 bool has_message(const var& inbox, const String& key) throws stainless::JsonError
@@ -582,7 +570,7 @@ bool advance_commit(var& hand, var& inbox, const u64 now)
     bool ready = true;
     for (usize i = 0; i < hand.players.len(); i += 1) {
         String key = hand_key(hand, String(hand.players[i].address), "commit", 0, 0);
-        ready = ready && valid_commit(peek_message(inbox, key));
+        ready = ready && valid_commit(inbox.get(key));
     }
     if (!ready && now < integer(hand.deadline)) {
         return false;
@@ -615,8 +603,7 @@ bool advance_reveal(var& hand, var& inbox, const u64 now)
         var player = hand.players[i];
         if (u64(player.folded) == 0) {
             String key = hand_key(hand, String(player.address), "reveal", round, 0);
-            ready = ready && valid_reveal(hand, player, round,
-                                          peek_message(inbox, key));
+            ready = ready && valid_reveal(hand, player, round, inbox.get(key));
         }
     }
     if (!ready && now < integer(hand.deadline)) {
@@ -665,8 +652,7 @@ bool advance_betting(var& hand, var& inbox, const u64 now)
         if (u64(player.folded) == 0 && amount(player.bet) < amount(player.stack)) {
             String key = hand_key(hand, String(player.address), "action",
                                   integer(hand.round), integer(hand.epoch));
-            ready = ready && valid_action(hand, player, target,
-                                          peek_message(inbox, key));
+            ready = ready && valid_action(hand, player, target, inbox.get(key));
         }
     }
     if (!ready && now < integer(hand.deadline)) {
@@ -940,8 +926,7 @@ bool advance_show(const Client& node, var& hand, var& inbox, const u64 now)
             String muck_key = hand_key(hand, String(player.address), "muck", 4, 0);
             bool submitted = has_message(inbox, muck_key);
             if (!submitted) {
-                submitted = validate_show(node, hand, player,
-                                          peek_message(inbox, show_key)) != null;
+                submitted = validate_show(node, hand, player, inbox.get(show_key)) != null;
             }
             ready = ready && submitted;
         }
@@ -1093,8 +1078,7 @@ bool advance_continue(const Client& node, const var& config, const var& chain,
         String continue_key = hand_key(hand, String(player.address), "continue", 0, 0);
         String leave_key = hand_key(hand, String(player.address), "leave", 0, 0);
         bool submitted = has_message(inbox, leave_key) ||
-                         valid_continuation(hand, player,
-                                            peek_message(inbox, continue_key));
+                         valid_continuation(hand, player, inbox.get(continue_key));
         ready = ready && submitted;
     }
     if (!ready && now < integer(hand.deadline)) {
@@ -1179,9 +1163,8 @@ var tick_hands(const Client& node, const var& config, const var& chain, const Js
     }
 
     bool changed = false;
-    for (usize i = 0; i < chain.tables.len(); i += 1) {
-        var result = reconcile_table(node, chain.tables[i], hands,
-                                     integer(chain.height), now);
+    for (const var& table : chain.tables) {
+        var result = reconcile_table(node, table, hands, integer(chain.height), now);
         if (u64(result.changed) != 0) {
             changed = true;
         }

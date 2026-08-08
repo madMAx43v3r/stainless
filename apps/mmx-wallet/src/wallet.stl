@@ -18,7 +18,7 @@ String sha256_hex(const String& source)
     return crypto::sha256::hash(bytes);
 }
 
-String public_key(const String& secret_key) throws stainless::RustError
+String get_public_key(const String& secret_key) throws stainless::RustError
 {
     Vec<u8> secret_bytes = crypto::decode_hex(secret_key);
     String key = crypto::secp256k1::get_public_key(secret_bytes);

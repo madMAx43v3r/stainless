@@ -239,10 +239,15 @@ void run() throws stainless::Exception
     Map<u64, var> sessions;
 
     u64 request_timeout = integer(config.request_timeout_ms);
-    Client node = http::connect(String(config.node_url), String(config.api_token),
-                                request_timeout);
-    Server server = http::listen(String(config.listen), "/v1/ws",
-                                 request_timeout, 1048576);
+    http::ClientConfig node_config = http::ClientConfig(String(config.node_url));
+    node_config.request_timeout_ms = request_timeout;
+    node_config.headers.insert("x-api-token", String(config.api_token));
+    Client node = http::connect(node_config);
+    http::ServerConfig server_config = http::ServerConfig(String(config.listen));
+    server_config.websocket_path = optional<String>("/v1/ws");
+    server_config.request_timeout_ms = request_timeout;
+    server_config.max_body_bytes = 1048576;
+    Server server = http::listen(server_config);
     println!("MMX poker dealer listening on {}", http::local_address(server));
 
     u64 elapsed_ms = integer(config.poll_interval_ms);

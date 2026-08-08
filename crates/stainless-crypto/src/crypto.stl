@@ -149,6 +149,10 @@ String uint_hex(const u128& value)
     return encoded;
 }
 
+// Returns floor((left * right) / divisor) without first calculating the potentially overflowing product.
+// The calculation is exact: it uses only integer quotient/remainder arithmetic and discards the final remainder.
+// Throws DecimalError when divisor is zero or when the resulting quotient does not fit in u128.
+
 u128 mul_div_floor(const u128& left, const u128& right, const u128& divisor) throws DecimalError
 {
     if (divisor == 0) {
@@ -164,15 +168,13 @@ u128 mul_div_floor(const u128& left, const u128& right, const u128& divisor) thr
     while (multiplier > 0) {
         if (multiplier % 2 == 1) {
             if (result > maximum - unit_quotient) {
-                throw DecimalError{stainless::Exception(
-                    "wide multiplication quotient overflow")};
+                throw DecimalError{stainless::Exception("mul_div_floor(): quotient overflow")};
             }
             result += unit_quotient;
             if (remainder >= divisor - unit_remainder) {
                 remainder -= divisor - unit_remainder;
                 if (result == maximum) {
-                    throw DecimalError{stainless::Exception(
-                        "wide multiplication quotient overflow")};
+                    throw DecimalError{stainless::Exception("mul_div_floor(): quotient overflow")};
                 }
                 result += 1;
             } else {
@@ -182,15 +184,13 @@ u128 mul_div_floor(const u128& left, const u128& right, const u128& divisor) thr
         multiplier /= 2;
         if (multiplier > 0) {
             if (unit_quotient > maximum - unit_quotient) {
-                throw DecimalError{stainless::Exception(
-                    "wide multiplication quotient overflow")};
+                throw DecimalError{stainless::Exception("mul_div_floor(): quotient overflow")};
             }
             unit_quotient += unit_quotient;
             if (unit_remainder >= divisor - unit_remainder) {
                 unit_remainder -= divisor - unit_remainder;
                 if (unit_quotient == maximum) {
-                    throw DecimalError{stainless::Exception(
-                        "wide multiplication quotient overflow")};
+                    throw DecimalError{stainless::Exception("mul_div_floor(): quotient overflow")};
                 }
                 unit_quotient += 1;
             } else {

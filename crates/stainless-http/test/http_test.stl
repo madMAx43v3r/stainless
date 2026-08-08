@@ -5,7 +5,10 @@ use rust::std::thread;
 
 i32 main() throws stainless::Exception
 {
-    http::ServerConfig config = http::ServerConfig("127.0.0.1:0", "/v1/ws", 100, 65536);
+    http::ServerConfig config = http::ServerConfig("127.0.0.1:0");
+    config.websocket_path = optional<String>("/v1/ws");
+    config.request_timeout_ms = 100;
+    config.max_body_bytes = 65536;
     Server server = http::listen(config);
     String address = http::local_address(server);
     if (address.len() == 0) {
@@ -15,7 +18,10 @@ i32 main() throws stainless::Exception
     base_url.push_str(address);
     thread::JoinHandle<i32> client = thread::spawn([base_url = move(base_url)]() {
         try {
-            Client connection = http::connect(base_url, "test-token", 2000);
+            http::ClientConfig config = http::ClientConfig(base_url);
+            config.request_timeout_ms = 2000;
+            config.headers.insert("x-test-header", "test-value");
+            Client connection = http::connect(config);
             var response = http::get_json(connection,
                                           "/v1/tables?template=fast");
             if (u64(response.ok) != 0) {
@@ -30,7 +36,8 @@ i32 main() throws stainless::Exception
     if (event == null || String(event.type) != "http" ||
         String(event.method) != "GET" ||
         String(event.path) != "/v1/tables" ||
-        String(event.query) != "template=fast") {
+        String(event.query) != "template=fast" ||
+        String(event.headers.get("x-test-header")) != "test-value") {
         return 2;
     }
     if (!http::respond_json(server, u64(event.request_id), 200, {ok: true})) {
@@ -41,7 +48,9 @@ i32 main() throws stainless::Exception
     }
     server.shutdown();
 
-    http::ServerConfig http_only_config = http::ServerConfig("127.0.0.1:0", 100, 65536);
+    http::ServerConfig http_only_config = http::ServerConfig("127.0.0.1:0");
+    http_only_config.request_timeout_ms = 100;
+    http_only_config.max_body_bytes = 65536;
     Server http_only = http::listen(http_only_config);
     if (http::local_address(http_only).len() == 0) {
         return 5;

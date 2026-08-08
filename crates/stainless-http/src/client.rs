@@ -1,13 +1,16 @@
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::time::Duration;
+
+use ureq::http::{HeaderMap, HeaderName, HeaderValue, header::CONTENT_TYPE};
 
 /// Reusable synchronous JSON HTTP client for Stainless applications.
 #[derive(Clone)]
 pub struct Client {
     agent: ureq::Agent,
     base_url: String,
-    api_token: String,
+    headers: HeaderMap,
 }
 
 /// URL, transport, HTTP status, or response-body failure.
@@ -33,18 +36,32 @@ impl fmt::Display for ClientError {
 impl Error for ClientError {}
 
 impl Client {
-    /// Creates a connection-pooling client. `api_token` may be empty for
-    /// public endpoints.
+    /// Creates a connection-pooling client with reusable request headers.
     ///
     /// # Errors
     ///
-    /// Returns an error when `base_url` is not an HTTP(S) origin.
-    pub fn new(base_url: &str, api_token: &str, timeout_ms: u64) -> Result<Self, ClientError> {
+    /// Returns an error when `base_url` is not an HTTP(S) origin or a header
+    /// name or value is invalid.
+    pub fn new(
+        base_url: &str,
+        timeout_ms: u64,
+        headers: &BTreeMap<String, String>,
+    ) -> Result<Self, ClientError> {
         let base_url = base_url.trim_end_matches('/');
         if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
             return Err(ClientError::new(
                 "the HTTP client base URL must start with http:// or https://",
             ));
+        }
+        let mut parsed_headers = HeaderMap::new();
+        for (name, value) in headers {
+            let parsed_name = name.parse::<HeaderName>().map_err(|_| {
+                ClientError::new(format!("invalid HTTP request header name `{name}`"))
+            })?;
+            let parsed_value = value.parse::<HeaderValue>().map_err(|_| {
+                ClientError::new(format!("invalid value for HTTP request header `{name}`"))
+            })?;
+            parsed_headers.insert(parsed_name, parsed_value);
         }
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_millis(timeout_ms.max(1))))
@@ -53,7 +70,7 @@ impl Client {
         Ok(Self {
             agent: config.into(),
             base_url: base_url.to_owned(),
-            api_token: api_token.to_owned(),
+            headers: parsed_headers,
         })
     }
 
@@ -66,8 +83,8 @@ impl Client {
     pub fn get(&self, path: &str) -> Result<String, ClientError> {
         let url = self.url(path)?;
         let mut request = self.agent.get(url);
-        if !self.api_token.is_empty() {
-            request = request.header("x-api-token", &self.api_token);
+        if let Some(headers) = request.headers_mut() {
+            headers.extend(self.headers.clone());
         }
         let response = request
             .call()
@@ -84,12 +101,10 @@ impl Client {
     /// status codes, or unreadable response bodies.
     pub fn post_json(&self, path: &str, body: &str) -> Result<String, ClientError> {
         let url = self.url(path)?;
-        let mut request = self
-            .agent
-            .post(url)
-            .header("content-type", "application/json");
-        if !self.api_token.is_empty() {
-            request = request.header("x-api-token", &self.api_token);
+        let mut request = self.agent.post(url);
+        if let Some(headers) = request.headers_mut() {
+            headers.extend(self.headers.clone());
+            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         }
         let response = request
             .send(body)
