@@ -8,7 +8,7 @@ namespace crypto {
 struct DecimalError : stainless::Exception {
 };
 
-String hex_digit(u8 value)
+String hex_digit(const u8 value)
 {
     return switch (value) {
         0 => "0", 1 => "1", 2 => "2", 3 => "3",
@@ -19,7 +19,7 @@ String hex_digit(u8 value)
     };
 }
 
-u8 hex_value(u8 value)
+u8 hex_value(const u8 value)
 {
     if (value >= 48 && value <= 57) {
         return value - 48;
@@ -70,19 +70,19 @@ Vec<u8> decode_hex(const String& source)
     return decoded;
 }
 
-bool is_hex(const String& source, usize byte_length)
+bool is_hex(const String& source, const usize byte_length)
 {
     return source.len() == byte_length * 2 &&
         decode_hex(source).len() == byte_length;
 }
 
-String random_hex(usize length) throws stainless::RustError
+String random_hex(const usize length) throws stainless::RustError
 {
     Vec<u8> bytes = Random::bytes(length);
     return hex_bytes(bytes);
 }
 
-u128 parse_decimal(const String& source) throws DecimalError
+u128 parse_decimal_u128(const String& source) throws DecimalError
 {
     String copied = String(source);
     Vec<u8> bytes = move(copied).into_bytes();
@@ -107,7 +107,7 @@ u128 parse_decimal(const String& source) throws DecimalError
     return value;
 }
 
-String uint_decimal(u128 value)
+String uint_decimal(const u128& value)
 {
     String encoded;
     u128 divisor = 1;
@@ -128,7 +128,7 @@ String uint_decimal(u128 value)
     return encoded;
 }
 
-String uint_hex(u128 value)
+String uint_hex(const u128& value)
 {
     String encoded = "0x";
     u128 divisor = 1;
@@ -149,8 +149,7 @@ String uint_hex(u128 value)
     return encoded;
 }
 
-u128 mul_div_floor(u128 left, u128 right, u128 divisor)
-    throws DecimalError
+u128 mul_div_floor(const u128& left, const u128& right, const u128& divisor) throws DecimalError
 {
     if (divisor == 0) {
         throw DecimalError{stainless::Exception(

@@ -35,7 +35,7 @@ void initialize_chain_store(const JsonTable1<String>& store)
     }
 }
 
-void append_checkpoint(var& chain, u64 height, const String& hash)
+void append_checkpoint(var& chain, const u64 height, const String& hash)
     throws stainless::JsonError
 {
     chain.checkpoints.push({height: decimal(height), hash: String(hash)});
@@ -44,7 +44,7 @@ void append_checkpoint(var& chain, u64 height, const String& hash)
     }
 }
 
-void save_chain(const JsonTable1<String>& store, u64 height, const var& chain)
+void save_chain(const JsonTable1<String>& store, const u64 height, const var& chain)
     throws stainless::Exception
 {
     if (height >= 4294967295) {
@@ -117,7 +117,7 @@ bool synchronize(const Client& node, const Server& server, const var& config,
     return rolled_back;
 }
 
-void send_ws_error(const Server& server, u64 connection_id,
+void send_ws_error(const Server& server, const u64 connection_id,
                    const String& code, const String& message)
 {
     ws_send(server, connection_id, {

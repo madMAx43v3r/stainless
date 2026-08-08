@@ -13,18 +13,20 @@ i32 main() throws stainless::Exception
         crypto::uint_decimal(0) != "0" ||
         crypto::uint_decimal(340282366920938463463374607431768211455) !=
             "340282366920938463463374607431768211455" ||
-        crypto::parse_decimal("340282366920938463463374607431768211455") !=
+        crypto::parse_decimal_u128(
+            "340282366920938463463374607431768211455") !=
             340282366920938463463374607431768211455 ||
         crypto::sha256::hash("abc") !=
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" ||
         crypto::sha256::hash(crypto::decode_hex("616263")) !=
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" ||
-        crypto::secp256k1::public_key(secret) !=
+        crypto::secp256k1::get_public_key(secret) !=
             "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798") {
         return 1;
     }
     try {
-        crypto::parse_decimal("340282366920938463463374607431768211456");
+        crypto::parse_decimal_u128(
+            "340282366920938463463374607431768211456");
         return 2;
     } catch (const crypto::DecimalError& error) {
     }
@@ -34,7 +36,7 @@ i32 main() throws stainless::Exception
     }
     Vec<u8> hash = crypto::decode_hex(
         crypto::sha256::hash("stainless crypto test"));
-    String public_key = crypto::secp256k1::public_key(secret);
+    String public_key = crypto::secp256k1::get_public_key(secret);
     String signature = crypto::secp256k1::sign(hash, secret);
     Vec<u8> public_key_bytes = crypto::decode_hex(public_key);
     Vec<u8> signature_bytes = crypto::decode_hex(signature);

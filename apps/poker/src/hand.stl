@@ -58,20 +58,20 @@ var find_hand(const var& hands, const String& table)
     return hands[index];
 }
 
-u128 safe_amount_add(u128 left, u128 right) throws ConfigError
+u128 safe_amount_add(const u128& left, const u128& right) throws ConfigError
 {
     require_config(right <= max_amount() - left, "poker amount overflow");
     return left + right;
 }
 
-u128 safe_amount_mul(u128 left, u128 right) throws ConfigError
+u128 safe_amount_mul(const u128& left, const u128& right) throws ConfigError
 {
     require_config(right == 0 || left <= max_amount() / right,
                    "poker amount overflow");
     return left * right;
 }
 
-u128 safe_mul_div(u128 left, u128 right, u128 divisor) throws ConfigError
+u128 safe_mul_div(const u128& left, const u128& right, const u128& divisor) throws ConfigError
 {
     try {
         return crypto::mul_div_floor(left, right, divisor);
@@ -80,7 +80,7 @@ u128 safe_mul_div(u128 left, u128 right, u128 divisor) throws ConfigError
     }
 }
 
-u64 hand_deadline(u64 now, u64 timeout)
+u64 hand_deadline(const u64 now, const u64 timeout)
 {
     if (timeout > max_u64() - now) {
         return max_u64();
@@ -89,7 +89,7 @@ u64 hand_deadline(u64 now, u64 timeout)
 }
 
 String hand_key(const var& hand, const String& address, const String& kind,
-                u64 round, u64 epoch) throws ConfigError
+                const u64 round, const u64 epoch) throws ConfigError
 {
     return inbox_key(String(hand.table), integer(hand.hand_id), address,
                      kind, round, epoch);
@@ -104,7 +104,7 @@ var peek_message(var& inbox, const String& key) throws stainless::JsonError
     return message;
 }
 
-bool has_message(var& inbox, const String& key) throws stainless::JsonError
+bool has_message(const var& inbox, const String& key) throws stainless::JsonError
 {
     return inbox.contains_key(key);
 }
@@ -114,7 +114,7 @@ var take_message(var& inbox, const String& key) throws stainless::JsonError
     return inbox.remove(key);
 }
 
-String seed_commit(const var& hand, const var& player, u64 round,
+String seed_commit(const var& hand, const var& player, const u64 round,
                    const String& seed) throws ConfigError
 {
     return wallet::seed_commit(String(hand.table), integer(hand.hand_id),
@@ -140,9 +140,8 @@ String commit_hash(const var& hand, const var& player,
                                String(player.address), values);
 }
 
-void checkpoint_step(var& hand, usize player_index, u64 phase,
-                     u64 event_round, u64 epoch, u64 event, u128 amount,
-                     const String& data_hash)
+void checkpoint_step(var& hand, const usize player_index, const u64 phase, const u64 event_round,
+                     const u64 epoch, const u64 event, const u128& amount, const String& data_hash)
     throws stainless::JsonError, ConfigError
 {
     hand.checkpoint = wallet::checkpoint_step(
@@ -166,7 +165,7 @@ bool valid_commit(const var& value) throws stainless::JsonError
     return true;
 }
 
-bool valid_reveal(const var& hand, const var& player, u64 round,
+bool valid_reveal(const var& hand, const var& player, const u64 round,
                   const var& value) throws stainless::JsonError, ConfigError
 {
     if (value == null || player.commitments == null || round >= 4 ||
@@ -212,7 +211,7 @@ usize actor_count(const var& hand) throws stainless::JsonError, ConfigError
     return count;
 }
 
-bool valid_action(const var& hand, const var& player, u128 target,
+bool valid_action(const var& hand, const var& player, const u128& target,
                   const var& value) throws stainless::JsonError, ConfigError
 {
     if (value == null || value.action == null || value.cumulative_bet == null) {
@@ -426,7 +425,7 @@ var hand_event(const var& hand)
     return {type: "hand_state", table: String(hand.table), hand: state};
 }
 
-var start_hand(const Client& node, const var& table, u64 hand_id, u64 now)
+var start_hand(const Client& node, const var& table, const u64 hand_id, const u64 now)
     throws stainless::RustError, stainless::JsonError, ConfigError
 {
     String address = String(table.address);
@@ -481,7 +480,7 @@ var start_hand(const Client& node, const var& table, u64 hand_id, u64 now)
 }
 
 var reconcile_table(const Client& node, const var& table, var& hands,
-                    u64 current_height, u64 now)
+                    const u64 current_height, const u64 now)
     throws stainless::RustError, stainless::JsonError, ConfigError
 {
     if (u64(table.confirmed) == 0) {
@@ -530,7 +529,7 @@ var reconcile_table(const Client& node, const var& table, var& hands,
     return {changed: false, event: null};
 }
 
-void begin_continue(var& hand, u64 now)
+void begin_continue(var& hand, const u64 now)
     throws stainless::RustError, stainless::JsonError, ConfigError
 {
     allocate_payouts(hand);
@@ -540,7 +539,7 @@ void begin_continue(var& hand, u64 now)
     hand.deadline = decimal(hand_deadline(now, integer(hand.player_timeout)));
 }
 
-void after_betting_or_reveal(var& hand, u64 now)
+void after_betting_or_reveal(var& hand, const u64 now)
     throws stainless::RustError, stainless::JsonError, ConfigError
 {
     String phase = String(hand.phase);
@@ -565,7 +564,7 @@ void after_betting_or_reveal(var& hand, u64 now)
     }
 }
 
-void after_reveal(var& hand, u64 now)
+void after_reveal(var& hand, const u64 now)
     throws stainless::RustError, stainless::JsonError, ConfigError
 {
     if (active_count(hand) > 1 && actor_count(hand) > 1) {
@@ -577,7 +576,7 @@ void after_reveal(var& hand, u64 now)
     }
 }
 
-bool advance_commit(var& hand, var& inbox, u64 now)
+bool advance_commit(var& hand, var& inbox, const u64 now)
     throws stainless::RustError, stainless::JsonError, ConfigError
 {
     bool ready = true;
@@ -607,7 +606,7 @@ bool advance_commit(var& hand, var& inbox, u64 now)
     return true;
 }
 
-bool advance_reveal(var& hand, var& inbox, u64 now)
+bool advance_reveal(var& hand, var& inbox, const u64 now)
     throws stainless::RustError, stainless::JsonError, ConfigError
 {
     u64 round = integer(hand.round);
@@ -656,7 +655,7 @@ bool advance_reveal(var& hand, var& inbox, u64 now)
     return true;
 }
 
-bool advance_betting(var& hand, var& inbox, u64 now)
+bool advance_betting(var& hand, var& inbox, const u64 now)
     throws stainless::RustError, stainless::JsonError, ConfigError
 {
     u128 target = current_bet(hand);
@@ -788,7 +787,7 @@ var layer_winners(const var& hand, const var& eligible)
     return winners;
 }
 
-u128 split_amount(u128 total, usize count, usize index) throws ConfigError
+u128 split_amount(const u128& total, const usize count, const usize index) throws ConfigError
 {
     require_config(count > 0 && index < count, "invalid payout split");
     u128 divisor = u128(count);
@@ -926,7 +925,7 @@ void make_board(const Client& node, var& hand)
                                  hand.sources[2], hand.sources[3]]]);
 }
 
-bool advance_show(const Client& node, var& hand, var& inbox, u64 now)
+bool advance_show(const Client& node, var& hand, var& inbox, const u64 now)
     throws stainless::RustError, stainless::JsonError, ConfigError
 {
     if (hand.board == null) {
@@ -1048,7 +1047,7 @@ var contract_continuations(const var& continuations) throws stainless::JsonError
 }
 
 void submit_settlement(const Client& node, const var& config,
-                       var& hand, u64 height)
+                       var& hand, const u64 height)
     throws stainless::RustError, stainless::JsonError, ConfigError
 {
     var commitments = [];
@@ -1085,7 +1084,7 @@ void submit_settlement(const Client& node, const var& config,
 }
 
 bool advance_continue(const Client& node, const var& config, const var& chain,
-                      var& hand, var& inbox, u64 now)
+                      var& hand, var& inbox, const u64 now)
     throws stainless::RustError, stainless::JsonError, ConfigError
 {
     bool ready = true;
@@ -1137,7 +1136,7 @@ bool retry_settlement(const Client& node, const var& config, const var& chain,
 }
 
 bool advance_hand(const Client& node, const var& config, const var& chain,
-                  var& hand, var& inbox, u64 now)
+                  var& hand, var& inbox, const u64 now)
     throws stainless::RustError, stainless::JsonError, ConfigError
 {
     String phase = String(hand.phase);
@@ -1170,8 +1169,8 @@ void reset_hands(const JsonTable1<String>& store, var& hands, var& inbox)
     save_hands(store, hands);
 }
 
-var tick_hands(const Client& node, const var& config, const var& chain,
-               const JsonTable1<String>& store, var& hands, var& inbox, u64 now)
+var tick_hands(const Client& node, const var& config, const var& chain, const JsonTable1<String>& store,
+               var& hands, var& inbox, const u64 now)
     throws stainless::Exception
 {
     var events = [];

@@ -10,7 +10,7 @@ namespace poker {
 struct ConfigError : stainless::Exception {
 };
 
-void require_config(bool condition, const String& message) throws ConfigError
+void require_config(const bool condition, const String& message) throws ConfigError
 {
     if (!condition) {
         throw ConfigError{stainless::Exception(String(message))};
@@ -24,7 +24,7 @@ String append(const String& left, const String& right)
     return result;
 }
 
-String decimal(u64 value)
+String decimal(const u64 value)
 {
     return crypto::uint_decimal(u128(value));
 }
@@ -35,7 +35,7 @@ u128 decimal_value(const var& value) throws ConfigError
     require_config(json.starts_with("\""),
                    "u64/u128 JSON values must be decimal strings");
     try {
-        return crypto::parse_decimal(String(value));
+        return crypto::parse_decimal_u128(String(value));
     } catch (const crypto::DecimalError& error) {
         throw ConfigError{stainless::Exception(String(error.message))};
     }
@@ -54,17 +54,17 @@ u64 integer(const var& value) throws ConfigError
     return u64(exact);
 }
 
-String contract_u64(u64 value)
+String contract_u64(const u64 value)
 {
     return crypto::uint_hex(u128(value));
 }
 
-String contract_amount(u128 value)
+String contract_amount(const u128& value)
 {
     return crypto::uint_hex(value);
 }
 
-String quantity(u128 value)
+String quantity(const u128& value)
 {
     return crypto::uint_decimal(value);
 }
@@ -239,7 +239,7 @@ var empty_chain()
     };
 }
 
-var load_state(const JsonTable1<String>& store, const String& key, var fallback)
+var load_state(const JsonTable1<String>& store, const String& key, const var& fallback)
     throws stainless::Exception
 {
     var loaded = null;
@@ -291,7 +291,7 @@ var contract_call(const Client& node, const String& address,
     return node_post(node, contract_path(address, method), {args: args});
 }
 
-String header_path(u64 height)
+String header_path(const u64 height)
 {
     String path = "/wapi/header?height=";
     path.push_str(decimal(height));
@@ -320,7 +320,7 @@ bool pending_known(const var& pending, const String& address)
 }
 
 void recover_reorg_deployments(const var& old_chain, const var& chain,
-                               var& pending, u64 tip_height)
+                               var& pending, const u64 tip_height)
     throws stainless::JsonError
 {
     for (usize i = 0; i < old_chain.tables.len(); i += 1) {
@@ -409,7 +409,7 @@ void merge_pending(const Client& node, const var& config, var& chain,
     }
 }
 
-bool checkpoint_matches(const Client& node, const var& checkpoint, u64 tip_height)
+bool checkpoint_matches(const Client& node, const var& checkpoint, const u64 tip_height)
     throws stainless::RustError, stainless::JsonError, ConfigError
 {
     u64 height = integer(checkpoint.height);
@@ -420,8 +420,7 @@ bool checkpoint_matches(const Client& node, const var& checkpoint, u64 tip_heigh
     return String(header.hash).eq_ignore_ascii_case(String(checkpoint.hash));
 }
 
-bool rollback_if_needed(const Client& node, const JsonTable1<String>& store, u64 tip_height,
-                        var& chain)
+bool rollback_if_needed(const Client& node, const JsonTable1<String>& store, const u64 tip_height, var& chain)
     throws stainless::Exception
 {
     u64 old_height = integer(chain.height);
@@ -543,13 +542,13 @@ bool scale_template(const Client& node, const var& config, const var& chain,
     return true;
 }
 
-void respond(const Server& server, u64 request_id, u16 status, const var& body)
+void respond(const Server& server, const u64 request_id, const u16 status, const var& body)
 {
     http::respond_json(server, request_id, status, body);
 }
 
-void respond_error(const Server& server, u64 request_id, u16 status,
-                   const String& code, const String& message)
+void respond_error(const Server& server, const u64 request_id, const u16 status, const String& code,
+                   const String& message)
 {
     respond(server, request_id, status,
             {error: {code: String(code), message: String(message)}});
@@ -617,12 +616,12 @@ String auth_hash(const var& config, const var& session, const String& address)
                              integer(session.expires_at), address);
 }
 
-void ws_send(const Server& server, u64 connection_id, const var& message)
+void ws_send(const Server& server, const u64 connection_id, const var& message)
 {
     http::send_json(server, connection_id, message);
 }
 
-var open_session(const Server& server, const var& config, u64 connection_id, u64 now)
+var open_session(const Server& server, const var& config, const u64 connection_id, const u64 now)
     throws stainless::RustError, stainless::JsonError
 {
     String challenge = crypto::random_hex(32);
@@ -645,8 +644,8 @@ var open_session(const Server& server, const var& config, u64 connection_id, u64
     return session;
 }
 
-void authenticate(const Server& server, const var& config, u64 connection_id,
-                  var& session, const var& message, u64 now)
+void authenticate(const Server& server, const var& config, const u64 connection_id, var& session,
+                  const var& message, const u64 now)
     throws stainless::RustError, stainless::JsonError, ConfigError
 {
     String address = String(message.address);
@@ -675,8 +674,8 @@ void authenticate(const Server& server, const var& config, u64 connection_id,
             {type: "authenticated", address: String(address)});
 }
 
-String inbox_key(const String& table, u64 hand_id, const String& address,
-                 const String& kind, u64 round, u64 epoch)
+String inbox_key(const String& table, const u64 hand_id, const String& address, const String& kind,
+                 const u64 round, const u64 epoch)
 {
     String key = table.clone();
     key.push_str("/");
@@ -728,7 +727,7 @@ bool validate_signed_submission(const Client& node, const var& session,
 }
 
 void accept_submission(const Client& node, const Server& server,
-                       u64 connection_id, const var& session,
+                       const u64 connection_id, const var& session,
                        const var& message, var& inbox)
     throws stainless::RustError, stainless::JsonError, ConfigError
 {
@@ -762,8 +761,8 @@ void accept_submission(const Client& node, const Server& server,
 
 void handle_session_message(const Client& node, const Server& server,
                             const var& config, const var& chain,
-                            u64 connection_id, var& session,
-                            const var& message, var& inbox, u64 now)
+                            const u64 connection_id, var& session,
+                            const var& message, var& inbox, const u64 now)
     throws stainless::RustError, stainless::JsonError, ConfigError
 {
     String kind = String(message.type);

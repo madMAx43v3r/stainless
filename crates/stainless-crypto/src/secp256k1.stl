@@ -7,40 +7,37 @@ use rust::secp256k1::ecdsa::Signature;
 namespace crypto {
 namespace secp256k1 {
 
-String public_key(const Vec<u8>& secret_key) throws stainless::RustError
+String get_public_key(const Vec<u8>& secret_key) throws stainless::RustError
 {
-    auto secret = SecretKey::from_slice(secret_key);
-    auto key = PublicKey::from_secret_key_global(secret);
+    SecretKey secret = SecretKey::from_slice(secret_key);
+    PublicKey key = PublicKey::from_secret_key_global(secret);
     return key.to_string();
 }
 
-bool valid_public_key(const Vec<u8>& public_key)
+bool public_key_valid(const Vec<u8>& public_key)
 {
     try {
-        auto key = PublicKey::from_slice(public_key);
+        PublicKey key = PublicKey::from_slice(public_key);
         return key.to_string() == crypto::hex_bytes(public_key);
     } catch (const stainless::RustError& error) {
         return false;
     }
 }
 
-String sign(const Vec<u8>& message_hash, const Vec<u8>& secret_key)
-    throws stainless::RustError
+String sign(const Vec<u8>& message_hash, const Vec<u8>& secret_key) throws stainless::RustError
 {
-    Message message = Message::from_digest_slice(message_hash);
     SecretKey secret = SecretKey::from_slice(secret_key);
+    Message message = Message::from_digest_slice(message_hash);
     Signature signature = secret.sign_ecdsa(move(message));
-    Vec<u8> compact = signature.serialize_compact();
-    return crypto::hex_bytes(compact);
+    return crypto::hex_bytes(signature.serialize_compact());
 }
 
-bool verify(const Vec<u8>& message_hash, const Vec<u8>& public_key,
-            const Vec<u8>& signature)
+bool verify(const Vec<u8>& message_hash, const Vec<u8>& public_key, const Vec<u8>& signature)
 {
     try {
+        Signature parsed = Signature::from_compact(signature);
         Message message = Message::from_digest_slice(message_hash);
         PublicKey key = PublicKey::from_slice(public_key);
-        Signature parsed = Signature::from_compact(signature);
         parsed.verify(move(message), key).unwrap();
         return true;
     } catch (const stainless::RustError& error) {
