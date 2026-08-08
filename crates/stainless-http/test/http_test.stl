@@ -5,7 +5,8 @@ use rust::std::thread;
 
 i32 main() throws stainless::Exception
 {
-    Server server = http::listen("127.0.0.1:0", "/v1/ws", 100, 65536);
+    http::ServerConfig config = http::ServerConfig("127.0.0.1:0", "/v1/ws", 100, 65536);
+    Server server = http::listen(config);
     String address = http::local_address(server);
     if (address.len() == 0) {
         return 1;
@@ -39,5 +40,12 @@ i32 main() throws stainless::Exception
         return 4;
     }
     server.shutdown();
+
+    http::ServerConfig http_only_config = http::ServerConfig("127.0.0.1:0", 100, 65536);
+    Server http_only = http::listen(http_only_config);
+    if (http::local_address(http_only).len() == 0) {
+        return 5;
+    }
+    http_only.shutdown();
     return 0;
 }

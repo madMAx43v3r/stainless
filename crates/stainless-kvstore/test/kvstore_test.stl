@@ -2,6 +2,7 @@
 
 use rust::std::fs;
 use rust::std::thread;
+use rust::format;
 
 namespace kvstore {
 
@@ -302,3 +303,15 @@ i32 self_test(const String& path)
 }
 
 } // namespace kvstore
+
+i32 main() throws stainless::Exception
+{
+    Vec<u8> nonce = stainless::Random::bytes(8);
+    String path = "stainless-kvstore-test";
+    for (u8 byte : nonce) {
+        path.push_str("-");
+        path.push_str(format!("{}", byte));
+    }
+    path.push_str(".log");
+    return kvstore::self_test(path);
+}

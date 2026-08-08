@@ -16,3 +16,9 @@ its Stainless translation unit.
 The package deliberately does not store wallet secrets. Applications can use
 it for local player signatures and address verification, while services can
 continue using the MMX node wallet WAPI for managed signing.
+
+Run its Stainless tests from the workspace root with:
+
+```sh
+stainlessc --run --package apps/mmx-wallet/test
+```

@@ -1,0 +1,7 @@
+schema = 1
+name = "stainless-kvstore-test"
+sources = []
+main = "kvstore_test.stl"
+
+[dependencies]
+stainless-kvstore = ".."

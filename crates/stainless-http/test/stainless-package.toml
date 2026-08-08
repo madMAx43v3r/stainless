@@ -1,0 +1,7 @@
+schema = 1
+name = "stainless-http-test"
+sources = []
+main = "http_test.stl"
+
+[dependencies]
+stainless-http = ".."

@@ -1,0 +1,7 @@
+schema = 1
+name = "stainless-crypto-test"
+sources = []
+main = "crypto_test.stl"
+
+[dependencies]
+stainless-crypto = ".."

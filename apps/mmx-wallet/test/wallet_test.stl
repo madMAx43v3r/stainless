@@ -15,7 +15,7 @@ bool test_identity() throws stainless::RustError
 {
     String secret =
         "0000000000000000000000000000000000000000000000000000000000000001";
-    String public_key = wallet::public_key(secret);
+    String public_key = wallet::get_public_key(secret);
     String address = wallet::address_from_public_key(public_key);
     String hash = wallet::sha256_text("stainless wallet test");
     String signature = wallet::sign(hash, secret);

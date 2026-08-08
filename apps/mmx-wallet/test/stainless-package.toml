@@ -1,0 +1,7 @@
+schema = 1
+name = "mmx-wallet-test"
+sources = []
+main = "wallet_test.stl"
+
+[dependencies]
+mmx-wallet = ".."

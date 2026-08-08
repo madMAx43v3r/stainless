@@ -165,7 +165,13 @@ API; Cargo only packages the Rust generated from those Stainless sources.
 Multiple threads can read values concurrently from the same open file handle
 without sharing a cursor or reopening the path.
 
-Run the Stainless end-to-end showcase through its minimal Rust test harness:
+Run the Stainless end-to-end test directly from the workspace root:
+
+```sh
+stainlessc --run --package crates/stainless-kvstore/test
+```
+
+The Cargo integration harness runs the same Stainless `self_test()` entry point:
 
 ```sh
 cargo test -p stainless-kvstore
