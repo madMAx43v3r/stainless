@@ -1,0 +1,43 @@
+// Stainless tests for the Stainless HTTP facade.
+
+use rust::String;
+use rust::std::thread;
+
+i32 main() throws stainless::Exception
+{
+    Server server = http::listen("127.0.0.1:0", "/v1/ws", 100, 65536);
+    String address = http::local_address(server);
+    if (address.len() == 0) {
+        return 1;
+    }
+    String base_url = "http://";
+    base_url.push_str(address);
+    thread::JoinHandle<i32> client = thread::spawn([base_url = move(base_url)]() {
+        try {
+            Client connection = http::connect(base_url, "test-token", 2000);
+            var response = http::get_json(connection,
+                                          "/v1/tables?template=fast");
+            if (u64(response.ok) != 0) {
+                return 0;
+            }
+        } catch (const stainless::Exception& error) {
+        }
+        return 1;
+    });
+
+    var event = http::receive(server, 2000);
+    if (event == null || String(event.type) != "http" ||
+        String(event.method) != "GET" ||
+        String(event.path) != "/v1/tables" ||
+        String(event.query) != "template=fast") {
+        return 2;
+    }
+    if (!http::respond_json(server, u64(event.request_id), 200, {ok: true})) {
+        return 3;
+    }
+    if (client.join() != 0) {
+        return 4;
+    }
+    server.shutdown();
+    return 0;
+}

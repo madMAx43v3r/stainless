@@ -1,0 +1,73 @@
+// Blocking Stainless HTTP/JSON and WebSocket API. Every application-visible
+// request, connection, message, and disconnect is represented as JSON here.
+
+use rust::String;
+use rust::stainless_http::{Client, Server};
+
+namespace http {
+
+Server listen(
+    const String& address,
+    const String& websocket_path,
+    u64 request_timeout_ms,
+    usize max_body_bytes) throws stainless::RustError
+{
+    Server server = Server::bind(address, websocket_path, request_timeout_ms, max_body_bytes);
+    return server;
+}
+
+Client connect(const String& base_url, const String& token,
+               u64 request_timeout_ms) throws stainless::RustError
+{
+    Client client = Client::new(base_url, token, request_timeout_ms);
+    return client;
+}
+
+String local_address(const Server& server)
+{
+    return server.local_addr();
+}
+
+var receive(const Server& server, u64 timeout_ms)
+    throws stainless::RustError, stainless::JsonError
+{
+    String event = server.next_event(timeout_ms);
+    if (event.len() == 0) {
+        return null;
+    }
+    var parsed = var::parse(event);
+    return parsed;
+}
+
+var get_json(const Client& client, const String& path)
+    throws stainless::RustError, stainless::JsonError
+{
+    String source = client.get(path);
+    var parsed = var::parse(source);
+    return parsed;
+}
+
+var post_json(const Client& client, const String& path, const var& body)
+    throws stainless::RustError, stainless::JsonError
+{
+    String source = client.post_json(path, body.to_json());
+    var parsed = var::parse(source);
+    return parsed;
+}
+
+bool respond_json(const Server& server, u64 request_id, u16 status, const var& body)
+{
+    return server.respond(request_id, status, "application/json", body.to_json());
+}
+
+bool send_json(const Server& server, u64 connection_id, const var& message)
+{
+    return server.send_text(connection_id, message.to_json());
+}
+
+usize broadcast_json(const Server& server, const var& message)
+{
+    return server.broadcast_text(message.to_json());
+}
+
+} // namespace http

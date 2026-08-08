@@ -1,0 +1,113 @@
+schema = 1
+
+[[type]]
+dependency = "stainless-http"
+rust_path = "stainless_http::Client"
+stainless_path = "rust::stainless_http::Client"
+representation = "opaque"
+
+[[type]]
+dependency = "stainless-http"
+rust_path = "stainless_http::ClientError"
+stainless_path = "rust::stainless_http::ClientError"
+representation = "opaque"
+error_format = "display"
+
+[[function]]
+dependency = "stainless-http"
+rust_path = "stainless_http::Client::new"
+stainless_path = "rust::stainless_http::Client::new"
+parameters = ["const rust::String&", "const rust::String&", "u64"]
+return = "rust::Result<rust::stainless_http::Client, rust::stainless_http::ClientError>"
+
+[[method]]
+receiver_type = "rust::stainless_http::Client"
+rust_name = "get"
+stainless_name = "get"
+receiver = "const"
+parameters = ["const rust::String&"]
+return = "rust::Result<rust::String, rust::stainless_http::ClientError>"
+
+[[method]]
+receiver_type = "rust::stainless_http::Client"
+rust_name = "post_json"
+stainless_name = "post_json"
+receiver = "const"
+parameters = ["const rust::String&", "const rust::String&"]
+return = "rust::Result<rust::String, rust::stainless_http::ClientError>"
+
+[[type]]
+dependency = "stainless-http"
+rust_path = "stainless_http::Server"
+stainless_path = "rust::stainless_http::Server"
+representation = "opaque"
+
+[[type]]
+dependency = "stainless-http"
+rust_path = "stainless_http::ServerError"
+stainless_path = "rust::stainless_http::ServerError"
+representation = "opaque"
+error_format = "display"
+
+[[function]]
+dependency = "stainless-http"
+rust_path = "stainless_http::Server::bind"
+stainless_path = "rust::stainless_http::Server::bind"
+parameters = ["const rust::String&", "const rust::String&", "u64", "usize"]
+return = "rust::Result<rust::stainless_http::Server, rust::stainless_http::ServerError>"
+
+[[method]]
+receiver_type = "rust::stainless_http::Server"
+rust_name = "local_addr"
+stainless_name = "local_addr"
+receiver = "const"
+parameters = []
+return = "rust::String"
+
+[[method]]
+receiver_type = "rust::stainless_http::Server"
+rust_name = "next_event"
+stainless_name = "next_event"
+receiver = "const"
+parameters = ["u64"]
+return = "rust::Result<rust::String, rust::stainless_http::ServerError>"
+
+[[method]]
+receiver_type = "rust::stainless_http::Server"
+rust_name = "respond"
+stainless_name = "respond"
+receiver = "const"
+parameters = ["u64", "u16", "const rust::String&", "const rust::String&"]
+return = "bool"
+
+[[method]]
+receiver_type = "rust::stainless_http::Server"
+rust_name = "send_text"
+stainless_name = "send_text"
+receiver = "const"
+parameters = ["u64", "const rust::String&"]
+return = "bool"
+
+[[method]]
+receiver_type = "rust::stainless_http::Server"
+rust_name = "broadcast_text"
+stainless_name = "broadcast_text"
+receiver = "const"
+parameters = ["const rust::String&"]
+return = "usize"
+
+[[method]]
+receiver_type = "rust::stainless_http::Server"
+rust_name = "close"
+stainless_name = "close"
+receiver = "const"
+parameters = ["u64", "u16", "const rust::String&"]
+return = "bool"
+
+[[method]]
+receiver_type = "rust::stainless_http::Server"
+rust_name = "shutdown"
+stainless_name = "shutdown"
+receiver = "const"
+parameters = []
+return = "void"

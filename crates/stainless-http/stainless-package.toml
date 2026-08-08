@@ -1,0 +1,6 @@
+schema = 1
+name = "stainless-http"
+sources = ["src/http.stl"]
+
+[native_dependencies]
+stainless-http = "."
