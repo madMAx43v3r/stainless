@@ -989,8 +989,9 @@ source.
 `String` is not implicitly deep-copied. A consuming Stainless context still
 uses the language's explicit `move(value)` operation, while duplication calls
 the Rust API explicitly with `value.clone()`. Rust methods such as `len`,
-`is_empty`, `push`, `push_str`, and `into_bytes` keep their real names and
-behavior. `as_str` is used inside generated Rust when an API requires `&str`,
+`push`, `push_str`, and `into_bytes` keep their real names. The C++-style
+`empty()` query lowers to Rust's `is_empty()` method, just like `Vec.empty()`.
+`as_str` is used inside generated Rust when an API requires `&str`,
 but it is not source-callable in the initial subset because Stainless does not
 expose Rust's unsized `str` type. Integer indexing remains unavailable because
 Rust `String` is UTF-8 and a byte offset need not identify a character
@@ -1182,7 +1183,7 @@ declaration both perform Stainless default construction, so they are valid only
 when `T` has a non-throwing default constructor.
 
 Arrays support `operator[]`-style indexing with `u8`, `u16`, `u32`, `u64`, or
-`usize`, plus `len()`, `is_empty()`, `fill(value)`, and C++-style range
+`usize`, plus `len()`, `empty()`, `fill(value)`, and C++-style range
 iteration. Unsigned indices are converted to Rust `usize` with a checked
 conversion before ordinary bounds checking; signed integers and `u128` are
 rejected. `fill()` requires a mutable array and a copyable element type.
@@ -2421,7 +2422,7 @@ toolchain.
 
 The compiler crate currently registers the following source-visible APIs:
 
-- `rust::Vec<T>`: `Vec()`, `Vec::with_capacity`, `len`, `is_empty`,
+- `rust::Vec<T>`: `Vec()`, `Vec::with_capacity`, `len`, `empty`,
   `capacity`, `reserve`, `reserve_exact`, `shrink_to`, `shrink_to_fit`,
   `push`, `pop`, `clear`, `truncate`, `insert`, `remove`, `swap_remove`,
   `append`, `extend_from_slice`, `copy_range`, `reverse`, `clone`, `contains`,
@@ -2433,7 +2434,7 @@ The compiler crate currently registers the following source-visible APIs:
   access, accepts `u8`, `u16`, `u32`, `u64`, or `usize`, and uses checked
   conversion to `usize` followed by Rust's bounds-checked indexing behavior.
 - `rust::String`: `String()`, `String::with_capacity`, `clone`, `into_bytes`,
-  `len`, `is_empty`, `capacity`, `reserve`, `reserve_exact`, `shrink_to`,
+  `len`, `empty`, `capacity`, `reserve`, `reserve_exact`, `shrink_to`,
   `shrink_to_fit`, `truncate`, `clear`, `push`, `push_str`, `pop`, `insert`,
   `insert_str`, `remove`, `make_ascii_lowercase`, `make_ascii_uppercase`,
   `is_ascii`, `contains`, `starts_with`, `ends_with`,

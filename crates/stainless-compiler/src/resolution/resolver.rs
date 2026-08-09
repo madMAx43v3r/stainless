@@ -6019,7 +6019,7 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
     ) -> (ExpressionInfo, Option<ResolvedCall>) {
         match name.segments.as_slice() {
-            [method] if method == "len" || method == "is_empty" => {
+            [method] if method == "len" || method == "empty" => {
                 for argument in arguments {
                     self.resolve_expression(argument, None, context);
                 }
@@ -6039,7 +6039,7 @@ impl Resolver<'_> {
                 let call = ResolvedCall {
                     span,
                     target: CallTarget::Intrinsic(Intrinsic::ArrayQuery {
-                        empty: *method == "is_empty",
+                        empty: *method == "empty",
                     }),
                     return_type: return_type.clone(),
                     throws: Vec::new(),

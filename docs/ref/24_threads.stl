@@ -89,6 +89,6 @@ bool catches_thread_panic()
         worker.join();
         return false;
     } catch (const stainless::ThreadError& error) {
-        return !error.message.is_empty();
+        return !error.message.empty();
     }
 }

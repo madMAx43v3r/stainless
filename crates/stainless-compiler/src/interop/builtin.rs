@@ -1701,7 +1701,7 @@ fn string_construction(string: &TypeRef, string_ref: &TypeRef) -> Vec<CallableBi
 fn string_capacity_methods() -> Vec<CallableBinding> {
     vec![
         method("len", Receiver::Shared, vec![], TypeRef::Usize),
-        method("is_empty", Receiver::Shared, vec![], TypeRef::Bool),
+        renamed_method("empty", "is_empty", Receiver::Shared, vec![], TypeRef::Bool),
         method("capacity", Receiver::Shared, vec![], TypeRef::Usize),
         method(
             "reserve",

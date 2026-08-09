@@ -21,7 +21,7 @@ bool missing_file_is_checked(const String& path)
     try {
         fs::read_to_string(path);
     } catch (const stainless::IoError& error) {
-        return !error.message.is_empty();
+        return !error.message.empty();
     }
     return false;
 }

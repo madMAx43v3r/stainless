@@ -950,6 +950,27 @@ fn string_copy_constructor_is_explicit_clone_lowering() {
 }
 
 #[test]
+fn string_empty_uses_cpp_spelling_and_rust_lowering() {
+    let bindings = standard_bindings().unwrap();
+    let string_binding = bindings.type_by_path("rust::String").unwrap();
+    let empty = string_binding
+        .find_callable(CallStyle::Method, "empty", &[])
+        .unwrap();
+
+    assert_eq!(empty.receiver, Some(Receiver::Shared));
+    assert_eq!(empty.return_type, TypeRef::Bool);
+    assert!(matches!(
+        empty.lowering,
+        RustLowering::Method { ref rust_name } if rust_name == "is_empty"
+    ));
+    assert!(
+        string_binding
+            .find_callable(CallStyle::Method, "is_empty", &[])
+            .is_none()
+    );
+}
+
+#[test]
 fn string_borrow_arguments_adapt_to_str_after_resolution() {
     let bindings = standard_bindings().unwrap();
     let string_binding = bindings.type_by_path("rust::String").unwrap();

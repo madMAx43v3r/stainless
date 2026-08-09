@@ -158,7 +158,7 @@ fn local_borrows_end_after_their_last_use() {
 
 void valid(String value) {
     const String& shared = value;
-    if (shared.is_empty()) {
+    if (shared.empty()) {
     }
     value.push('!');
 
@@ -173,7 +173,7 @@ void valid(String value) {
 
     const String& loop_alias = value;
     for (i32 index = 0; index < 2; index += 1) {
-        if (loop_alias.is_empty()) {
+        if (loop_alias.empty()) {
         }
     }
     value.push(',');

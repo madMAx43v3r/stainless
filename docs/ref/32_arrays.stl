@@ -44,7 +44,7 @@ u32 array_result()
     Array<u32, 3> filled;
     filled.fill(5);
     Array<u32, 0> empty;
-    if (!empty.is_empty()) {
+    if (!empty.empty()) {
         return 0;
     }
     return total + u32(buffer.get().len()) + filled[0];
