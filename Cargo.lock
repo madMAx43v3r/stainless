@@ -826,14 +826,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "stainless-kvstore"
-version = "0.1.0"
-dependencies = [
- "stainless-build",
- "stainless-runtime",
-]
-
-[[package]]
 name = "stainless-runtime"
 version = "0.1.0"
 dependencies = [

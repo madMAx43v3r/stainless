@@ -159,8 +159,8 @@ representation for both keys and values; the compiler does not synthesize
 serialization code for the table.
 
 The typed tables, codecs, and Database coordinator are all implemented in
-Stainless. This crate does not maintain a parallel hand-written Rust storage
-API; Cargo only packages the Rust generated from those Stainless sources.
+Stainless. This is a pure Stainless package: it has no Rust-facing wrapper,
+Cargo package, build script, or checked-in generated Rust.
 
 Multiple threads can read values concurrently from the same open file handle
 without sharing a cursor or reopening the path.
@@ -169,12 +169,6 @@ Run the Stainless end-to-end test directly from the workspace root:
 
 ```sh
 stainlessc --run --package crates/stainless-kvstore/test
-```
-
-The Cargo integration harness runs the same Stainless `self_test()` entry point:
-
-```sh
-cargo test -p stainless-kvstore
 ```
 
 This initial crate deliberately uses append-and-truncate WALs. Immutable
