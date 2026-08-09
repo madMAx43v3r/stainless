@@ -20,9 +20,9 @@ Every fixed-width WAL integer is big-endian. Record-size headers are `u32`,
 while persistent file offsets and committed file lengths are `u64`. The
 Stainless implementation delegates these fields to Rust's optimized
 fixed-width byte conversions through
-`stainless::BigEndian`. WAL record discriminants are grouped as typed
-`static const u8` members of `RecordKind`, so their byte representation remains
-explicit without consuming storage in a `RecordKind` value.
+`stainless::BigEndian`. WAL record discriminants use the scoped
+`enum RecordKind : u8`, so their byte representation remains explicit and
+the compiler inserts the Rust representation cast only at raw WAL byte writes.
 
 The store owns one read/write `File` handle for each WAL. Its key-ordered index
 and version metadata are kept in RAM and rebuilt from the compact index WAL at

@@ -51,9 +51,9 @@ struct KeyCodec<T> {
     KeyCodec<Vec<T>> vec() const;
 };
 
-struct RecordKind {
-    static const u8 Insert = 0;
-    static const u8 Commit = 1;
+enum RecordKind : u8 {
+    Insert = 0,
+    Commit = 1,
 };
 
 struct ValueTooLarge : stainless::Exception {
@@ -364,7 +364,7 @@ bool RawTable::revert(u32 version) const
             index_log,
             scan_offset,
             guard.index_len);
-        u8 kind = detail::index_record_kind(record);
+        RecordKind kind = detail::index_record_kind(record);
         if (kind == RecordKind::Insert) {
             detail::InsertRecord insert = detail::InsertRecord::read(record);
             removed.push(tuple<Vec<u8>, u32>(
@@ -616,7 +616,7 @@ void RawTable::recover() const
                 offset,
                 index_file_len);
             u64 next_offset = offset + u64(record.len());
-            u8 kind = detail::index_record_kind(record);
+            RecordKind kind = detail::index_record_kind(record);
             if (kind == RecordKind::Insert) {
                 detail::InsertRecord insert = detail::InsertRecord::read(record);
                 if (insert.offset > data_file_len ||
@@ -1518,9 +1518,13 @@ u64 decode_u64_at(const Vec<u8>& bytes, usize offset) throws IndexCorrupt
     }
 }
 
-u8 index_record_kind(const Vec<u8>& record) throws IndexCorrupt
+RecordKind index_record_kind(const Vec<u8>& record) throws IndexCorrupt
 {
-    return decode_u8_at(record, 4);
+    try {
+        return RecordKind(decode_u8_at(record, 4));
+    } catch (const stainless::EnumError& _error) {
+        throw IndexCorrupt{stainless::Exception("unknown index WAL record kind")};
+    }
 }
 
 Vec<u8> read_index_record_at(
