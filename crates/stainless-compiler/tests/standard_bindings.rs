@@ -26,6 +26,7 @@ fn standard_registry_contains_builtin_types_in_path_order() {
             "rust::String",
             "rust::Vec",
             "rust::stainless_runtime::BigEndian",
+            "rust::stainless_runtime::Clock",
             "rust::stainless_runtime::JsonError",
             "rust::stainless_runtime::LittleEndian",
             "rust::stainless_runtime::Random",
@@ -73,6 +74,27 @@ fn option_exposes_cpp_style_construction_and_queries() {
         .unwrap();
     assert_eq!(clone.return_type, option_t);
     assert_eq!(clone.requirements[0].rust_trait, "::core::clone::Clone");
+}
+
+#[test]
+fn clock_exposes_unix_seconds() {
+    let bindings = standard_bindings().unwrap();
+    let clock = bindings
+        .type_by_path("rust::stainless_runtime::Clock")
+        .unwrap();
+    let call = clock
+        .find_callable(CallStyle::AssociatedFunction, "unix_seconds", &[])
+        .unwrap();
+
+    assert_eq!(call.return_type, TypeRef::U64);
+    assert_eq!(call.rust_result_error, None);
+    assert_eq!(clock.callables.len(), 1);
+    assert_eq!(
+        call.lowering,
+        RustLowering::AssociatedFunction {
+            rust_path: "::stainless_runtime::Clock::unix_seconds".to_owned(),
+        }
+    );
 }
 
 #[test]

@@ -1066,6 +1066,40 @@ void decode(const Vec<u8>& bytes) {
 }
 
 #[test]
+fn clock_uses_the_runtime_facade() {
+    let analysis = analyze(
+        r"use stainless::Clock;
+
+u64 current_time()
+{
+    return Clock::unix_seconds();
+}
+",
+    );
+
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+    let call = analysis
+        .semantics
+        .calls
+        .iter()
+        .find(|call| {
+            matches!(
+                &call.target,
+                CallTarget::Native(native)
+                    if native.type_path == "rust::stainless_runtime::Clock"
+                        && native.source_name == "unix_seconds"
+            )
+        })
+        .expect("Clock::unix_seconds call");
+    assert_eq!(call.return_type, TypeRef::U64);
+    assert!(call.throws.is_empty());
+}
+
+#[test]
 fn random_bytes_use_the_runtime_facade_and_checked_native_error_conversion() {
     let analysis = analyze(
         r"use rust::Vec;

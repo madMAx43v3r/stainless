@@ -20,6 +20,7 @@ const V: &str = "V";
 pub fn standard_bindings() -> Result<NativeBindings, super::BindingError> {
     NativeBindings::new(vec![
         big_endian_binding(),
+        clock_binding(),
         little_endian_binding(),
         fs_binding(),
         file_binding(),
@@ -739,6 +740,21 @@ fn json_error_binding() -> NativeTypeBinding {
         type_parameters: vec![],
         error_format: Some(NativeErrorFormat::Display),
         callables: vec![],
+    }
+}
+
+fn clock_binding() -> NativeTypeBinding {
+    NativeTypeBinding {
+        stainless_path: "rust::stainless_runtime::Clock".to_owned(),
+        rust_path: "::stainless_runtime::Clock".to_owned(),
+        type_parameters: vec![],
+        error_format: None,
+        callables: vec![associated(
+            "unix_seconds",
+            vec![],
+            TypeRef::U64,
+            "::stainless_runtime::Clock::unix_seconds",
+        )],
     }
 }
 

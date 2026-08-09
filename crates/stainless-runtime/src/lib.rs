@@ -57,6 +57,19 @@ impl<T> std::ops::DerefMut for ClassBase<T> {
 #[doc(hidden)]
 pub const CRATE_SOURCE_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
+/// Host wall clock exposed to generated Stainless code
+pub struct Clock;
+
+impl Clock {
+    /// Returns whole seconds since the Unix epoch
+    #[must_use]
+    pub fn unix_seconds() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs())
+    }
+}
+
 /// Operating-system entropy exposed to generated Stainless code.
 pub struct Random;
 
@@ -2118,11 +2131,26 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        BigEndian, Fs, LittleEndian, MultiMap, PositionedFile, Random, Var, btree_map_get,
+        BigEndian, Clock, Fs, LittleEndian, MultiMap, PositionedFile, Random, Var, btree_map_get,
         btree_map_retain, btree_map_retain_keys, btree_map_with_first_after,
         btree_map_with_first_in_range, btree_map_with_last_before, btree_map_with_last_in_range,
         btree_map_with_range, vec_copy_range, vec_with_range,
     };
+
+    #[test]
+    fn clock_reports_unix_wall_time() {
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("host clock after Unix epoch")
+            .as_secs();
+        let actual = Clock::unix_seconds();
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("host clock after Unix epoch")
+            .as_secs();
+
+        assert!((before..=after).contains(&actual));
+    }
 
     #[test]
     fn random_bytes_are_bounded_and_have_the_requested_length() {
