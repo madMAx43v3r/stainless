@@ -1240,6 +1240,38 @@ impl Lowerer<'_> {
             });
         }
         let resolution = self.semantics.expression(expression.span);
+        if resolution.is_some_and(|actual| is_json_type(canonical_ref(&actual.ty)))
+            && !expected.is_reference()
+            && let Some(value_type) = optional_value_type(expected)
+            && is_rust_string(value_type)
+        {
+            return Some(hir::Expression::AssociatedCall {
+                rust_path: "::core::option::Option::Some".to_owned(),
+                arguments: vec![hir::Expression::JsonCast {
+                    expression: Box::new(
+                        self.lower_expression(expression, ExpressionMode::Reference)?,
+                    ),
+                    target: self.lower_type(value_type, expression.span)?,
+                }],
+            });
+        }
+        if resolution.is_some_and(|actual| is_json_type(canonical_ref(&actual.ty)))
+            && is_rust_string(expected)
+            && !matches!(expected, TypeRef::Reference { mutable: true, .. })
+        {
+            let converted = hir::Expression::JsonCast {
+                expression: Box::new(self.lower_expression(expression, ExpressionMode::Reference)?),
+                target: self.lower_type(canonical_ref(expected), expression.span)?,
+            };
+            return Some(if expected.is_reference() {
+                hir::Expression::Borrow {
+                    mutable: false,
+                    expression: Box::new(converted),
+                }
+            } else {
+                converted
+            });
+        }
         if let Some(actual) = resolution
             && let Some(value_type) = optional_value_type(expected)
             && canonical_ref(value_type) == canonical_ref(&actual.ty)
@@ -1532,6 +1564,10 @@ impl Lowerer<'_> {
                 text: literal.text.clone(),
             },
             ExpressionKind::Switch { scrutinee, arms } => {
+                let result_type = self
+                    .semantics
+                    .expression(expression.span)
+                    .map(|resolution| resolution.ty.clone())?;
                 let string_scrutinee = self
                     .semantics
                     .expression(scrutinee.span)
@@ -1584,7 +1620,7 @@ impl Lowerer<'_> {
                             };
                             Some(hir::SwitchArm {
                                 pattern,
-                                value: self.lower_expression(&arm.value, ExpressionMode::Value)?,
+                                value: self.lower_bound_expression(&arm.value, &result_type)?,
                             })
                         })
                         .collect::<Option<Vec<_>>>()?,
@@ -1701,8 +1737,27 @@ impl Lowerer<'_> {
                         operator,
                         ast::BinaryOperator::LogicalAnd | ast::BinaryOperator::LogicalOr
                     );
+                    let json_equality = matches!(
+                        operator,
+                        ast::BinaryOperator::Equal | ast::BinaryOperator::NotEqual
+                    ) && [left, right].iter().any(|operand| {
+                        self.semantics
+                            .expression(operand.span)
+                            .is_some_and(|resolution| is_json_type(canonical_ref(&resolution.ty)))
+                    });
+                    let json_type = TypeRef::native(VAR_TYPE_PATH, Vec::new());
                     let lowered_left = if logical {
                         self.lower_condition(left)?
+                    } else if json_equality {
+                        if self
+                            .semantics
+                            .expression(left.span)
+                            .is_some_and(|resolution| is_json_type(canonical_ref(&resolution.ty)))
+                        {
+                            self.lower_expression(left, ExpressionMode::Value)?
+                        } else {
+                            self.lower_bound_expression(left, &json_type)?
+                        }
                     } else {
                         self.lower_expression(left, ExpressionMode::Value)?
                     };
@@ -1714,6 +1769,16 @@ impl Lowerer<'_> {
                         }
                     } else if logical {
                         self.lower_condition(right)?
+                    } else if json_equality {
+                        if self
+                            .semantics
+                            .expression(right.span)
+                            .is_some_and(|resolution| is_json_type(canonical_ref(&resolution.ty)))
+                        {
+                            self.lower_expression(right, ExpressionMode::Value)?
+                        } else {
+                            self.lower_bound_expression(right, &json_type)?
+                        }
                     } else {
                         self.lower_expression(right, ExpressionMode::Value)?
                     };
@@ -3115,11 +3180,27 @@ impl Lowerer<'_> {
     }
 
     fn lower_json_value(&mut self, expression: &ast::Expression) -> Option<hir::Expression> {
-        let mut lowered = self.lower_expression(expression, ExpressionMode::Value)?;
         let resolution = self.semantics.expression(expression.span).cloned();
         let ty = resolution
             .as_ref()
             .map(|resolution| canonical_ref(&resolution.ty));
+        if ty.is_some_and(is_rust_string) {
+            let owned = if resolution
+                .as_ref()
+                .is_some_and(|resolution| resolution.category == ValueCategory::Temporary)
+            {
+                self.lower_expression(expression, ExpressionMode::Value)?
+            } else {
+                let string = TypeRef::native("rust::String", Vec::new());
+                hir::Expression::Clone {
+                    expression: Box::new(
+                        self.lower_bound_expression(expression, &TypeRef::shared_ref(string))?,
+                    ),
+                }
+            };
+            return Some(hir::Expression::JsonFrom(Box::new(owned)));
+        }
+        let mut lowered = self.lower_expression(expression, ExpressionMode::Value)?;
         if ty.is_some_and(is_json_type) {
             if resolution.as_ref().is_some_and(|resolution| {
                 resolution.category != ValueCategory::Temporary

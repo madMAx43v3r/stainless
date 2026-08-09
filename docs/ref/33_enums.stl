@@ -35,7 +35,7 @@ String kind_name(RecordKind kind)
 
 String kind_name_explicit(RecordKind kind)
 {
-    return String(kind);
+    return kind.name();
 }
 
 u32 kind_weight(RecordKind kind)

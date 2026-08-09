@@ -27,7 +27,7 @@ usize vector_example()
     values.push(10);
     values.push(20);
 
-    if (values.is_empty()) {
+    if (values.empty()) {
         return 0;
     }
 

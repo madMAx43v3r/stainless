@@ -58,7 +58,7 @@ bool rejects_scalar_range()
             return value == null;
         }
     } catch (const stainless::JsonError& error) {
-        return String(error.message).len() > 0;
+        return error.message.len() > 0;
     }
     return false;
 }
@@ -135,9 +135,9 @@ i32 main() throws stainless::JsonError
     usize array_length = array.len();
     bool cycle_rejected = rejects_cycle(object);
 
-    // Explicit scalar conversions use JavaScript-compatible JSON coercion.
+    // Numeric scalar conversions are explicit; typed String destinations are implicit.
     i32 test_int = i32(object.field);
-    String display_name = String(object.display_name);
+    String display_name = object.display_name;
 
     var parsed = read_json("{\"web\":true,\"port\":8080}");
     // `var` copies are cheap. Objects and arrays keep shared Arc identity.
@@ -148,10 +148,10 @@ i32 main() throws stainless::JsonError
     if (i32(shared_object.field) != 321 ||
         i32(shared_object.nested.enabled) != 1 ||
         i32(removed_element) != 7 ||
-        String(removed_member).len() != 6usize ||
+        removed_member != "member" ||
         array_length != 6usize ||
         !cycle_rejected ||
-        String(dynamic_member) != "Stainless" ||
+        dynamic_member != "Stainless" ||
         borrowed_total != 6 ||
         owned_total != 10 ||
         ranged.len() != 4 ||
@@ -160,15 +160,15 @@ i32 main() throws stainless::JsonError
     }
 
     if (i32(profile_json.id) != 7 ||
-        String(profile_json.name).len() != 3usize ||
+        profile_json.name != "Ada" ||
         i32(profile_json.position.x) != 3 ||
-        String(profile_json.tags[1]).len() != 4usize ||
+        profile_json.tags[1] != "rust" ||
         i32(profile_json.metrics.answer) != 42 ||
-        String(profile_json.__type).len() != 7usize ||
-        String(profile_json.position.__type).len() != 8usize ||
+        profile_json.__type != "Profile" ||
+        profile_json.position.__type != "Position" ||
         i32(implicit_profile_json.id) != 7 ||
         i32(direct_position_json.y) != 9 ||
-        String(empty_json.__type).len() != 5usize ||
+        empty_json.__type != "Empty" ||
         !profile_source_survived) {
         return 3;
     }

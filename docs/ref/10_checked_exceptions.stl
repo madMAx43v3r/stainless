@@ -27,7 +27,7 @@ String read_file(const String& path, bool available) throws IoError
     if (!available) {
         throw IoError{
             stainless::Exception("input could not be read"),
-            String(path)
+            path.clone()
         };
     }
 

@@ -535,7 +535,6 @@ u32 widened = kind;
 RecordKind decoded = RecordKind(encoded);       // throws stainless::EnumError
 RecordKind named = RecordKind("Insert");         // throws stainless::EnumError
 String name = kind.name();                      // "Insert"
-String same_name = String(kind);                // "Insert"
 ```
 
 The representation must be `u8`, `u16`, `u32`, or `u64`. Member names and
@@ -550,7 +549,8 @@ conversions never select between competing overloads. Integer-to-enum
 and String-to-enum construction use compiler-generated checked wrappers. An
 integer must equal a declared discriminant and a String must equal a member
 name; otherwise the wrapper throws `stainless::EnumError`. `String(value)` and
-`value.name()` both return the declared member name and cannot throw.
+`value.name()` both return the declared member name and cannot throw; `.name()`
+is the preferred spelling when the source is already known to be an enum.
 
 Enums lower to Rust `#[repr(...)] enum` declarations and have copy value
 semantics. They cannot contain fields, functions, constructors, generic
@@ -975,16 +975,16 @@ is known and therefore never participates in overload selection. A string
 literal can use the same adaptation without an additional source-level
 conversion.
 
-Explicit duplication or conversion to an owned string uses C++ constructor
-syntax:
+Explicit duplication of an existing owned string uses Rust's `clone` method:
 
 ```cpp
-String copy = String(path);
+String copy = path.clone();
 ```
 
-For an exact supported conversion, this lowers to the corresponding Rust
-`String::from(...)` or `From` implementation. Rust construction functions are
-backend details and are not written as `String::from(...)` in Stainless source.
+String literals and JSON `var` values convert implicitly when their destination
+is an owned `String` or `const String&`. Rust construction functions such as
+`String::from(...)` remain backend details and are not written in Stainless
+source.
 
 `String` is not implicitly deep-copied. A consuming Stainless context still
 uses the language's explicit `move(value)` operation, while duplication calls
@@ -1590,7 +1590,7 @@ struct IoError : stainless::Exception {
 
 throw IoError{
     stainless::Exception("input could not be read"),
-    String(path)
+    path.clone()
 };
 ```
 
@@ -2432,8 +2432,7 @@ The compiler crate currently registers the following source-visible APIs:
   invalid bounds. `values[index]` provides shared or mutable indexed-place
   access, accepts `u8`, `u16`, `u32`, `u64`, or `usize`, and uses checked
   conversion to `usize` followed by Rust's bounds-checked indexing behavior.
-- `rust::String`: `String()`, the explicit copy constructor
-  `String(const String&)`, `String::with_capacity`, `clone`, `into_bytes`,
+- `rust::String`: `String()`, `String::with_capacity`, `clone`, `into_bytes`,
   `len`, `is_empty`, `capacity`, `reserve`, `reserve_exact`, `shrink_to`,
   `shrink_to_fit`, `truncate`, `clear`, `push`, `push_str`, `pop`, `insert`,
   `insert_str`, `remove`, `make_ascii_lowercase`, `make_ascii_uppercase`,
@@ -2579,10 +2578,13 @@ necessary both to prevent `Arc` cycles from leaking and to preserve the
 guarantee that every `var` remains serializable by non-throwing `to_json()`.
 
 JSON-compatible statically typed values convert implicitly when a destination
-is `var` or when they occur inside a JSON literal. Conversion in the other
-direction is explicit constructor syntax. `bool(value)`, every Stainless
+is `var` or when they occur inside a JSON literal. A `var` also converts
+implicitly when a typed destination requires an owned `String`, a
+`const String&`, or an `optional<String>`; the compiler materializes the hidden
+owned string for the required lifetime. Direct scalar conversions without a
+typed destination remain explicit: `bool(value)`, every Stainless
 integer/floating type, and `String(value)` use JavaScript-compatible scalar
-coercion; integer coercion is extended deterministically to all Stainless
+coercion. Integer coercion is extended deterministically to all Stainless
 integer widths. Non-finite floating values are represented as JSON `null`
 because JSON has no NaN or infinity.
 

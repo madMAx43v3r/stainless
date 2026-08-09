@@ -818,6 +818,16 @@ fn vec_common_methods_have_expected_receiver_effects() {
     assert_eq!(len.receiver, Some(Receiver::Shared));
     assert_eq!(len.return_type, TypeRef::Usize);
 
+    let empty = vec_binding
+        .find_callable(CallStyle::Method, "empty", &[])
+        .unwrap();
+    assert_eq!(empty.receiver, Some(Receiver::Shared));
+    assert_eq!(empty.return_type, TypeRef::Bool);
+    assert!(matches!(
+        empty.lowering,
+        RustLowering::Method { ref rust_name } if rust_name == "is_empty"
+    ));
+
     let push = vec_binding
         .find_callable(CallStyle::Method, "push", std::slice::from_ref(&t))
         .unwrap();

@@ -173,6 +173,148 @@ u32 checked(optional<u32>& value) throws stainless::OptionalError {
 }
 
 #[test]
+fn optional_value_flow_refines_recursive_expression_paths() {
+    let valid = analyze(
+        r"use rust::Vec;
+
+struct Entry {
+    optional<u32> value;
+};
+
+struct Envelope {
+    Vec<Entry> entries;
+    optional<u32> direct;
+
+    u32 member() const;
+};
+
+struct Render {
+    optional<u32> value;
+
+    var json() const throws stainless::JsonError;
+};
+
+u32 Envelope::member() const {
+    if (!direct) {
+        return 0;
+    }
+    return direct.value();
+}
+
+u32 field(const Entry& entry) {
+    if (!entry.value) {
+        return 0;
+    }
+    return entry.value.value();
+}
+
+u32 indexed(const Envelope& envelope, const usize index) {
+    if (!envelope.entries[index].value) {
+        return 0;
+    }
+    return envelope.entries[index].value.value();
+}
+
+var Render::json() const throws stainless::JsonError {
+    var result = {value: null};
+    if (value) {
+        result.value = value.value();
+    }
+    return result;
+}
+",
+    );
+    assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);
+
+    let invalidated = analyze(
+        r"use rust::Vec;
+
+struct Entry {
+    optional<u32> value;
+};
+
+struct Collection {
+    Vec<Entry> entries;
+
+    void clear();
+};
+
+void Collection::clear() {
+    entries.clear();
+}
+
+void reset(Entry& entry) {
+    entry.value = optional<u32>();
+}
+
+u32 after_assignment(Entry& entry) {
+    if (!entry.value) {
+        return 0;
+    }
+    entry.value = optional<u32>();
+    return entry.value.value();
+}
+
+u32 after_mutable_call(Entry& entry) {
+    if (!entry.value) {
+        return 0;
+    }
+    reset(entry);
+    return entry.value.value();
+}
+
+u32 after_index_change(const Vec<Entry>& entries) {
+    usize index = 0;
+    if (!entries[index].value) {
+        return 0;
+    }
+    index += 1;
+    return entries[index].value.value();
+}
+
+u32 shadowed(const Entry& entry) {
+    if (!entry.value) {
+        return 0;
+    }
+    {
+        Entry entry;
+        return entry.value.value();
+    }
+}
+
+u32 after_mutable_method(Collection& collection) {
+    if (!collection.entries[0].value) {
+        return 0;
+    }
+    collection.clear();
+    return collection.entries[0].value.value();
+}
+
+u32 after_native_method(Vec<Entry>& entries) {
+    if (!entries[0].value) {
+        return 0;
+    }
+    entries.clear();
+    return entries[0].value.value();
+}
+",
+    );
+    assert_eq!(
+        invalidated
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.code == "RES075"
+                    && diagnostic.message.contains("stainless::OptionalError")
+            })
+            .count(),
+        6,
+        "{:#?}",
+        invalidated.diagnostics
+    );
+}
+
+#[test]
 fn optional_value_requires_a_checked_effect_when_presence_is_unknown() {
     let unchecked = analyze(
         r"void reset(optional<u32>& value) {

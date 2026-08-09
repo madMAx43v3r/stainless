@@ -1376,6 +1376,13 @@ impl Analyzer<'_> {
                 if expected.is_callback() {
                     self.callback_argument(argument, &mut loans);
                     None
+                } else if self
+                    .semantics
+                    .expression(argument.span)
+                    .is_some_and(|actual| is_json_string_binding(expected, &actual.ty))
+                {
+                    self.expression(argument, Usage::Read);
+                    None
                 } else if let TypeRef::Reference { mutable, .. } = expected {
                     let origin = self.expression(
                         argument,
@@ -1837,6 +1844,16 @@ fn is_json_type(ty: &TypeRef) -> bool {
         TypeRef::Native { path, arguments }
             if path == VAR_TYPE_PATH && arguments.is_empty()
     )
+}
+
+fn is_json_string_binding(expected: &TypeRef, actual: &TypeRef) -> bool {
+    !matches!(expected, TypeRef::Reference { mutable: true, .. })
+        && matches!(
+            canonical_ref(expected),
+            TypeRef::Native { path, arguments }
+                if path == "rust::String" && arguments.is_empty()
+        )
+        && is_json_type(canonical_ref(actual))
 }
 
 fn collect_last_uses(source: &ast::SourceFile) -> BTreeMap<ast::Span, ast::Span> {

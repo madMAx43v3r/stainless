@@ -1526,7 +1526,7 @@ fn vec_construction(vec_t: &TypeRef) -> Vec<CallableBinding> {
 fn vec_capacity_methods() -> Vec<CallableBinding> {
     vec![
         method("len", Receiver::Shared, vec![], TypeRef::Usize),
-        method("is_empty", Receiver::Shared, vec![], TypeRef::Bool),
+        renamed_method("empty", "is_empty", Receiver::Shared, vec![], TypeRef::Bool),
         method("capacity", Receiver::Shared, vec![], TypeRef::Usize),
         method(
             "reserve",

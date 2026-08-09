@@ -2618,6 +2618,15 @@ impl Resolver<'_> {
                         } else {
                             actual
                         };
+                        if expected.is_reference() && is_json_string_binding(&expected, &actual.ty)
+                        {
+                            self.push(
+                                "RES134",
+                                "cannot return a reference to the temporary `String` produced from `var`"
+                                    .to_owned(),
+                                value.span,
+                            );
+                        }
                         self.validate_binding(&expected, &actual, value.span, "return value");
                     }
                 } else if context.is_lambda && context.return_type != TypeRef::Void {
@@ -2653,13 +2662,13 @@ impl Resolver<'_> {
 
                 let baseline = context.scopes.clone();
                 context.scopes = baseline.clone();
-                Self::refine_null_condition(&if_statement.condition, true, context);
+                Self::refine_null_condition(&if_statement.condition, true, context, &self.model);
                 self.resolve_statement(&if_statement.then_branch, context);
                 let then_scopes = context.scopes.clone();
                 let then_falls_through = statement_may_fall_through(&if_statement.then_branch);
 
                 context.scopes = baseline;
-                Self::refine_null_condition(&if_statement.condition, false, context);
+                Self::refine_null_condition(&if_statement.condition, false, context, &self.model);
                 if let Some(else_branch) = &if_statement.else_branch {
                     self.resolve_statement(else_branch, context);
                 }
@@ -2696,7 +2705,7 @@ impl Resolver<'_> {
                 }
 
                 let before_loop = context.scopes.clone();
-                Self::refine_null_condition(&while_statement.condition, true, context);
+                Self::refine_null_condition(&while_statement.condition, true, context, &self.model);
                 context.scopes.push(BTreeMap::new());
                 self.resolve_statement(&while_statement.body, context);
                 context.scopes.pop();
@@ -3102,6 +3111,15 @@ impl Resolver<'_> {
         expression: &Expression,
         context: &FunctionContext,
     ) -> NullState {
+        if let Some(key) = expression_refinement_key(expression, context)
+            && let Some(variable) = context
+                .scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get(&key))
+        {
+            return variable.null_state;
+        }
         match &expression.kind {
             ExpressionKind::Name(path) if path.segments.len() == 1 => context
                 .scopes
@@ -3239,27 +3257,35 @@ impl Resolver<'_> {
         expected: &TypeRef,
         expression: &Expression,
         context: &mut FunctionContext,
+        model: &SemanticModel,
     ) {
-        if matches!(
-            expected,
-            TypeRef::Reference {
-                mutable: true,
-                target,
-            } if is_optional_test(target)
-        ) {
-            set_expression_null_state(expression, NullState::Unknown, context);
+        let TypeRef::Reference {
+            mutable: true,
+            target,
+        } = expected
+        else {
+            return;
+        };
+        invalidate_expression_refinements(expression, context);
+        if is_optional_test(target) {
+            set_expression_null_state(expression, NullState::Unknown, context, model);
         }
     }
 
-    fn refine_null_condition(expression: &Expression, truth: bool, context: &mut FunctionContext) {
+    fn refine_null_condition(
+        expression: &Expression,
+        truth: bool,
+        context: &mut FunctionContext,
+        model: &SemanticModel,
+    ) {
         match &expression.kind {
             ExpressionKind::Parenthesized(inner) => {
-                Self::refine_null_condition(inner, truth, context);
+                Self::refine_null_condition(inner, truth, context, model);
             }
             ExpressionKind::Prefix {
                 operator: PrefixOperator::Not,
                 operand,
-            } => Self::refine_null_condition(operand, !truth, context),
+            } => Self::refine_null_condition(operand, !truth, context, model),
             ExpressionKind::Binary {
                 left,
                 operator: BinaryOperator::Equal | BinaryOperator::NotEqual,
@@ -3282,6 +3308,7 @@ impl Resolver<'_> {
                         NullState::Null
                     },
                     context,
+                    model,
                 );
             }
             ExpressionKind::Binary {
@@ -3289,16 +3316,16 @@ impl Resolver<'_> {
                 operator: BinaryOperator::LogicalAnd,
                 right,
             } if truth => {
-                Self::refine_null_condition(left, true, context);
-                Self::refine_null_condition(right, true, context);
+                Self::refine_null_condition(left, true, context, model);
+                Self::refine_null_condition(right, true, context, model);
             }
             ExpressionKind::Binary {
                 left,
                 operator: BinaryOperator::LogicalOr,
                 right,
             } if !truth => {
-                Self::refine_null_condition(left, false, context);
-                Self::refine_null_condition(right, false, context);
+                Self::refine_null_condition(left, false, context, model);
+                Self::refine_null_condition(right, false, context, model);
             }
             ExpressionKind::Call { callee, arguments }
                 if arguments.is_empty()
@@ -3319,6 +3346,7 @@ impl Resolver<'_> {
                         NullState::Null
                     },
                     context,
+                    model,
                 );
             }
             ExpressionKind::Call { callee, arguments }
@@ -3327,9 +3355,11 @@ impl Resolver<'_> {
                     ExpressionKind::Name(path) if path.segments.as_slice() == ["bool"]
                 ) && arguments.len() == 1 =>
             {
-                Self::refine_null_condition(&arguments[0], truth, context);
+                Self::refine_null_condition(&arguments[0], truth, context, model);
             }
-            ExpressionKind::Name(_) => set_expression_null_state(
+            ExpressionKind::Name(_)
+            | ExpressionKind::Field { .. }
+            | ExpressionKind::Index { .. } => set_expression_null_state(
                 expression,
                 if truth {
                     NullState::NonNull
@@ -3337,6 +3367,7 @@ impl Resolver<'_> {
                     NullState::Null
                 },
                 context,
+                model,
             ),
             _ => {}
         }
@@ -3709,6 +3740,7 @@ impl Resolver<'_> {
             ExpressionKind::Postfix { operand, .. } => {
                 let actual = self.resolve_expression(operand, expected, context);
                 self.require_mutable_numeric(&actual, operand.span, "postfix operator");
+                invalidate_expression_refinements(operand, context);
                 (
                     ExpressionInfo {
                         ty: canonical(&actual.ty),
@@ -4033,7 +4065,9 @@ impl Resolver<'_> {
 
             let actual = self.resolve_expression(&arm.value, result_type.as_ref(), context);
             if let Some(result_type) = &result_type {
-                self.require_exact(result_type, &actual.ty, arm.value.span, "switch arm");
+                if !is_json_string_binding(result_type, &actual.ty) {
+                    self.require_exact(result_type, &actual.ty, arm.value.span, "switch arm");
+                }
             } else {
                 result_type = Some(canonical(&actual.ty));
             }
@@ -5021,6 +5055,7 @@ impl Resolver<'_> {
             }
             PrefixOperator::Increment | PrefixOperator::Decrement => {
                 self.require_mutable_numeric(&actual, operand.span, "prefix operator");
+                invalidate_expression_refinements(operand, context);
                 temporary(canonical(&actual.ty))
             }
             PrefixOperator::Plus | PrefixOperator::Negate | PrefixOperator::BitwiseNot => {
@@ -5071,9 +5106,10 @@ impl Resolver<'_> {
                     self.validate_checked_effect(json_error, left.span, context);
                 }
                 let null_state = self.binding_null_state(&left_type, right, context);
-                set_expression_null_state(left, null_state, context);
+                assign_expression_null_state(left, null_state, context, &self.model);
             } else {
                 self.require_exact(&left_type, &right_info.ty, right.span, "assignment");
+                invalidate_expression_refinements(left, context);
             }
             if operator != BinaryOperator::Assign && !is_numeric(&left_type) {
                 self.invalid_operand(binary_name(operator), &left_type, left.span);
@@ -5087,7 +5123,12 @@ impl Resolver<'_> {
         ) {
             let left_info = self.resolve_expression(left, Some(&TypeRef::Bool), context);
             let baseline = context.scopes.clone();
-            Self::refine_null_condition(left, operator == BinaryOperator::LogicalAnd, context);
+            Self::refine_null_condition(
+                left,
+                operator == BinaryOperator::LogicalAnd,
+                context,
+                &self.model,
+            );
             let right_info = self.resolve_expression(right, Some(&TypeRef::Bool), context);
             let with_right = context.scopes.clone();
             context.scopes = merge_null_scopes(&baseline, true, &with_right, true);
@@ -5123,12 +5164,20 @@ impl Resolver<'_> {
             (left_info, right_info)
         };
         let left_type = canonical(&left_info.ty);
-        self.require_exact(&left_type, &right_info.ty, right.span, "binary operand");
-        if is_json_var(&left_type)
-            && matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual)
-        {
+        let right_type = canonical(&right_info.ty);
+        let json_equality = matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual)
+            && ((is_json_var(&left_type) && self.is_json_compatible(&right_type))
+                || (is_json_var(&right_type) && self.is_json_compatible(&left_type)));
+        if json_equality {
+            if !is_json_var(&left_type) {
+                self.record_json_conversions(&left_type);
+            }
+            if !is_json_var(&right_type) {
+                self.record_json_conversions(&right_type);
+            }
             return temporary(TypeRef::Bool);
         }
+        self.require_exact(&left_type, &right_info.ty, right.span, "binary operand");
         if is_nullable_pointer_test(&left_type)
             && matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual)
             && (is_null_literal(left) || is_null_literal(right))
@@ -5431,7 +5480,22 @@ impl Resolver<'_> {
                         context,
                     );
                 }
-                self.resolve_method_call(receiver, name, arguments, span, context, &receiver_info)
+                let resolved = self.resolve_method_call(
+                    receiver,
+                    name,
+                    arguments,
+                    span,
+                    context,
+                    &receiver_info,
+                );
+                if resolved
+                    .1
+                    .as_ref()
+                    .is_some_and(|call| call_mutates_receiver(call, &self.model))
+                {
+                    invalidate_expression_refinements(receiver, context);
+                }
+                resolved
             }
             ExpressionKind::Name(path) => {
                 if let Some(resolved) =
@@ -5907,7 +5971,7 @@ impl Resolver<'_> {
 
         // A checked call that returns has necessarily established the same
         // non-empty fact as an explicit condition guard.
-        set_expression_null_state(receiver, NullState::NonNull, context);
+        set_expression_null_state(receiver, NullState::NonNull, context, &self.model);
         (info_for_return_type(return_type), Some(call))
     }
 
@@ -6632,7 +6696,7 @@ impl Resolver<'_> {
         for ((expected, actual), syntax) in function.parameters.iter().zip(&actual).zip(arguments) {
             let actual = self.adjusted_binding_actual(expected, actual, syntax, context);
             self.validate_binding(expected, &actual, syntax.span, "stored function argument");
-            Self::invalidate_mutable_optional_argument(expected, syntax, context);
+            Self::invalidate_mutable_optional_argument(expected, syntax, context, &self.model);
         }
         let mutable = function.kind == StoredFunctionKind::Mutable;
         if mutable && callee.category != ValueCategory::MutablePlace {
@@ -6837,7 +6901,8 @@ impl Resolver<'_> {
                                 || Self::is_shared_to_weak_binding(&parameter_ty, &adjusted.ty)
                                 || candidates.len() == 1
                                     && (self.is_enum_integer_binding(&parameter_ty, &adjusted.ty)
-                                        || is_optional_value_binding(&parameter_ty, &adjusted.ty))
+                                        || is_optional_value_binding(&parameter_ty, &adjusted.ty)
+                                        || is_json_string_binding(&parameter_ty, &adjusted.ty))
                         })
                 })
                 .collect::<Vec<_>>()
@@ -6897,7 +6962,7 @@ impl Resolver<'_> {
             let parameter_ty = substitute_type(&parameter.ty, &substitutions);
             let argument = self.adjusted_binding_actual(&parameter_ty, argument, syntax, context);
             self.validate_binding(&parameter_ty, &argument, syntax.span, "argument");
-            Self::invalidate_mutable_optional_argument(&parameter_ty, syntax, context);
+            Self::invalidate_mutable_optional_argument(&parameter_ty, syntax, context, &self.model);
         }
         let return_type = substitute_type(&symbol.return_type, &substitutions);
         let call = ResolvedCall {
@@ -8014,7 +8079,8 @@ impl Resolver<'_> {
                                 || Self::is_shared_to_weak_binding(&parameter_ty, &adjusted.ty)
                                 || arity_candidates.len() == 1
                                     && (self.is_enum_integer_binding(&parameter_ty, &adjusted.ty)
-                                        || is_optional_value_binding(&parameter_ty, &adjusted.ty))
+                                        || is_optional_value_binding(&parameter_ty, &adjusted.ty)
+                                        || is_json_string_binding(&parameter_ty, &adjusted.ty))
                         })
                 })
                 .collect::<Vec<_>>()
@@ -8108,7 +8174,12 @@ impl Resolver<'_> {
                 expression.span,
                 "constructor argument",
             );
-            Self::invalidate_mutable_optional_argument(&parameter_ty, expression, context);
+            Self::invalidate_mutable_optional_argument(
+                &parameter_ty,
+                expression,
+                context,
+                &self.model,
+            );
         }
         if symbol.is_deleted {
             self.push(
@@ -8180,7 +8251,7 @@ impl Resolver<'_> {
 
         let intrinsic = if is_integer(canonical_ref(&argument.ty)) {
             Intrinsic::EnumFromInteger { structure }
-        } else if is_string_type(&argument.ty) {
+        } else if is_string_type(&argument.ty) || is_json_var(&canonical(&argument.ty)) {
             Intrinsic::EnumFromString { structure }
         } else {
             self.push(
@@ -8307,7 +8378,8 @@ impl Resolver<'_> {
                                 || Self::is_shared_to_weak_binding(&parameter.ty, &adjusted.ty)
                                 || arity_candidates.len() == 1
                                     && (self.is_enum_integer_binding(&parameter.ty, &adjusted.ty)
-                                        || is_optional_value_binding(&parameter.ty, &adjusted.ty))
+                                        || is_optional_value_binding(&parameter.ty, &adjusted.ty)
+                                        || is_json_string_binding(&parameter.ty, &adjusted.ty))
                         })
                 })
                 .collect::<Vec<_>>()
@@ -8360,7 +8432,12 @@ impl Resolver<'_> {
             let argument =
                 self.adjusted_binding_actual(&parameter.ty, argument, expression, context);
             self.validate_binding(&parameter.ty, &argument, expression.span, "argument");
-            Self::invalidate_mutable_optional_argument(&parameter.ty, expression, context);
+            Self::invalidate_mutable_optional_argument(
+                &parameter.ty,
+                expression,
+                context,
+                &self.model,
+            );
         }
         let return_type = symbol.return_type;
         let call = ResolvedCall {
@@ -8550,6 +8627,7 @@ impl Resolver<'_> {
                             canonical(expected) == canonical(&actual.ty)
                                 || self.is_enum_integer_binding(expected, &actual.ty)
                                 || is_optional_value_binding(expected, &actual.ty)
+                                || is_json_string_binding(expected, &actual.ty)
                                 || is_json_var(&canonical(expected))
                                     && self.is_json_compatible(&canonical(&actual.ty))
                         })
@@ -8615,7 +8693,7 @@ impl Resolver<'_> {
             candidate.parameter_types.iter().zip(actual).zip(arguments)
         {
             self.validate_binding(expected, argument, expression.span, "argument");
-            Self::invalidate_mutable_optional_argument(expected, expression, context);
+            Self::invalidate_mutable_optional_argument(expected, expression, context, &self.model);
         }
         let (result_adaptation, throws) = if let Some(error_type) = &candidate.rust_result_error {
             let (exception_id, exception) = self.native_result_exception(error_type);
@@ -8763,7 +8841,13 @@ impl Resolver<'_> {
         {
             let actual_type = canonical(&actual.ty);
             self.record_json_conversions(&actual_type);
+            if is_string_type(&actual_type) {
+                return;
+            }
             self.validate_value_use(&actual_type, actual, span, description);
+            return;
+        }
+        if is_json_string_binding(expected, &actual.ty) {
             return;
         }
         if !self.is_derived_reference_binding(expected, &actual.ty)
@@ -11334,30 +11418,154 @@ fn is_optional_value_binding(expected: &TypeRef, actual: &TypeRef) -> bool {
     optional_value_type(expected).is_some_and(|value| canonical_ref(value) == canonical_ref(actual))
 }
 
+fn is_json_string_binding(expected: &TypeRef, actual: &TypeRef) -> bool {
+    let expects_string = is_string_type(expected)
+        || !expected.is_reference() && optional_value_type(expected).is_some_and(is_string_type);
+    !matches!(expected, TypeRef::Reference { mutable: true, .. })
+        && expects_string
+        && is_json_var(&canonical(actual))
+}
+
+const EXPRESSION_REFINEMENT_PREFIX: &str = "\0optional-expression\0";
+
+fn expression_refinement_key(expression: &Expression, context: &FunctionContext) -> Option<String> {
+    let path = stable_expression_path(expression, context)?;
+    Some(format!("{EXPRESSION_REFINEMENT_PREFIX}{path}"))
+}
+
+fn stable_expression_path(expression: &Expression, context: &FunctionContext) -> Option<String> {
+    match &expression.kind {
+        ExpressionKind::Parenthesized(inner) => stable_expression_path(inner, context),
+        ExpressionKind::Name(path) => {
+            let [name] = path.segments.as_slice() else {
+                return None;
+            };
+            if let Some(scope) = context
+                .scopes
+                .iter()
+                .rposition(|scope| scope.contains_key(name))
+            {
+                Some(format!("L{scope}:{}:{name}", name.len()))
+            } else if context.receiver.is_some() {
+                Some(format!("R{}:{name}", name.len()))
+            } else {
+                None
+            }
+        }
+        ExpressionKind::Field { receiver, name } => {
+            let receiver = stable_expression_path(receiver, context)?;
+            let field = name.segments.join("::");
+            Some(format!(
+                "F{}:{receiver}{}:{field}",
+                receiver.len(),
+                field.len()
+            ))
+        }
+        ExpressionKind::Index { receiver, index } => {
+            let receiver = stable_expression_path(receiver, context)?;
+            let index = stable_expression_path(index, context)?;
+            Some(format!(
+                "I{}:{receiver}{}:{index}",
+                receiver.len(),
+                index.len()
+            ))
+        }
+        ExpressionKind::Literal(literal)
+            if matches!(
+                literal.kind,
+                LiteralKind::Integer | LiteralKind::Character | LiteralKind::String
+            ) =>
+        {
+            Some(format!("K{}:{}", literal.text.len(), literal.text))
+        }
+        _ => None,
+    }
+}
+
+fn invalidate_expression_refinements(expression: &Expression, context: &mut FunctionContext) {
+    let Some(path) = stable_expression_path(expression, context) else {
+        return;
+    };
+    for scope in &mut context.scopes {
+        scope.retain(|name, _| {
+            !name.starts_with(EXPRESSION_REFINEMENT_PREFIX)
+                || !name[EXPRESSION_REFINEMENT_PREFIX.len()..].contains(&path)
+        });
+    }
+}
+
+fn call_mutates_receiver(call: &ResolvedCall, model: &SemanticModel) -> bool {
+    match &call.target {
+        CallTarget::Stainless(function) | CallTarget::InterfaceMethod(function) => model.functions
+            [function.0]
+            .receiver
+            .as_ref()
+            .is_some_and(|receiver| receiver.mutable),
+        CallTarget::Native(call) => {
+            matches!(call.receiver, Some(Receiver::Mutable | Receiver::Value))
+        }
+        CallTarget::Intrinsic(
+            Intrinsic::ArrayFill { .. }
+            | Intrinsic::AtomicStore { .. }
+            | Intrinsic::AtomicSwap { .. }
+            | Intrinsic::ConditionWait { .. }
+            | Intrinsic::StoredFunctionCall { mutable: true },
+        ) => true,
+        _ => false,
+    }
+}
+
 fn set_expression_null_state(
     expression: &Expression,
     null_state: NullState,
     context: &mut FunctionContext,
+    model: &SemanticModel,
 ) {
     let expression = match &expression.kind {
         ExpressionKind::Parenthesized(inner) => inner.as_ref(),
         _ => expression,
     };
-    let ExpressionKind::Name(path) = &expression.kind else {
-        return;
-    };
-    let [name] = path.segments.as_slice() else {
-        return;
-    };
-    if let Some(variable) = context
-        .scopes
-        .iter_mut()
-        .rev()
-        .find_map(|scope| scope.get_mut(name))
+    if let ExpressionKind::Name(path) = &expression.kind
+        && let [name] = path.segments.as_slice()
+        && let Some(variable) = context
+            .scopes
+            .iter_mut()
+            .rev()
+            .find_map(|scope| scope.get_mut(name))
         && is_nullable_value_test(&variable.ty)
     {
         variable.null_state = null_state;
+        return;
     }
+    let Some(key) = expression_refinement_key(expression, context) else {
+        return;
+    };
+    let Some(resolution) = model.expression(expression.span) else {
+        return;
+    };
+    if !is_nullable_value_test(&resolution.ty) {
+        return;
+    }
+    let variable = Variable {
+        ty: canonical(&resolution.ty),
+        mutable: false,
+        null_state,
+    };
+    context
+        .scopes
+        .last_mut()
+        .expect("a function context always has a scope")
+        .insert(key, variable);
+}
+
+fn assign_expression_null_state(
+    expression: &Expression,
+    null_state: NullState,
+    context: &mut FunctionContext,
+    model: &SemanticModel,
+) {
+    invalidate_expression_refinements(expression, context);
+    set_expression_null_state(expression, null_state, context, model);
 }
 
 fn merge_null_scopes(

@@ -2470,6 +2470,67 @@ fn rustc_validates_stored_function_and_function_mut_behavior() {
 }
 
 #[test]
+fn json_var_converts_to_string_in_typed_contexts() {
+    let source = r#"use rust::{String, Vec};
+
+enum State : u8 {
+    Ready = 1,
+};
+
+bool accepts_string(const String& value)
+{
+    return value == "ready";
+}
+
+bool implicit_json_strings()
+{
+    var value = "ready";
+    String owned = value;
+    Vec<String> values;
+    values.push(value);
+    var state_name = "Ready";
+    try {
+        State state = State(state_name);
+        return owned == "ready" && values[0] == "ready" &&
+            accepts_string(value) && value == "ready" && "ready" == value &&
+            state == State::Ready;
+    } catch (const stainless::EnumError& _error) {
+        return false;
+    }
+}
+"#;
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let function = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["implicit_json_strings"])
+        .expect("implicit JSON string conversion function")
+        .mangled_name
+        .clone();
+    let mut rust = result.rust.expect("implicit JSON strings should emit Rust");
+    assert!(rust.contains("to_string_value"), "{rust}");
+    write!(rust, "\nfn main() {{ assert!({function}()); }}\n")
+        .expect("writing to a String cannot fail");
+    let directory = write_runtime_cargo_fixture("implicit-json-string", &rust);
+    let output = run_fixture_cargo(&directory, "run");
+    assert!(
+        output.status.success(),
+        "generated implicit JSON strings failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(&directory)
+        .unwrap_or_else(|error| panic!("failed to remove {}: {error}", directory.display()));
+}
+
+#[test]
 fn cargo_executes_native_json_support_and_json_error_conversion() {
     let source = include_str!("../../../docs/ref/21_json_support.stl");
     let result = transpile(source);
