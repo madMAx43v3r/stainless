@@ -114,8 +114,10 @@ i32 main() throws stainless::JsonError
     var empty_json = var(Empty{});
     bool profile_source_survived = profile.name.len() == 3usize;
 
-    var test_element = array[2];
-    var out_of_bounds = array[11111]; // JSON null
+    u32 test_index = 2;
+    u64 missing_index = 11111;
+    var test_element = array[test_index];
+    var out_of_bounds = array[missing_index]; // JSON null
     var missing_field = object.not_found; // JSON null
 
     // Arrays and objects use shared mutable identity. Every mutating operation
@@ -126,7 +128,8 @@ i32 main() throws stainless::JsonError
     object.set("dynamic", "member");
     array.push(3);
     array.insert(1usize, 7);
-    array[6usize] = 9; // Extends with null values, like JavaScript.
+    u64 extended_index = 6;
+    array[extended_index] = 9; // Extends with null values, like JavaScript.
     var removed_element = array.remove(1usize);
     var removed_member = object.remove("dynamic");
     usize array_length = array.len();

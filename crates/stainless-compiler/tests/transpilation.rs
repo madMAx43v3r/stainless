@@ -160,14 +160,17 @@ u32 vec_indexing() {
     values.push(10);
     values.push(20);
 
-    u32 first = values[0];
-    values[1] = 32;
-    return first + values[1];
+    u64 first_index = 0;
+    u32 second_index = 1;
+    u32 first = values[first_index];
+    values[second_index] = 32;
+    return first + values[second_index];
 }
 
 u32 vec_out_of_bounds() {
     Vec<u32> values;
-    return values[0];
+    u8 index = 0;
+    return values[index];
 }
 ",
     );
@@ -195,6 +198,11 @@ u32 vec_out_of_bounds() {
         .mangled_name
         .clone();
     let mut rust = result.rust.expect("Vec indexing should emit Rust");
+    assert!(rust.contains("TryFrom"), "{rust}");
+    assert!(
+        rust.contains("Stainless index does not fit usize"),
+        "{rust}"
+    );
     write!(
         rust,
         "\nfn main() {{ assert_eq!({function}(), 42); assert!(::std::panic::catch_unwind(|| {out_of_bounds}()).is_err()); }}\n"

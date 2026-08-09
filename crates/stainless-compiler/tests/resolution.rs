@@ -1626,14 +1626,29 @@ usize native_calls(const String& suffix) {
 }
 
 #[test]
-fn vec_indexing_preserves_shared_and_mutable_place_semantics() {
+fn sequence_indexing_accepts_unsigned_types_and_preserves_place_semantics() {
     let valid = analyze(
         r"use rust::Vec;
 
-u32 access(Vec<u32>& values, const Vec<u32>& shared) {
-    u32 first = shared[0];
-    values[1] = first;
-    return values[1];
+u32 access(Vec<u32>& values, const Vec<u32>& shared, u8 first_index,
+           u16 second_index, u32 third_index, u64 fourth_index,
+           usize final_index) {
+    u32 first = shared[first_index];
+    values[second_index] = first;
+    values[third_index] = values[fourth_index];
+    return values[final_index];
+}
+
+u32 access_array(const Array<u32, 4>& values, u64 index) {
+    return values[index];
+}
+
+var access_json(const var& values, u32 index) {
+    return values[index];
+}
+
+void mutate_json(var& values, u64 index) throws stainless::JsonError {
+    values[index] = 1;
 }
 ",
     );
@@ -1647,7 +1662,12 @@ void mutate_shared(const Vec<u32>& values) {
 }
 
 u32 wrong_index(const Vec<u32>& values) {
-    u32 index = 0;
+    i32 index = 0;
+    return values[index];
+}
+
+u32 too_wide(const Vec<u32>& values) {
+    u128 index = 0;
     return values[index];
 }
 ",
@@ -1660,11 +1680,27 @@ u32 wrong_index(const Vec<u32>& values) {
         "{:#?}",
         invalid.diagnostics
     );
+    assert_eq!(
+        invalid
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.message.contains("index requires `u8`"))
+            .count(),
+        2,
+        "{:#?}",
+        invalid.diagnostics
+    );
     assert!(
         invalid
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("index requires `usize`"))
+            .any(|diagnostic| diagnostic.message.contains("found `i32`"))
+    );
+    assert!(
+        invalid
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("found `u128`"))
     );
 }
 

@@ -1,6 +1,8 @@
 // Array<T, N> is compiler-native fixed-size inline storage and lowers directly
 // to Rust [T; N]. N is a compile-time usize literal, const parameter, or a
-// qualified static const usize member.
+// qualified static const usize member. Index expressions accept unsigned
+// integer types up to u64, plus usize, and convert to usize with a checked
+// conversion before Rust bounds checking.
 
 namespace samples {
 
@@ -28,8 +30,10 @@ u32 array_result()
 {
     // Missing aggregate elements are default-constructed.
     Array<u32, Limits::Width> values = Array<u32, Limits::Width>{1, 2};
-    values[2] = 3;
-    values[3] = 4;
+    u32 third = 2;
+    u64 fourth = 3;
+    values[third] = 3;
+    values[fourth] = 4;
 
     u32 total = 0;
     for (const auto& value : values) {

@@ -3460,8 +3460,19 @@ impl Resolver<'_> {
             }
             ExpressionKind::Index { receiver, index } => {
                 let receiver = self.resolve_expression(receiver, None, context);
+                let index_span = index.span;
                 let index = self.resolve_expression(index, Some(&TypeRef::Usize), context);
-                self.require_exact(&TypeRef::Usize, &index.ty, expression.span, "index");
+                let index_type = canonical(&index.ty);
+                if index_type != TypeRef::Error && !is_index_type(&index_type) {
+                    self.push(
+                        "RES028",
+                        format!(
+                            "index requires `u8`, `u16`, `u32`, `u64`, or `usize`, found `{}`",
+                            display_type(&index_type)
+                        ),
+                        index_span,
+                    );
+                }
                 let receiver_type = canonical(&receiver.ty);
                 let indexed_element = match &receiver_type {
                     TypeRef::Array { element, .. } => Some(element.as_ref()),
@@ -10819,6 +10830,13 @@ fn is_integer(ty: &TypeRef) -> bool {
             | TypeRef::U64
             | TypeRef::U128
             | TypeRef::Usize
+    )
+}
+
+fn is_index_type(ty: &TypeRef) -> bool {
+    matches!(
+        ty,
+        TypeRef::U8 | TypeRef::U16 | TypeRef::U32 | TypeRef::U64 | TypeRef::Usize
     )
 }
 

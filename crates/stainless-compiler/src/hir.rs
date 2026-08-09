@@ -595,14 +595,14 @@ pub enum Expression {
     JsonIndex {
         /// JSON receiver.
         receiver: Box<Expression>,
-        /// Array index.
+        /// Unsigned array index, checked into Rust `usize` during emission.
         index: Box<Expression>,
     },
     /// Fixed-size array or vector indexing.
     SequenceIndex {
         /// Array or vector place or value.
         receiver: Box<Expression>,
-        /// Checked `usize` index.
+        /// Unsigned index, checked into Rust `usize` during emission.
         index: Box<Expression>,
     },
     /// Checked JSON object member assignment.
@@ -618,7 +618,7 @@ pub enum Expression {
     JsonSetIndex {
         /// JSON receiver.
         receiver: Box<Expression>,
-        /// Array index.
+        /// Unsigned array index, checked into Rust `usize` during emission.
         index: Box<Expression>,
         /// New JSON value.
         value: Box<Expression>,

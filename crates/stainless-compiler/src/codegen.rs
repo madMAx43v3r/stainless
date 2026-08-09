@@ -1014,12 +1014,12 @@ impl Emitter {
             }
             hir::Expression::JsonIndex { receiver, index } => {
                 let receiver = self.expression(receiver)?;
-                let index = self.expression(index)?;
+                let index = checked_index(&self.expression(index)?);
                 Ok(quote!((#receiver).index(#index)))
             }
             hir::Expression::SequenceIndex { receiver, index } => {
                 let receiver = self.expression(receiver)?;
-                let index = self.expression(index)?;
+                let index = checked_index(&self.expression(index)?);
                 Ok(quote!((#receiver)[#index]))
             }
             hir::Expression::JsonSetField {
@@ -1037,7 +1037,7 @@ impl Emitter {
                 value,
             } => {
                 let receiver = self.expression(receiver)?;
-                let index = self.expression(index)?;
+                let index = checked_index(&self.expression(index)?);
                 let value = self.expression(value)?;
                 Ok(quote!((#receiver).set_index(#index, #value)))
             }
@@ -2029,6 +2029,13 @@ fn switch_literal(kind: LiteralKind, text: &str) -> Result<TokenStream, String> 
     } else {
         literal(kind, text)
     }
+}
+
+fn checked_index(index: &TokenStream) -> TokenStream {
+    quote!(
+        <usize as ::core::convert::TryFrom<_>>::try_from(#index)
+            .expect("Stainless index does not fit usize")
+    )
 }
 
 fn json_cast_method(target: &hir::Type) -> Result<&'static str, String> {

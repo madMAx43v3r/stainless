@@ -1116,11 +1116,14 @@ arity. Zero-length arrays are valid. `Array<T, N>()` and an uninitialized-lookin
 declaration both perform Stainless default construction, so they are valid only
 when `T` has a non-throwing default constructor.
 
-Arrays support `operator[]`-style indexing, `len()`, `is_empty()`, `fill(value)`,
-and C++-style range iteration. `fill()` requires a mutable array and a copyable
-element type. Copy/assignment, equality, ordering, and structural `Send`/`Sync`
-availability follow the element type. A generic declaration writes const
-parameters after type parameters:
+Arrays support `operator[]`-style indexing with `u8`, `u16`, `u32`, `u64`, or
+`usize`, plus `len()`, `is_empty()`, `fill(value)`, and C++-style range
+iteration. Unsigned indices are converted to Rust `usize` with a checked
+conversion before ordinary bounds checking; signed integers and `u128` are
+rejected. `fill()` requires a mutable array and a copyable element type.
+Copy/assignment, equality, ordering, and structural `Send`/`Sync` availability
+follow the element type. A generic declaration writes const parameters after
+type parameters:
 
 ```cpp
 struct Buffer<T, usize N> {
@@ -2319,8 +2322,8 @@ The compiler crate currently registers the following source-visible APIs:
   a new owned `Vec<T>` and requires `T: Clone`. `with_range` visits the range
   without allocating or exposing a storable Rust slice and returns `false` for
   invalid bounds. `values[index]` provides shared or mutable indexed-place
-  access, requires an exact `usize` index (with integer literals inferred from
-  context), and uses Rust's bounds-checked indexing behavior.
+  access, accepts `u8`, `u16`, `u32`, `u64`, or `usize`, and uses checked
+  conversion to `usize` followed by Rust's bounds-checked indexing behavior.
 - `rust::String`: `String()`, the explicit copy constructor
   `String(const String&)`, `String::with_capacity`, `clone`, `into_bytes`,
   `len`, `is_empty`, `capacity`, `reserve`, `reserve_exact`, `shrink_to`,
@@ -2430,6 +2433,9 @@ if (absent.is_null()) {
     // handle absence
 }
 ```
+
+JSON array index syntax accepts the same `u8` through `u64` and `usize` index
+types as fixed arrays and vectors. Conversion to Rust `usize` is checked.
 
 An object member or array element may be assigned through a mutable `var`
 place. Indexed assignment extends an array with `null` values when necessary,
@@ -3376,7 +3382,8 @@ imply that all ownership or type semantics are valid.
 
 ## Cargo integration and compiler packaging
 
-The target packaging is a Cargo workspace with six publishable crates:
+The Rust workspace contains the compiler, tooling, runtime, and native backing
+crates:
 
 - `stainless-syntax` owns tokens, the lossless CST, and typed syntax wrappers.
 - `stainless-compiler` owns AST/HIR lowering, name/type/ownership analysis,
@@ -3386,8 +3393,13 @@ The target packaging is a Cargo workspace with six publishable crates:
 - `stainless-build` provides the Cargo build-script API.
 - `stainlessc` is a thin CLI over `stainless-compiler` for diagnostics,
   fixtures, and standalone generation.
-- `stainless-kvstore` is a Stainless-written versioned/revertible storage
-  showcase packaged as a Rust library crate.
+- `stainless-http` provides the native Rust transport behind the Stainless HTTP
+  package.
+
+Pure Stainless libraries such as `stainless-kvstore` use
+`stainless-package.toml` and remain outside the Cargo workspace. They need no
+Rust facade, `Cargo.toml`, `build.rs`, or generated source checked into the
+repository.
 
 Keeping semantics, interop, and codegen as modules inside `stainless-compiler`
 avoids premature crate boundaries; they may be split after their APIs stabilize.
@@ -3395,11 +3407,10 @@ A procedural macro is not used because whole-file parsing, external manifests,
 generated modules, dependency shims, and source-mapped diagnostics fit a build
 step better.
 
-The repository now contains all six crates. `stainless-runtime` owns the
-`Var`/native JSON representation, native JSON errors, and exact-signature file
-facades that cannot map directly to one portable inherent Rust method;
-generated checked-exception trait/object support remains inline until that ABI
-stabilizes.
+`stainless-runtime` owns the `Var`/native JSON representation, native JSON
+errors, and exact-signature file facades that cannot map directly to one
+portable inherent Rust method; generated checked-exception trait/object support
+remains inline until that ABI stabilizes.
 
 The `stainless-build` crate is an optional bridge for the separate case where
 hand-written Rust code embeds Stainless functions. Normal standalone Stainless
