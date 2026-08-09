@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use ureq::http::{HeaderMap, HeaderName, HeaderValue, header::CONTENT_TYPE};
 
-/// Reusable synchronous JSON HTTP client for Stainless applications.
+/// Reusable synchronous HTTP client for Stainless applications.
 #[derive(Clone)]
 pub struct Client {
     agent: ureq::Agent,
@@ -89,7 +89,25 @@ impl Client {
         let response = request
             .call()
             .map_err(|error| ClientError::new(format!("GET {path} failed: {error}")))?;
-        read_response("GET", path, response)
+        read_text_response("GET", path, response)
+    }
+
+    /// Sends a GET request to one absolute path and returns its binary body.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid paths, transport failures, non-success
+    /// status codes, or unreadable response bodies.
+    pub fn get_bytes(&self, path: &str) -> Result<Vec<u8>, ClientError> {
+        let url = self.url(path)?;
+        let mut request = self.agent.get(url);
+        if let Some(headers) = request.headers_mut() {
+            headers.extend(self.headers.clone());
+        }
+        let response = request
+            .call()
+            .map_err(|error| ClientError::new(format!("GET {path} failed: {error}")))?;
+        read_binary_response("GET", path, response)
     }
 
     /// Sends a JSON POST request to one absolute path and returns its UTF-8
@@ -109,7 +127,30 @@ impl Client {
         let response = request
             .send(body)
             .map_err(|error| ClientError::new(format!("POST {path} failed: {error}")))?;
-        read_response("POST", path, response)
+        read_text_response("POST", path, response)
+    }
+
+    /// Sends a binary POST request to one absolute path and returns its binary
+    /// response body. The request content type is `application/octet-stream`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid paths, transport failures, non-success
+    /// status codes, or unreadable response bodies.
+    pub fn post_bytes(&self, path: &str, body: &[u8]) -> Result<Vec<u8>, ClientError> {
+        let url = self.url(path)?;
+        let mut request = self.agent.post(url);
+        if let Some(headers) = request.headers_mut() {
+            headers.extend(self.headers.clone());
+            headers.insert(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/octet-stream"),
+            );
+        }
+        let response = request
+            .send(body)
+            .map_err(|error| ClientError::new(format!("POST {path} failed: {error}")))?;
+        read_binary_response("POST", path, response)
     }
 
     fn url(&self, path: &str) -> Result<String, ClientError> {
@@ -122,7 +163,7 @@ impl Client {
     }
 }
 
-fn read_response(
+fn read_text_response(
     method: &str,
     path: &str,
     mut response: ureq::http::Response<ureq::Body>,
@@ -137,6 +178,31 @@ fn read_response(
             status.to_string()
         } else {
             format!("{status}: {body}")
+        };
+        return Err(ClientError::new(format!(
+            "{method} {path} returned {detail}"
+        )));
+    }
+    Ok(body)
+}
+
+fn read_binary_response(
+    method: &str,
+    path: &str,
+    mut response: ureq::http::Response<ureq::Body>,
+) -> Result<Vec<u8>, ClientError> {
+    let status = response.status();
+    let body = response
+        .body_mut()
+        .read_to_vec()
+        .map_err(|error| ClientError::new(format!("{method} {path} body failed: {error}")))?;
+    if !status.is_success() {
+        let detail = if body.is_empty() {
+            status.to_string()
+        } else if let Ok(text) = std::str::from_utf8(&body) {
+            format!("{status}: {text}")
+        } else {
+            format!("{status}: {} binary response bytes", body.len())
         };
         return Err(ClientError::new(format!(
             "{method} {path} returned {detail}"

@@ -1,0 +1,119 @@
+// Blocking Stainless HTTP/JSON and WebSocket server API. Transport events are represented as JSON; binary HTTP and
+// WebSocket payloads remain Vec<u8> and are retrieved by their request or message identifier.
+
+use rust::{String, Vec};
+use rust::stainless_http::Server;
+
+namespace http {
+
+struct ServerConfig {
+    String address;
+    optional<String> websocket_path;
+    u64 request_timeout_ms = 30 * 1000;
+    usize max_body_bytes = 16 * 1024 * 1024;
+
+    ServerConfig() = default;
+    ServerConfig(const String& address);
+};
+
+ServerConfig::ServerConfig(const String& address)
+    : address(address)
+{
+}
+
+// Binds a listener from config and starts its asynchronous transport on a background thread. Port zero requests an
+// available operating-system port. websocket_path enables WebSocket upgrades when it contains a value. Throws
+// RustError if the address, WebSocket path, body limit, or runtime is invalid.
+
+Server listen(const ServerConfig& config) throws stainless::RustError
+{
+    String websocket_path = config.websocket_path.value_or("");
+    return Server::bind(config.address, websocket_path, config.request_timeout_ms, config.max_body_bytes).unwrap();
+}
+
+// Returns the bound listener address, including the selected port when listen() was called with port zero.
+
+String local_address(const Server& server)
+{
+    return server.local_addr();
+}
+
+// Waits up to timeout_ms for the next HTTP or WebSocket event and parses it as JSON. Returns null when the timeout
+// expires. Event objects use type "http", "ws_open", "ws_message", "ws_binary", "ws_close", or "server_error".
+// A ws_binary event carries a string message_id for take_message_bytes(). Throws RustError if the transport event
+// stream stops and JsonError if an event cannot be parsed.
+
+var receive(const Server& server, const u64 timeout_ms) throws stainless::RustError, stainless::JsonError
+{
+    String event = server.next_event(timeout_ms);
+    if (event.len() == 0) {
+        return null;
+    }
+    return var::parse(event).unwrap();
+}
+
+// Completes one pending HTTP event with a JSON response. Returns false when request_id is unknown, already answered,
+// or already timed out; true means the response was accepted by the transport.
+
+bool respond_json(const Server& server, const u64 request_id, const u16 status, const var& body)
+{
+    return server.respond(request_id, status, "application/json", body.to_json());
+}
+
+// Returns the exact body bytes for a pending HTTP event. Call this before responding. Text and JSON request bodies are
+// available here too. Throws RustError when request_id is unknown, already answered, or already timed out.
+
+Vec<u8> request_bytes(const Server& server, const u64 request_id) throws stainless::RustError
+{
+    return server.request_bytes(request_id).unwrap();
+}
+
+// Completes one pending HTTP event with an application/octet-stream response. Returns false when request_id is
+// unknown, already answered, or already timed out; true means the response was accepted by the transport.
+
+bool respond_bytes(const Server& server, const u64 request_id, const u16 status, const Vec<u8>& body)
+{
+    return server.respond_bytes(request_id, status, "application/octet-stream", body);
+}
+
+// Queues one compact JSON value as a WebSocket text message. Returns false when connection_id is unknown, closed, or
+// its outbound queue is full.
+
+bool send_json(const Server& server, const u64 connection_id, const var& message)
+{
+    return server.send_text(connection_id, message.to_json());
+}
+
+// Takes the exact payload associated with one ws_binary event. Each string message_id may be consumed once. Throws
+// RustError when the identifier is unknown or was already consumed.
+
+Vec<u8> take_message_bytes(const Server& server, const String& message_id) throws stainless::RustError
+{
+    return server.take_message_bytes(message_id).unwrap();
+}
+
+// Queues one binary WebSocket message for a peer. Returns false when connection_id is unknown, closed, or its outbound
+// queue is full.
+
+bool send_bytes(const Server& server, const u64 connection_id, const Vec<u8>& message)
+{
+    return server.send_bytes(connection_id, message);
+}
+
+// Queues one compact JSON value for every connected WebSocket peer and returns the number of outbound queues that
+// accepted it. A peer whose queue is full is not included in the count.
+
+usize broadcast_json(const Server& server, const var& message)
+{
+    return server.broadcast_text(message.to_json());
+}
+
+// Queues one binary message for every connected WebSocket peer and returns the number of outbound queues that accepted
+// it. A peer whose queue is full is not included in the count.
+
+usize broadcast_bytes(const Server& server, const Vec<u8>& message)
+{
+    return server.broadcast_bytes(message);
+}
+
+} // namespace http

@@ -1,0 +1,68 @@
+// Blocking Stainless HTTP/JSON client API.
+
+use rust::{Map, String, Vec};
+use rust::stainless_http::Client;
+
+namespace http {
+
+struct ClientConfig {
+    String base_url;
+    Map<String, String> headers;
+    u64 request_timeout_ms = 30 * 1000;
+
+    ClientConfig() = default;
+    ClientConfig(const String& base_url);
+};
+
+ClientConfig::ClientConfig(const String& base_url)
+    : base_url(base_url)
+{
+}
+
+// Creates a reusable, connection-pooling blocking HTTP client from config. request_timeout_ms applies to each complete
+// request and every entry in headers is sent with every request. A later request opens a connection when none can be
+// reused; failed requests are not retried here. Throws RustError when base_url or a header is invalid; individual
+// request failures are reported by get_json() and post_json().
+
+Client connect(const ClientConfig& config) throws stainless::RustError
+{
+    return Client::new(config.base_url, config.request_timeout_ms, config.headers).unwrap();
+}
+
+// Sends a blocking GET request to an absolute path beginning with one slash and parses its successful response body
+// as JSON. Throws RustError for invalid paths, transport failures, timeouts, non-2xx responses, or unreadable bodies,
+// and JsonError when the response body is not valid JSON.
+
+var get_json(const Client& client, const String& path) throws stainless::RustError, stainless::JsonError
+{
+    String source = client.get(path);
+    return var::parse(source).unwrap();
+}
+
+// Sends a blocking GET request to an absolute path beginning with one slash and returns the successful response body
+// unchanged. Throws RustError for invalid paths, transport failures, timeouts, non-2xx responses, or unreadable bodies.
+
+Vec<u8> get_bytes(const Client& client, const String& path) throws stainless::RustError
+{
+    return client.get_bytes(path).unwrap();
+}
+
+// Serializes body as compact JSON, sends a blocking POST request with application/json, and parses the successful
+// response body as JSON. Path and error behavior match get_json().
+
+var post_json(const Client& client, const String& path, const var& body)
+    throws stainless::RustError, stainless::JsonError
+{
+    String source = client.post_json(path, body.to_json());
+    return var::parse(source).unwrap();
+}
+
+// Sends body unchanged in a blocking POST request with application/octet-stream and returns the successful response
+// body unchanged. Path and transport error behavior match get_bytes().
+
+Vec<u8> post_bytes(const Client& client, const String& path, const Vec<u8>& body) throws stainless::RustError
+{
+    return client.post_bytes(path, body).unwrap();
+}
+
+} // namespace http

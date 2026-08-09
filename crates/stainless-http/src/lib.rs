@@ -1,7 +1,8 @@
-//! HTTP/JSON and WebSocket transport for Stainless applications.
+//! HTTP/JSON, binary HTTP, and WebSocket transport for Stainless applications.
 //!
-//! The network runtime converts transport activity into compact JSON events.
-//! A Stainless application owns routing, authentication, protocol state, and
+//! The network runtime converts transport activity into compact JSON events
+//! while preserving binary request and message bodies as byte vectors. A
+//! Stainless application owns routing, authentication, protocol state, and
 //! response bodies by consuming those events through [`Server::next_event`].
 
 #![forbid(unsafe_code)]

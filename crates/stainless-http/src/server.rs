@@ -25,9 +25,11 @@ const CONNECTION_QUEUE_CAPACITY: usize = 256;
 /// A blocking event bridge between Stainless and an asynchronous HTTP server.
 ///
 /// Incoming HTTP requests and WebSocket activity are serialized as JSON by
-/// [`Self::next_event`]. The application completes an HTTP request with
-/// [`Self::respond`] and controls WebSocket peers with [`Self::send_text`] and
-/// [`Self::close`].
+/// [`Self::next_event`]. Binary payloads remain available through
+/// [`Self::request_bytes`] and [`Self::take_message_bytes`]. The application
+/// completes an HTTP request with [`Self::respond`] or [`Self::respond_bytes`]
+/// and controls WebSocket peers with [`Self::send_text`], [`Self::send_bytes`],
+/// and [`Self::close`].
 pub struct Server {
     state: Arc<SharedState>,
     events: Mutex<mpsc::Receiver<String>>,
@@ -44,21 +46,29 @@ struct SharedState {
     events: mpsc::SyncSender<String>,
     next_request_id: AtomicU64,
     next_connection_id: AtomicU64,
-    pending_http: Mutex<HashMap<u64, oneshot::Sender<ResponseSpec>>>,
+    next_binary_message_id: AtomicU64,
+    pending_http: Mutex<HashMap<u64, PendingRequest>>,
+    pending_binary_messages: Mutex<HashMap<String, Vec<u8>>>,
     connections: Mutex<HashMap<u64, tokio_mpsc::Sender<WsCommand>>>,
     shutdown: watch::Sender<bool>,
     request_timeout: Duration,
     max_body_bytes: usize,
 }
 
+struct PendingRequest {
+    response: oneshot::Sender<ResponseSpec>,
+    body: Vec<u8>,
+}
+
 struct ResponseSpec {
     status: u16,
     content_type: String,
-    body: String,
+    body: Vec<u8>,
 }
 
 enum WsCommand {
     Text(String),
+    Binary(Vec<u8>),
     Close { code: u16, reason: String },
 }
 
@@ -134,7 +144,9 @@ impl Server {
             events: event_sender,
             next_request_id: AtomicU64::new(1),
             next_connection_id: AtomicU64::new(1),
+            next_binary_message_id: AtomicU64::new(1),
             pending_http: Mutex::new(HashMap::new()),
+            pending_binary_messages: Mutex::new(HashMap::new()),
             connections: Mutex::new(HashMap::new()),
             shutdown,
             request_timeout: Duration::from_millis(request_timeout_ms.max(1)),
@@ -190,10 +202,39 @@ impl Server {
     /// timed out, was answered, or does not exist.
     #[must_use]
     pub fn respond(&self, request_id: u64, status: u16, content_type: &str, body: &str) -> bool {
-        let Some(response) = lock(&self.state.pending_http).remove(&request_id) else {
+        self.respond_bytes(request_id, status, content_type, body.as_bytes())
+    }
+
+    /// Returns the exact body of one pending HTTP request.
+    ///
+    /// The bytes remain available until the request is answered or times out.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request is unknown, answered, or timed out.
+    pub fn request_bytes(&self, request_id: u64) -> Result<Vec<u8>, ServerError> {
+        lock(&self.state.pending_http)
+            .get(&request_id)
+            .map(|request| request.body.clone())
+            .ok_or_else(|| ServerError::new(format!("HTTP request {request_id} is not pending")))
+    }
+
+    /// Completes one pending HTTP request with an arbitrary binary body.
+    /// Returns `false` if it already timed out, was answered, or does not
+    /// exist.
+    #[must_use]
+    pub fn respond_bytes(
+        &self,
+        request_id: u64,
+        status: u16,
+        content_type: &str,
+        body: &[u8],
+    ) -> bool {
+        let Some(request) = lock(&self.state.pending_http).remove(&request_id) else {
             return false;
         };
-        response
+        request
+            .response
             .send(ResponseSpec {
                 status,
                 content_type: content_type.to_owned(),
@@ -214,6 +255,18 @@ impl Server {
             })
     }
 
+    /// Queues a binary WebSocket message for one peer.
+    #[must_use]
+    pub fn send_bytes(&self, connection_id: u64, body: &[u8]) -> bool {
+        lock(&self.state.connections)
+            .get(&connection_id)
+            .is_some_and(|connection| {
+                connection
+                    .try_send(WsCommand::Binary(body.to_owned()))
+                    .is_ok()
+            })
+    }
+
     /// Queues one UTF-8 text message for every connected WebSocket peer and
     /// returns the number of queues that accepted it.
     #[must_use]
@@ -226,6 +279,36 @@ impl Server {
                     .is_ok()
             })
             .count()
+    }
+
+    /// Queues one binary message for every connected WebSocket peer and
+    /// returns the number of queues that accepted it.
+    #[must_use]
+    pub fn broadcast_bytes(&self, body: &[u8]) -> usize {
+        lock(&self.state.connections)
+            .values()
+            .filter(|connection| {
+                connection
+                    .try_send(WsCommand::Binary(body.to_owned()))
+                    .is_ok()
+            })
+            .count()
+    }
+
+    /// Takes the payload associated with one `ws_binary` event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the message token is unknown or was already
+    /// consumed.
+    pub fn take_message_bytes(&self, message_id: &str) -> Result<Vec<u8>, ServerError> {
+        lock(&self.state.pending_binary_messages)
+            .remove(message_id)
+            .ok_or_else(|| {
+                ServerError::new(format!(
+                    "WebSocket binary message `{message_id}` is not pending"
+                ))
+            })
     }
 
     /// Starts a WebSocket close handshake with one peer.
@@ -298,7 +381,7 @@ async fn run_server(
 
 async fn handle_http(State(state): State<AppState>, request: Request<Body>) -> Response {
     if request.method() == axum::http::Method::OPTIONS {
-        return cors_response(StatusCode::NO_CONTENT, "text/plain", String::new());
+        return cors_response(StatusCode::NO_CONTENT, "text/plain", Vec::new());
     }
     let request_id = state.shared.next_request_id.fetch_add(1, Ordering::Relaxed);
     let (parts, body) = request.into_parts();
@@ -312,15 +395,9 @@ async fn handle_http(State(state): State<AppState>, request: Request<Body>) -> R
             );
         }
     };
-    let Ok(body) = String::from_utf8(body.to_vec()) else {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            "request_body_not_utf8",
-            "HTTP request bodies must be UTF-8",
-        );
-    };
+    let body = body.to_vec();
+    let body_text = std::str::from_utf8(&body).ok();
     let (response_sender, response_receiver) = oneshot::channel();
-    lock(&state.shared.pending_http).insert(request_id, response_sender);
     let event = json!({
         "type": "http",
         "request_id": request_id,
@@ -328,8 +405,16 @@ async fn handle_http(State(state): State<AppState>, request: Request<Body>) -> R
         "path": parts.uri.path(),
         "query": parts.uri.query().unwrap_or_default(),
         "headers": headers_json(&parts.headers),
-        "body": body,
+        "body": body_text,
+        "body_is_utf8": body_text.is_some(),
     });
+    lock(&state.shared.pending_http).insert(
+        request_id,
+        PendingRequest {
+            response: response_sender,
+            body,
+        },
+    );
     if let Err(error) = state.shared.events.try_send(event.to_string()) {
         lock(&state.shared.pending_http).remove(&request_id);
         return match error {
@@ -433,11 +518,45 @@ async fn serve_websocket(
                         }
                     }
                     Some(Ok(Message::Pong(_))) => {}
-                    Some(Ok(Message::Binary(_))) => {
-                        close_code_value = close_code::UNSUPPORTED;
-                        close_reason = "binary messages are not supported".to_owned();
-                        let _ = output.send(close_message(close_code_value, &close_reason)).await;
-                        break;
+                    Some(Ok(Message::Binary(body))) => {
+                        let message_id = state
+                            .next_binary_message_id
+                            .fetch_add(1, Ordering::Relaxed)
+                            .to_string();
+                        let can_queue = {
+                            let mut messages = lock(&state.pending_binary_messages);
+                            if messages.len() >= EVENT_QUEUE_CAPACITY {
+                                false
+                            } else {
+                                messages.insert(
+                                    message_id.clone(),
+                                    body.to_vec(),
+                                );
+                                true
+                            }
+                        };
+                        if !can_queue {
+                            close_code_value = close_code::ERROR;
+                            close_reason = "pending binary message queue is full".to_owned();
+                            let _ = output.send(close_message(close_code_value, &close_reason)).await;
+                            break;
+                        }
+                        if !emit(
+                            &state,
+                            json!({
+                                "type": "ws_binary",
+                                "connection_id": connection_id,
+                                "message_id": message_id,
+                            }),
+                        ) {
+                            lock(&state.pending_binary_messages).remove(&message_id);
+                            close_code_value = close_code::ERROR;
+                            close_reason = "application event queue is unavailable".to_owned();
+                            let _ = output
+                                .send(close_message(close_code_value, &close_reason))
+                                .await;
+                            break;
+                        }
                     }
                     Some(Ok(Message::Close(frame))) => {
                         if let Some(frame) = frame {
@@ -458,6 +577,11 @@ async fn serve_websocket(
                 match command {
                     Some(WsCommand::Text(text)) => {
                         if output.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(WsCommand::Binary(body)) => {
+                        if output.send(Message::Binary(body.into())).await.is_err() {
                             break;
                         }
                     }
@@ -508,11 +632,13 @@ fn json_error(status: StatusCode, code: &str, message: &str) -> Response {
     cors_response(
         status,
         JSON_CONTENT_TYPE,
-        json!({"error": {"code": code, "message": message}}).to_string(),
+        json!({"error": {"code": code, "message": message}})
+            .to_string()
+            .into_bytes(),
     )
 }
 
-fn cors_response(status: StatusCode, content_type: &str, body: String) -> Response {
+fn cors_response(status: StatusCode, content_type: &str, body: Vec<u8>) -> Response {
     let mut response = Response::new(Body::from(body));
     *response.status_mut() = status;
     let headers = response.headers_mut();

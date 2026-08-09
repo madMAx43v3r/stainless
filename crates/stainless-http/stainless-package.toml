@@ -1,6 +1,6 @@
 schema = 1
 name = "stainless-http"
-sources = ["src/http.stl"]
+sources = ["src/client.stl", "src/server.stl"]
 
 [native_dependencies]
 stainless-http = "."

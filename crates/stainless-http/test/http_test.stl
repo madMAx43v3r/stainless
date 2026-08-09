@@ -22,11 +22,26 @@ i32 main() throws stainless::Exception
             config.request_timeout_ms = 2000;
             config.headers.insert("x-test-header", "test-value");
             Client connection = http::connect(config);
-            var response = http::get_json(connection,
-                                          "/v1/tables?template=fast");
-            if (u64(response.ok) != 0) {
-                return 0;
+            var response = http::get_json(connection, "/v1/tables?template=fast");
+            if (u64(response.ok) == 0) {
+                return 1;
             }
+
+            Vec<u8> request_body;
+            request_body.push(0);
+            request_body.push(127);
+            request_body.push(255);
+            Vec<u8> post_response = http::post_bytes(connection, "/v1/binary", request_body);
+            if (post_response.len() != 3 || post_response[0] != 255 || post_response[1] != 1 ||
+                post_response[2] != 0) {
+                return 1;
+            }
+
+            Vec<u8> get_response = http::get_bytes(connection, "/v1/binary");
+            if (get_response.len() != 2 || get_response[0] != 42 || get_response[1] != 128) {
+                return 1;
+            }
+            return 0;
         } catch (const stainless::Exception& error) {
         }
         return 1;
@@ -43,8 +58,42 @@ i32 main() throws stainless::Exception
     if (!http::respond_json(server, u64(event.request_id), 200, {ok: true})) {
         return 3;
     }
-    if (client.join() != 0) {
+
+    var post_event = http::receive(server, 2000);
+    if (post_event == null || String(post_event.type) != "http" || String(post_event.method) != "POST" ||
+        String(post_event.path) != "/v1/binary" || post_event.body != null || u64(post_event.body_is_utf8) != 0 ||
+        String(post_event.headers.get("content-type")) != "application/octet-stream") {
         return 4;
+    }
+    Vec<u8> request_body = http::request_bytes(server, u64(post_event.request_id));
+    if (request_body.len() != 3 || request_body[0] != 0 || request_body[1] != 127 || request_body[2] != 255) {
+        return 5;
+    }
+    Vec<u8> post_response;
+    post_response.push(255);
+    post_response.push(1);
+    post_response.push(0);
+    if (!http::respond_bytes(server, u64(post_event.request_id), 200, post_response)) {
+        return 6;
+    }
+
+    var get_event = http::receive(server, 2000);
+    if (get_event == null || String(get_event.type) != "http" || String(get_event.method) != "GET" ||
+        String(get_event.path) != "/v1/binary") {
+        return 7;
+    }
+    Vec<u8> empty_body = http::request_bytes(server, u64(get_event.request_id));
+    if (empty_body.len() != 0) {
+        return 8;
+    }
+    Vec<u8> get_response;
+    get_response.push(42);
+    get_response.push(128);
+    if (!http::respond_bytes(server, u64(get_event.request_id), 200, get_response)) {
+        return 9;
+    }
+    if (client.join() != 0) {
+        return 10;
     }
     server.shutdown();
 
@@ -53,7 +102,12 @@ i32 main() throws stainless::Exception
     http_only_config.max_body_bytes = 65536;
     Server http_only = http::listen(http_only_config);
     if (http::local_address(http_only).len() == 0) {
-        return 5;
+        return 11;
+    }
+    Vec<u8> message;
+    message.push(1);
+    if (http::send_bytes(http_only, 1, message) || http::broadcast_bytes(http_only, message) != 0) {
+        return 12;
     }
     http_only.shutdown();
     return 0;
