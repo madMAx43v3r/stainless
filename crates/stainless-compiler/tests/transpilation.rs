@@ -224,6 +224,74 @@ bool invalid_name_fails()
 }
 
 #[test]
+fn optional_values_lower_to_is_some_in_boolean_contexts() {
+    let source = r#"use rust::String;
+
+bool optional_truthiness()
+{
+    optional<String> present = optional<String>("value");
+    optional<String> empty;
+    if (!present || empty) {
+        return false;
+    }
+    if (present && !empty) {
+        while (present) {
+            return present.value_or("missing") == "value";
+        }
+    }
+    return false;
+}
+
+bool optional_reference_truthiness(const optional<String>& value)
+{
+    if (value) {
+        return true;
+    }
+    return false;
+}
+"#;
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let function = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["optional_truthiness"])
+        .expect("optional_truthiness symbol")
+        .mangled_name
+        .clone();
+    let reference_function = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["optional_reference_truthiness"])
+        .expect("optional_reference_truthiness symbol")
+        .mangled_name
+        .clone();
+    let mut rust = result
+        .rust
+        .expect("optional truth conversion should emit Rust");
+    assert!(rust.contains("is_some()"), "{rust}");
+    write!(
+        rust,
+        "\nfn main() {{ assert!({function}()); let value = Some(::std::string::String::from(\"value\")); assert!({reference_function}(&value)); }}\n"
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("optional-truthiness", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .expect("generated optional truthiness program should run");
+    assert!(output.status.success(), "{output:?}");
+    remove_temporary_parent(&binary);
+}
+
+#[test]
 fn while_statements_lower_to_labeled_rust_loops() {
     let source = include_str!("../../../docs/ref/31_while.stl");
     let result = transpile(source);

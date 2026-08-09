@@ -2638,11 +2638,12 @@ impl Resolver<'_> {
                     self.resolve_expression(&if_statement.condition, Some(&TypeRef::Bool), context);
                 if canonical(&condition.ty) != TypeRef::Bool
                     && !is_nullable_pointer_test(&condition.ty)
+                    && !is_optional_test(&condition.ty)
                 {
                     self.push(
                         "RES110",
                         format!(
-                            "if condition requires `bool` or a nullable pointer, found `{}`",
+                            "if condition requires `bool`, `optional<T>`, or a nullable pointer, found `{}`",
                             display_type(&condition.ty)
                         ),
                         if_statement.condition.span,
@@ -2681,11 +2682,12 @@ impl Resolver<'_> {
                 );
                 if canonical(&condition.ty) != TypeRef::Bool
                     && !is_nullable_pointer_test(&condition.ty)
+                    && !is_optional_test(&condition.ty)
                 {
                     self.push(
                         "RES110",
                         format!(
-                            "while condition requires `bool` or a nullable pointer, found `{}`",
+                            "while condition requires `bool`, `optional<T>`, or a nullable pointer, found `{}`",
                             display_type(&condition.ty)
                         ),
                         while_statement.condition.span,
@@ -2717,11 +2719,12 @@ impl Resolver<'_> {
                                 self.resolve_expression(condition, Some(&TypeRef::Bool), context);
                             if canonical(&actual.ty) != TypeRef::Bool
                                 && !is_nullable_pointer_test(&actual.ty)
+                                && !is_optional_test(&actual.ty)
                             {
                                 self.push(
                                     "RES110",
                                     format!(
-                                        "for condition requires `bool` or a nullable pointer, found `{}`",
+                                        "for condition requires `bool`, `optional<T>`, or a nullable pointer, found `{}`",
                                         display_type(&actual.ty)
                                     ),
                                     condition.span,
@@ -4861,11 +4864,14 @@ impl Resolver<'_> {
         self.resolving_negated_integer_literal = resolving_negated_integer_literal;
         match operator {
             PrefixOperator::Not => {
-                if canonical(&actual.ty) != TypeRef::Bool && !is_nullable_pointer_test(&actual.ty) {
+                if canonical(&actual.ty) != TypeRef::Bool
+                    && !is_nullable_pointer_test(&actual.ty)
+                    && !is_optional_test(&actual.ty)
+                {
                     self.push(
                         "RES110",
                         format!(
-                            "`!` requires `bool`, a nullable owner, or `weak_ptr`, found `{}`",
+                            "`!` requires `bool`, `optional<T>`, a nullable owner, or `weak_ptr`, found `{}`",
                             display_type(&actual.ty)
                         ),
                         operand.span,
@@ -4946,11 +4952,14 @@ impl Resolver<'_> {
             let with_right = context.scopes.clone();
             context.scopes = merge_null_scopes(&baseline, true, &with_right, true);
             for (syntax, actual) in [(left, &left_info), (right, &right_info)] {
-                if canonical(&actual.ty) != TypeRef::Bool && !is_nullable_pointer_test(&actual.ty) {
+                if canonical(&actual.ty) != TypeRef::Bool
+                    && !is_nullable_pointer_test(&actual.ty)
+                    && !is_optional_test(&actual.ty)
+                {
                     self.push(
                         "RES110",
                         format!(
-                            "logical operand requires `bool` or a nullable pointer, found `{}`",
+                            "logical operand requires `bool`, `optional<T>`, or a nullable pointer, found `{}`",
                             display_type(&actual.ty)
                         ),
                         syntax.span,
@@ -11057,6 +11066,14 @@ fn is_nullable_pointer_test(ty: &TypeRef) -> bool {
             ..
         }
     )
+}
+
+fn is_optional_test(ty: &TypeRef) -> bool {
+    match canonical_ref(ty) {
+        TypeRef::Native { path, arguments } => path == "rust::Option" && arguments.len() == 1,
+        TypeRef::Reference { target, .. } => is_optional_test(target),
+        _ => false,
+    }
 }
 
 fn set_expression_null_state(

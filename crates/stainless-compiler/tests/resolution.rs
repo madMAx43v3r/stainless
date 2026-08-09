@@ -35,8 +35,14 @@ fn optional_is_available_without_an_import() {
     optional<u32> empty;
     optional<u32> populated = optional<u32>(7);
     optional<u32> copied = populated.clone();
-    if (!populated.has_value()) {
+    if (!populated || empty) {
         return 0;
+    }
+    while (empty) {
+        return 1;
+    }
+    for (; empty;) {
+        return 2;
     }
     return empty.value_or(3) + copied.value_or(4);
 }

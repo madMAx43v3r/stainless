@@ -1192,12 +1192,23 @@ impl Lowerer<'_> {
     }
 
     fn lower_condition(&mut self, expression: &ast::Expression) -> Option<hir::Expression> {
-        let lowered = self.lower_expression(expression, ExpressionMode::Value)?;
-        let kind = self
-            .semantics
-            .expression(expression.span)
-            .and_then(|resolution| nullable_test_kind(canonical_ref(&resolution.ty)));
-        Some(if let Some(kind) = kind {
+        let resolution = self.semantics.expression(expression.span);
+        let ty = resolution.map(|resolution| canonical_ref(&resolution.ty));
+        let optional = ty.is_some_and(is_optional_test);
+        let mode = if optional && resolution.is_some_and(|value| value.ty.is_reference()) {
+            ExpressionMode::Reference
+        } else {
+            ExpressionMode::Value
+        };
+        let lowered = self.lower_expression(expression, mode)?;
+        Some(if optional {
+            hir::Expression::MethodCall {
+                receiver: Box::new(lowered),
+                rust_name: "is_some".to_owned(),
+                receiver_mode: Receiver::Shared,
+                arguments: Vec::new(),
+            }
+        } else if let Some(kind) = ty.and_then(nullable_test_kind) {
             hir::Expression::PointerHasValue {
                 kind,
                 value: Box::new(lowered),
@@ -1594,8 +1605,10 @@ impl Lowerer<'_> {
                     if self
                         .semantics
                         .expression(operand.span)
-                        .and_then(|resolution| nullable_test_kind(canonical_ref(&resolution.ty)))
-                        .is_some() =>
+                        .is_some_and(|resolution| {
+                            let ty = canonical_ref(&resolution.ty);
+                            nullable_test_kind(ty).is_some() || is_optional_test(ty)
+                        }) =>
                 {
                     hir::Expression::Prefix {
                         operator: *operator,
@@ -3697,6 +3710,14 @@ fn nullable_test_kind(ty: &TypeRef) -> Option<PointerKind> {
         PointerKind::UniqueNullable | PointerKind::SharedNullable | PointerKind::Weak
     )
     .then_some(*kind)
+}
+
+fn is_optional_test(ty: &TypeRef) -> bool {
+    match canonical_ref(ty) {
+        TypeRef::Native { path, arguments } => path == "rust::Option" && arguments.len() == 1,
+        TypeRef::Reference { target, .. } => is_optional_test(target),
+        _ => false,
+    }
 }
 
 fn is_shared_to_weak_binding(expected: &TypeRef, actual: &TypeRef) -> bool {
