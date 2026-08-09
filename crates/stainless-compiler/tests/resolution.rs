@@ -35,7 +35,8 @@ fn optional_is_available_without_an_import() {
     optional<u32> empty;
     optional<u32> populated = optional<u32>(7);
     optional<u32> copied = populated.clone();
-    if (!populated || empty) {
+    bool converted = bool(populated);
+    if (!converted || empty) {
         return 0;
     }
     while (empty) {

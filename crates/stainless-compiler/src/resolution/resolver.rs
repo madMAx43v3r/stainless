@@ -7520,6 +7520,15 @@ impl Resolver<'_> {
             return (error_info(), None);
         }
         let argument = self.resolve_expression(&arguments[0], None, context);
+        if target == TypeRef::Bool && is_optional_test(&argument.ty) {
+            let call = ResolvedCall {
+                span,
+                target: CallTarget::Intrinsic(Intrinsic::OptionalToBool),
+                return_type: TypeRef::Bool,
+                throws: Vec::new(),
+            };
+            return (temporary(TypeRef::Bool), Some(call));
+        }
         if self.is_enum_integer_binding(&target, &argument.ty) {
             let call = ResolvedCall {
                 span,

@@ -1166,6 +1166,7 @@ impl Analyzer<'_> {
             }
             CallTarget::Intrinsic(
                 Intrinsic::PrimitiveCast { .. }
+                | Intrinsic::OptionalToBool
                 | Intrinsic::EnumFromInteger { .. }
                 | Intrinsic::JsonCast { .. }
                 | Intrinsic::JsonWrap

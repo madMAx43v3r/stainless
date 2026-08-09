@@ -2767,6 +2767,24 @@ impl Lowerer<'_> {
                     target: self.lower_type(target, call.span)?,
                 })
             }
+            CallTarget::Intrinsic(Intrinsic::OptionalToBool) => {
+                let expression = arguments.first()?;
+                let mode = if self
+                    .semantics
+                    .expression(expression.span)
+                    .is_some_and(|value| value.ty.is_reference())
+                {
+                    ExpressionMode::Reference
+                } else {
+                    ExpressionMode::Value
+                };
+                Some(hir::Expression::MethodCall {
+                    receiver: Box::new(self.lower_expression(expression, mode)?),
+                    rust_name: "is_some".to_owned(),
+                    receiver_mode: Receiver::Shared,
+                    arguments: Vec::new(),
+                })
+            }
             CallTarget::Intrinsic(Intrinsic::EnumFromInteger { structure }) => {
                 let symbol = self.semantics.structure(*structure)?;
                 Some(hir::Expression::AssociatedCall {

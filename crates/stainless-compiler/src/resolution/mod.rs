@@ -492,6 +492,8 @@ pub enum Intrinsic {
         /// Destination primitive type.
         target: TypeRef,
     },
+    /// Convert an optional value to whether it contains a value.
+    OptionalToBool,
     /// Checked construction of an enum from an integer value.
     EnumFromInteger {
         /// Destination enum declaration.

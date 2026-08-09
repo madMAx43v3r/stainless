@@ -244,8 +244,8 @@ constructs with direct Rust equivalents:
   identity;
 - built-in `optional<T>` values with empty and value construction,
   `has_value()`, `value_or()`, and `clone()`; these lower to Rust `Option<T>`
-  and contextually convert to `bool` through `is_some()` in conditions, `!`,
-  `&&`, and `||`;
+  and convert to `bool` through `is_some()` explicitly with `bool(value)` or
+  contextually in conditions, `!`, `&&`, and `||`;
 - direct use of safe Rust `core`, `alloc`, and `std` APIs plus generated,
   compile-checked wrappers for external Cargo dependencies, all reached through
   the reserved `rust` namespace;

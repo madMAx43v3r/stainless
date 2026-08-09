@@ -231,7 +231,8 @@ bool optional_truthiness()
 {
     optional<String> present = optional<String>("value");
     optional<String> empty;
-    if (!present || empty) {
+    bool converted = bool(present);
+    if (!converted || bool(empty)) {
         return false;
     }
     if (present && !empty) {
@@ -244,10 +245,7 @@ bool optional_truthiness()
 
 bool optional_reference_truthiness(const optional<String>& value)
 {
-    if (value) {
-        return true;
-    }
-    return false;
+    return bool(value);
 }
 "#;
     let result = transpile(source);
