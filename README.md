@@ -2765,6 +2765,21 @@ Vec<u8> nonce(usize length) throws stainless::RustError
 Hashing, key handling, signing, encoding, and protocol policy do not belong in
 this runtime facade.
 
+### Wall clock
+
+`stainless::Clock::unix_seconds()` returns the dealer host's wall-clock time as
+whole seconds since the Unix epoch. It is intended for local deadlines and
+timestamps, not consensus or elapsed-time measurement:
+
+```cpp
+use stainless::Clock;
+
+u64 deadline(u64 timeout)
+{
+    return Clock::unix_seconds() + timeout;
+}
+```
+
 ### Versioned key/value store showcase
 
 `crates/stainless-kvstore` is the first substantial library implemented in
