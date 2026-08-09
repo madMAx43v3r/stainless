@@ -1,6 +1,6 @@
-// Stainless policy tests for the dealer and hand coordinator.
+// Stainless policy tests for the dealer and hand coordinator
 
-use rust::String;
+use rust::{String, Vec};
 
 bool test_contract_hex()
 {
@@ -29,41 +29,59 @@ bool test_consensus_messages()
 
 bool test_payout_and_public_integer_encoding() throws stainless::Exception
 {
-    var hand = {
-        table: "mmx1table",
-        hand_id: "9007199254740993",
-        start_height: "9007199254740994",
-        refund_height: "9007199254741095",
-        small_blind: "10",
-        player_timeout: "30",
-        rake_bps: 0,
-        min_rake: "0",
-        checkpoint: "",
-        round: "0",
-        epoch: "0",
-        deadline: "9007199254741195",
-        phase: "continue",
-        players: [
-            {address: "alice", stack: "100", bet: "10", folded: false,
-             payout: null, show: {rank: [1, [14]]}},
-            {address: "bob", stack: "100", bet: "10", folded: true,
-             payout: null, show: null},
-        ],
-        betting: [[], [], [], []],
-        dealer_rake: "0",
-        settlement_height: null,
-    };
+    poker::Rank rank;
+    rank.category = 1;
+    rank.kickers.push(14);
+    poker::Show show;
+    show.rank = move(rank);
+
+    poker::Player alice;
+    alice.address = "alice";
+    alice.stack = 100;
+    alice.bet = 10;
+    alice.show = optional<poker::Show>(move(show));
+
+    poker::Player bob;
+    bob.address = "bob";
+    bob.stack = 100;
+    bob.bet = 10;
+    bob.folded = true;
+
+    poker::Hand hand;
+    hand.table = "mmx1table";
+    hand.hand_id = 9007199254740993;
+    hand.start_height = 9007199254740994;
+    hand.refund_height = 9007199254741095;
+    hand.small_blind = 10;
+    hand.player_timeout = 30;
+    hand.deadline = 9007199254741195;
+    hand.phase = poker::HandPhase::Continue;
+    hand.players.push(move(alice));
+    hand.players.push(move(bob));
+    hand.betting.push(Vec<Vec<poker::BettingEntry>>());
+    hand.betting.push(Vec<Vec<poker::BettingEntry>>());
+    hand.betting.push(Vec<Vec<poker::BettingEntry>>());
+    hand.betting.push(Vec<Vec<poker::BettingEntry>>());
+
     poker::allocate_payouts(hand);
-    if (poker::amount(hand.players[0].payout) != 110 ||
-        poker::amount(hand.players[1].payout) != 90) {
+    if (hand.players[0].payout.value_or(0) != 110 || hand.players[1].payout.value_or(0) != 90) {
         return false;
     }
 
-    var event = poker::hand_event(hand);
+    var stored = hand.json(false);
+    poker::Hand decoded = poker::Hand::parse(stored);
+    if (decoded.hand_id != hand.hand_id || decoded.phase != poker::HandPhase::Continue || decoded.players.len() != 2 ||
+        decoded.players[0].commitments.len() != 0 || decoded.players[0].commit_signature.has_value()) {
+        return false;
+    }
+
+    var event = hand.json_event();
     String json = event.to_json();
     return json.contains("\"hand_id\":\"9007199254740993\"") &&
         json.contains("\"start_height\":\"9007199254740994\"") &&
         json.contains("\"deadline\":\"9007199254741195\"") &&
+        json.contains("\"type\":\"HandState\"") &&
+        json.contains("\"phase\":\"Continue\"") &&
         json.contains("\"stack\":\"100\"") &&
         json.contains("\"payout\":\"110\"");
 }
@@ -88,57 +106,132 @@ bool test_exact_decimal_input() throws stainless::Exception
     return false;
 }
 
-bool test_contract_betting_encoding() throws stainless::Exception
+bool test_unsigned_submission_parsing() throws stainless::Exception
 {
-    var betting = [[[[1, 2, "4294967297", "signature"]]]];
-    var encoded = poker::contract_betting(betting);
-    return String(encoded[0][0][0][0]) == "0x1" &&
-        String(encoded[0][0][0][1]) == "0x2" &&
-        String(encoded[0][0][0][2]) == "0x100000001";
+    var reveal_json = {
+        type: "Reveal",
+        hand_id: "9007199254740993",
+        round: "2",
+        epoch: "4",
+        seed: "seed",
+    };
+    poker::Submission reveal = poker::Submission::parse(reveal_json);
+    if (reveal.kind != poker::SubmissionKind::Reveal || reveal.hand_id != 9007199254740993 || reveal.round != 2 ||
+        reveal.epoch != 4 || reveal.seed != "seed" || reveal.signature.len() != 0) {
+        return false;
+    }
+
+    var leave_json = {type: "Leave", hand_id: "8", round: "0", epoch: "0"};
+    poker::Submission leave = poker::Submission::parse(leave_json);
+    var action_json = {
+        type: "Action",
+        hand_id: "8",
+        round: "1",
+        epoch: "2",
+        action: "BetRaise",
+        cumulative_bet: "100",
+        checkpoint: "checkpoint",
+        signature: "signature",
+    };
+    poker::Submission action = poker::Submission::parse(action_json);
+    poker::Hand settling;
+    settling.phase = poker::HandPhase::Settling;
+    bool lowercase_rejected = false;
+    try {
+        var lowercase_json = {type: "reveal"};
+        poker::Submission::parse(lowercase_json);
+    } catch (const stainless::EnumError& _error) {
+        lowercase_rejected = true;
+    }
+    return leave.kind == poker::SubmissionKind::Leave && leave.hand_id == 8 && leave.signature.len() == 0 &&
+        action.action == poker::BettingAction::BetRaise &&
+        String(reveal.kind) == "Reveal" && String(settling.phase) == "Settling" &&
+        String(poker::DealerEventKind::Challenge) == "Challenge" && lowercase_rejected;
 }
 
-bool test_available_table_count() throws stainless::JsonError
+bool test_contract_betting_encoding() throws stainless::Exception
 {
-    var chain = {tables: [
-        {
-            template_id: "fast",
-            confirmed: true,
-            reachable: false,
-            status: {table_open: true, active_count: 0, waiting_count: 0},
-            config: {max_players: 2},
-        },
-        {
-            template_id: "fast",
-            confirmed: true,
-            reachable: true,
-            status: {table_open: true, active_count: 1, waiting_count: 0},
-            config: {max_players: 2},
-        },
-    ]};
-    var pending = [];
+    Vec<poker::BettingEntry> epoch;
+    epoch.push(poker::BettingEntry{1, poker::BettingAction::Fold, 4294967297, "signature"});
+    Vec<Vec<poker::BettingEntry>> round;
+    round.push(move(epoch));
+    Vec<Vec<Vec<poker::BettingEntry>>> betting;
+    betting.push(move(round));
+    var encoded = poker::contract_betting(betting);
+    poker::TimeoutEntry timeout;
+    timeout.player = 1;
+    timeout.phase = poker::TimeoutPhase::Show;
+    timeout.round = 4;
+    var stored_timeout = timeout.json();
+    poker::TimeoutEntry decoded_timeout = poker::TimeoutEntry::parse(stored_timeout);
+    Vec<poker::TimeoutEntry> timeouts;
+    timeouts.push(timeout);
+    var encoded_timeouts = poker::contract_timeouts(timeouts);
+    return String(encoded[0][0][0][0]) == "0x1" &&
+        String(encoded[0][0][0][1]) == "0x2" &&
+        String(encoded[0][0][0][2]) == "0x100000001" &&
+        decoded_timeout.phase == poker::TimeoutPhase::Show && decoded_timeout.round == 4 &&
+        String(stored_timeout[1]) == "Show" &&
+        String(encoded_timeouts[0][1]) == "0x3";
+}
+
+bool test_available_table_count()
+{
+    poker::Table unreachable;
+    unreachable.template_id = "fast";
+    unreachable.confirmed = true;
+
+    poker::TableStatus status;
+    status.table_open = true;
+    status.active_count = 1;
+    poker::TableConfig config;
+    config.max_players = 2;
+    poker::Table available;
+    available.template_id = "fast";
+    available.confirmed = true;
+    available.reachable = true;
+    available.status = optional<poker::TableStatus>(move(status));
+    available.config = optional<poker::TableConfig>(move(config));
+
+    poker::ChainState chain;
+    chain.tables.push(move(unreachable));
+    chain.tables.push(move(available));
+    Vec<poker::PendingTable> pending;
     if (poker::available_for_template(chain, pending, "fast") != 1) {
         return false;
     }
-    chain.tables[1].status.active_count = 2;
-    pending.push({template_id: "fast"});
+    poker::TableStatus full = chain.tables[1].status.value_or(poker::TableStatus());
+    full.active_count = 2;
+    chain.tables[1].status = optional<poker::TableStatus>(move(full));
+    poker::PendingTable deployment;
+    deployment.template_id = "fast";
+    pending.push(move(deployment));
     return poker::available_for_template(chain, pending, "fast") == 1;
 }
 
-bool test_reorg_deployments_return_to_pending() throws stainless::Exception
+bool test_reorg_deployments_return_to_pending()
 {
-    var old_chain = {tables: [
-        {address: "mmx1orphan", template_id: "fast"},
-        {address: "mmx1stable", template_id: "slow"},
-    ]};
-    var chain = {tables: [
-        {address: "mmx1stable", template_id: "slow"},
-    ]};
-    var pending = [];
+    poker::Table orphan;
+    orphan.address = "mmx1orphan";
+    orphan.template_id = "fast";
+    poker::Table old_stable;
+    old_stable.address = "mmx1stable";
+    old_stable.template_id = "slow";
+    poker::ChainState old_chain;
+    old_chain.tables.push(move(orphan));
+    old_chain.tables.push(move(old_stable));
+
+    poker::Table stable;
+    stable.address = "mmx1stable";
+    stable.template_id = "slow";
+    poker::ChainState chain;
+    chain.tables.push(move(stable));
+    Vec<poker::PendingTable> pending;
     poker::recover_reorg_deployments(old_chain, chain, pending, 9007199254740993);
     return pending.len() == 1 &&
-        String(pending[0].address) == "mmx1orphan" &&
-        String(pending[0].template_id) == "fast" &&
-        poker::integer(pending[0].deployment_height) == 9007199254740993;
+        pending[0].address == "mmx1orphan" &&
+        pending[0].template_id == "fast" &&
+        pending[0].deployment_height == 9007199254740993;
 }
 
 i32 main() throws stainless::Exception
@@ -147,6 +240,7 @@ i32 main() throws stainless::Exception
         !test_consensus_messages() ||
         !test_payout_and_public_integer_encoding() ||
         !test_exact_decimal_input() ||
+        !test_unsigned_submission_parsing() ||
         !test_contract_betting_encoding() ||
         !test_available_table_count() ||
         !test_reorg_deployments_return_to_pending()) {

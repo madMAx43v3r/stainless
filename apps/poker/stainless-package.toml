@@ -2,6 +2,7 @@ schema = 1
 name = "poker"
 sources = [
     "src/protocol.stl",
+    "src/model.stl",
     "src/poker.stl",
     "src/hand.stl",
 ]

@@ -1,5 +1,7 @@
-// Off-chain poker2 hand coordinator. All poker protocol rules, checkpoints,
-// payouts, settlement construction, and event handling live in Stainless.
+// Off-chain poker2 hand coordinator. Internal poker state is strongly typed; var appears only when state crosses a
+// storage, MMX contract, or player API boundary
+
+use rust::{Map, String, Vec};
 
 namespace poker {
 
@@ -18,14 +20,18 @@ u64 settlement_retry_blocks()
     return 5;
 }
 
-var empty_hands()
+Vec<Hand> load_hands(const JsonTable1<String>& store) throws stainless::Exception
 {
-    return [];
+    var loaded = null;
+    if (!store.find("hands", loaded)) {
+        return Vec<Hand>();
+    }
+    return Hand::parse_all(loaded);
 }
 
-void save_hands(const JsonTable1<String>& store, const var& hands) throws stainless::Exception
+void save_hands(const JsonTable1<String>& store, const Vec<Hand>& hands) throws stainless::Exception
 {
-    store.insert("hands", hands.clone());
+    store.insert("hands", Hand::json_all(hands));
     u32 next = store.current_version() + 1;
     bool committed = false;
     if (next != 0) {
@@ -36,23 +42,24 @@ void save_hands(const JsonTable1<String>& store, const var& hands) throws stainl
     }
 }
 
-usize find_hand_index(const var& hands, const String& table) throws stainless::JsonError
+usize find_hand_index(const Vec<Hand>& hands, const String& table)
 {
     for (usize i = 0; i < hands.len(); i += 1) {
-        if (String(hands[i].table) == table) {
+        if (hands[i].table == table) {
             return i;
         }
     }
     return hands.len();
 }
 
-var find_hand(const var& hands, const String& table) throws stainless::JsonError
+usize find_player_index(const Hand& hand, const String& address)
 {
-    usize index = find_hand_index(hands, table);
-    if (index == hands.len()) {
-        return null;
+    for (usize i = 0; i < hand.players.len(); i += 1) {
+        if (hand.players[i].address == address) {
+            return i;
+        }
     }
-    return hands[index];
+    return hand.players.len();
 }
 
 u128 safe_amount_add(const u128& left, const u128& right) throws ConfigError
@@ -63,8 +70,7 @@ u128 safe_amount_add(const u128& left, const u128& right) throws ConfigError
 
 u128 safe_amount_mul(const u128& left, const u128& right) throws ConfigError
 {
-    require_config(right == 0 || left <= max_amount() / right,
-                   "poker amount overflow");
+    require_config(right == 0 || left <= max_amount() / right, "poker amount overflow");
     return left * right;
 }
 
@@ -85,192 +91,179 @@ u64 hand_deadline(const u64 now, const u64 timeout)
     return now + timeout;
 }
 
-String hand_key(const var& hand, const String& address, const String& kind,
-                const u64 round, const u64 epoch) throws ConfigError
+String hand_key(const Hand& hand, const String& address, const SubmissionKind kind, const u64 round, const u64 epoch)
 {
-    return inbox_key(String(hand.table), integer(hand.hand_id), address,
-                     kind, round, epoch);
+    return inbox_key(hand.table, hand.hand_id, address, kind, round, epoch);
 }
 
-bool has_message(const var& inbox, const String& key) throws stainless::JsonError
+bool has_message(const Map<String, Submission>& inbox, const String& key)
 {
     return inbox.contains_key(key);
 }
 
-var take_message(var& inbox, const String& key) throws stainless::JsonError
+Submission peek_message(const Map<String, Submission>& inbox, const String& key)
 {
-    return inbox.remove(key);
+    Submission result;
+    inbox.with(key, [&result](const Submission& value) {
+        result = value;
+    });
+    return result;
 }
 
-String seed_commit(const var& hand, const var& player, const u64 round,
-                   const String& seed) throws ConfigError
+Submission take_message(Map<String, Submission>& inbox, const String& key)
 {
-    return protocol::seed_commit(String(hand.table), integer(hand.hand_id),
-                                 String(player.address), round, seed);
+    return inbox.remove(key).value_or(Submission());
 }
 
-String commit_hash(const var& hand, const var& player,
-                   const var& commitments)
-    throws stainless::JsonError, ConfigError
+String seed_commit(const Hand& hand, const Player& player, const u64 round, const String& seed)
+{
+    return protocol::seed_commit(hand.table, hand.hand_id, player.address, round, seed);
+}
+
+String commit_hash(const Hand& hand, const Player& player, const Vec<String>& commitments)
 {
     if (commitments.len() != 5) {
         return "";
     }
-    Vec<String> values;
-    for (usize i = 0; i < commitments.len(); i += 1) {
-        String value = String(commitments[i]);
-        if (!wallet::is_hex(value, 32)) {
+    for (const String& commitment : commitments) {
+        if (!wallet::is_hex(commitment, 32)) {
             return "";
         }
-        values.push(move(value));
     }
-    return protocol::commit_hash(String(hand.table), integer(hand.hand_id),
-                                 String(player.address), values);
+    return protocol::commit_hash(hand.table, hand.hand_id, player.address, commitments);
 }
 
-void checkpoint_step(var& hand, const usize player_index, const u64 phase, const u64 event_round,
-                     const u64 epoch, const u64 event, const u128& amount, const String& data_hash)
-    throws stainless::JsonError, ConfigError
+void checkpoint_step(Hand& hand, const usize player_index, const HandPhase phase, const u64 event_round,
+                     const u64 epoch, const u64 event, const u128& event_amount, const String& data_hash)
 {
-    hand.checkpoint = protocol::checkpoint_step(
-        String(hand.table), integer(hand.hand_id), String(hand.checkpoint), phase,
-        event_round, epoch, String(hand.players[player_index].address), event,
-        amount, data_hash);
+    hand.checkpoint = protocol::checkpoint_step(hand.table, hand.hand_id, hand.checkpoint, u64(phase), event_round,
+                                                epoch, hand.players[player_index].address, event, event_amount,
+                                                data_hash);
 }
 
-bool valid_commit(const var& value) throws stainless::JsonError
+bool valid_commit(const Submission& value)
 {
-    if (value == null || value.commitments == null ||
-        value.commitments.len() != 5 ||
-        !wallet::is_hex(String(value.signature), 64)) {
+    if (value.kind != SubmissionKind::Commit || value.commitments.len() != 5 || !wallet::is_hex(value.signature, 64)) {
         return false;
     }
-    for (usize i = 0; i < value.commitments.len(); i += 1) {
-        if (!wallet::is_hex(String(value.commitments[i]), 32)) {
+    for (const String& commitment : value.commitments) {
+        if (!wallet::is_hex(commitment, 32)) {
             return false;
         }
     }
     return true;
 }
 
-bool valid_reveal(const var& hand, const var& player, const u64 round,
-                  const var& value) throws stainless::JsonError, ConfigError
+bool valid_reveal(const Hand& hand, const Player& player, const u64 round, const Submission& value)
 {
-    if (value == null || player.commitments == null || round >= 4 ||
-        !wallet::is_hex(String(value.seed), 32)) {
+    if (value.kind != SubmissionKind::Reveal || round >= 4 || !wallet::is_hex(value.seed, 32)) {
         return false;
     }
-    String expected = seed_commit(hand, player, round, String(value.seed));
-    return expected.eq_ignore_ascii_case(String(player.commitments[usize(round)]));
+    if (player.commitments.len() != 5) {
+        return false;
+    }
+    String expected = seed_commit(hand, player, round, value.seed);
+    return expected.eq_ignore_ascii_case(player.commitments[round]);
 }
 
-u128 current_bet(const var& hand) throws stainless::JsonError, ConfigError
+u128 current_bet(const Hand& hand)
 {
     u128 target = 0;
-    for (usize i = 0; i < hand.players.len(); i += 1) {
-        var player = hand.players[i];
-        if (u64(player.folded) == 0 && amount(player.bet) > target) {
-            target = amount(player.bet);
+    for (const Player& player : hand.players) {
+        if (!player.folded && player.bet > target) {
+            target = player.bet;
         }
     }
     return target;
 }
 
-usize active_count(const var& hand) throws stainless::JsonError
+usize active_count(const Hand& hand)
 {
     usize count = 0;
-    for (usize i = 0; i < hand.players.len(); i += 1) {
-        if (u64(hand.players[i].folded) == 0) {
+    for (const Player& player : hand.players) {
+        if (!player.folded) {
             count += 1;
         }
     }
     return count;
 }
 
-usize actor_count(const var& hand) throws stainless::JsonError, ConfigError
+usize actor_count(const Hand& hand)
 {
     usize count = 0;
-    for (usize i = 0; i < hand.players.len(); i += 1) {
-        var player = hand.players[i];
-        if (u64(player.folded) == 0 && amount(player.bet) < amount(player.stack)) {
+    for (const Player& player : hand.players) {
+        if (!player.folded && player.bet < player.stack) {
             count += 1;
         }
     }
     return count;
 }
 
-bool valid_action(const var& hand, const var& player, const u128& target,
-                  const var& value) throws stainless::JsonError, ConfigError
+bool valid_action(const Hand& hand, const Player& player, const u128& target, const Submission& value)
 {
-    if (value == null || value.action == null || value.cumulative_bet == null) {
+    if (value.kind != SubmissionKind::Action) {
         return false;
     }
-    u64 action = u64(value.action);
-    u128 action_amount = amount(value.cumulative_bet);
-    u128 bet = amount(player.bet);
-    u128 stack = amount(player.stack);
-    if (action == 0) {
-        return action_amount == bet && bet == target;
+    if (value.action == BettingAction::CheckCall) {
+        return value.cumulative_bet == player.bet && player.bet == target;
     }
-    if (action == 1) {
-        return action_amount > bet && action_amount <= stack &&
-            (action_amount == target ||
-             action_amount - bet >= amount(hand.small_blind) ||
-             action_amount == stack) &&
-            (action_amount == target || action_amount / 2 >= bet ||
-             action_amount == stack);
+    if (value.action == BettingAction::BetRaise) {
+        return value.cumulative_bet > player.bet && value.cumulative_bet <= player.stack &&
+            (value.cumulative_bet == target || value.cumulative_bet - player.bet >= hand.small_blind ||
+             value.cumulative_bet == player.stack) &&
+            (value.cumulative_bet == target || value.cumulative_bet / 2 >= player.bet ||
+             value.cumulative_bet == player.stack);
     }
-    if (action == 2) {
-        return action_amount == bet;
+    if (value.action == BettingAction::Fold) {
+        return value.cumulative_bet == player.bet;
     }
     return false;
 }
 
-bool valid_continuation(const var& hand, const var& player, const var& value)
-    throws stainless::JsonError, ConfigError
+bool valid_continuation(const Hand& hand, const Player& player, const Submission& value)
 {
-    return value != null && amount(value.result_stack) == amount(player.payout) &&
-        String(value.checkpoint) == String(hand.checkpoint) &&
-        wallet::is_hex(String(value.signature), 64);
+    return value.kind == SubmissionKind::Continue && player.payout.has_value() &&
+        value.result_stack == player.payout.value_or(0) && value.checkpoint == hand.checkpoint &&
+        wallet::is_hex(value.signature, 64);
 }
 
-var contract_u64_array(const var& values) throws stainless::JsonError
+// MMX contract argument boundary
+
+var contract_u64_array(const Vec<u64>& values) throws stainless::JsonError
 {
     var encoded = [];
-    for (usize i = 0; i < values.len(); i += 1) {
-        encoded.push(contract_u64(u64(values[i])));
+    for (const u64 value : values) {
+        encoded.push(contract_u64(value));
     }
     return encoded;
 }
 
-var validate_show(const Client& node, const var& hand, const var& player,
-                  const var& value)
-    throws stainless::RustError, stainless::JsonError, ConfigError
+optional<Show> validate_show(const Client& node, const Hand& hand, const Player& player, const Submission& value)
+    throws stainless::RustError, stainless::JsonError
 {
-    String pocket_seed = String(value.pocket_seed);
-    if (player.commitments == null || !wallet::is_hex(pocket_seed, 32) ||
-        value.hand == null || value.hand.len() != 5) {
-        return null;
+    if (value.kind != SubmissionKind::Show || !wallet::is_hex(value.pocket_seed, 32) || value.hand.len() != 5) {
+        return optional<Show>();
     }
-    String expected = seed_commit(hand, player, 4, pocket_seed);
-    if (!expected.eq_ignore_ascii_case(String(player.commitments[4]))) {
-        return null;
+    if (player.commitments.len() != 5 ||
+        !seed_commit(hand, player, 4, value.pocket_seed).eq_ignore_ascii_case(player.commitments[4])) {
+        return optional<Show>();
     }
     for (usize i = 0; i < value.hand.len(); i += 1) {
-        if (u64(value.hand[i]) >= 7) {
-            return null;
+        if (value.hand[i] >= 7) {
+            return optional<Show>();
         }
         for (usize j = 0; j < i; j += 1) {
-            if (u64(value.hand[j]) == u64(value.hand[i])) {
-                return null;
+            if (value.hand[j] == value.hand[i]) {
+                return optional<Show>();
             }
         }
     }
-    if (hand.board == null || hand.sources.len() == 0) {
-        return null;
+    if (!hand.board.has_value() || hand.sources.len() == 0) {
+        return optional<Show>();
     }
-    String pocket_source_text = String(hand.sources[0]);
-    pocket_source_text.push_str(pocket_seed);
+
+    String pocket_source_text = hand.sources[0].clone();
+    pocket_source_text.push_str(value.pocket_seed);
     String pocket_source = wallet::sha256_hex(pocket_source_text);
     String first_text = "A1";
     first_text.push_str(pocket_source);
@@ -278,362 +271,293 @@ var validate_show(const Client& node, const var& hand, const var& player,
     second_text.push_str(pocket_source);
     String first = wallet::sha256_hex(first_text);
     String second = wallet::sha256_hex(second_text);
-    var pocket = contract_call(node, String(hand.table), "deal_cards",
-                               [[move(first), move(second)]]);
-    var selected = contract_call(node, String(hand.table), "select_hand",
-                                 [contract_u64_array(hand.board),
-                                  contract_u64_array(pocket),
-                                  contract_u64_array(value.hand)]);
-    var rank = contract_call(node, String(hand.table), "get_rank",
-                             [contract_u64_array(selected)]);
-    if (rank == null || rank.len() != 2 || rank[1].len() == 0) {
-        return null;
+    var pocket_json = contract_call(node, hand.table, "deal_cards", [[move(first), move(second)]]);
+    Vec<u64> pocket = parse_u64_values(pocket_json);
+    Vec<u64> board = hand.board.value_or(Vec<u64>());
+    var selected_json = contract_call(node, hand.table, "select_hand", [
+        contract_u64_array(board), contract_u64_array(pocket), contract_u64_array(value.hand),
+    ]);
+    Vec<u64> selected = parse_u64_values(selected_json);
+    var rank_json_value = contract_call(node, hand.table, "get_rank", [contract_u64_array(selected)]);
+    if (rank_json_value == null || rank_json_value.len() != 2 || rank_json_value[1].len() == 0) {
+        return optional<Show>();
     }
-    return {pocket_seed: move(pocket_seed), hand: value.hand, rank: rank};
+    return optional<Show>(Show{String(value.pocket_seed), value.hand.clone(), Rank::parse(rank_json_value)});
 }
 
-String submission_error(const Client& node, const var& hands,
-                        const var& session, const var& message)
-    throws stainless::RustError, stainless::JsonError, ConfigError
+String submission_error(const Client& node, const Vec<Hand>& hands, const Session& session, const Submission& message)
+    throws stainless::RustError, stainless::JsonError
 {
-    String table = String(session.table);
-    var hand = find_hand(hands, table);
-    if (hand == null) {
+    usize hand_index = find_hand_index(hands, session.table);
+    if (hand_index == hands.len()) {
         return "the table has no active dealer hand";
     }
-    String kind = String(message.type);
-    if (integer(message.hand_id) != integer(hand.hand_id)) {
+    Hand hand = hands[hand_index];
+    if (message.hand_id != hand.hand_id) {
         return "hand_id does not match the active hand";
     }
-    var player = null;
-    for (usize i = 0; i < hand.players.len(); i += 1) {
-        if (String(hand.players[i].address) == String(session.address)) {
-            player = hand.players[i];
-        }
-    }
-    if (player == null) {
+    usize player_index = find_player_index(hand, session.address);
+    if (player_index == hand.players.len()) {
         return "authenticated player is not in the active hand";
     }
+    Player player = hand.players[player_index];
 
-    String phase = String(hand.phase);
     bool expected = false;
-    if (kind == "commit") {
-        expected = phase == "commit" && integer(message.round) == 0 &&
-                   integer(message.epoch) == 0;
-    } else if (kind == "reveal") {
-        expected = phase == "reveal" &&
-                   integer(message.round) == integer(hand.round) &&
-                   integer(message.epoch) == 0 && u64(player.folded) == 0;
-    } else if (kind == "action") {
-        expected = phase == "betting" &&
-                   integer(message.round) == integer(hand.round) &&
-                   integer(message.epoch) == integer(hand.epoch) &&
-                   String(message.checkpoint) == String(hand.checkpoint) &&
-                   u64(player.folded) == 0 &&
-                   amount(player.bet) < amount(player.stack);
-    } else if (kind == "show" || kind == "muck") {
-        expected = phase == "show" && integer(message.round) == 4 &&
-                   integer(message.epoch) == 0 && u64(player.folded) == 0;
-    } else if (kind == "continue" || kind == "leave") {
-        expected = phase == "continue" && integer(message.round) == 0 &&
-                   integer(message.epoch) == 0 &&
-                   (kind == "leave" ||
-                    String(message.checkpoint) == String(hand.checkpoint));
+    if (message.kind == SubmissionKind::Commit) {
+        expected = hand.phase == HandPhase::Commit && message.round == 0 && message.epoch == 0;
+    } else if (message.kind == SubmissionKind::Reveal) {
+        expected = hand.phase == HandPhase::Reveal && message.round == hand.round && message.epoch == 0 &&
+            !player.folded;
+    } else if (message.kind == SubmissionKind::Action) {
+        expected = hand.phase == HandPhase::Betting && message.round == hand.round && message.epoch == hand.epoch &&
+            message.checkpoint == hand.checkpoint && !player.folded && player.bet < player.stack;
+    } else if (message.kind == SubmissionKind::Show || message.kind == SubmissionKind::Muck) {
+        expected = hand.phase == HandPhase::Show && message.round == 4 && message.epoch == 0 && !player.folded;
+    } else if (message.kind == SubmissionKind::Continue || message.kind == SubmissionKind::Leave) {
+        expected = hand.phase == HandPhase::Continue && message.round == 0 && message.epoch == 0 &&
+            (message.kind == SubmissionKind::Leave || message.checkpoint == hand.checkpoint);
     }
     if (!expected) {
         String result = "message `";
-        result.push_str(kind);
+        result.push_str(String(message.kind));
         result.push_str("` is not expected during ");
-        result.push_str(phase);
+        result.push_str(String(hand.phase));
         return result;
     }
 
     bool valid = false;
-    if (kind == "commit") {
+    if (message.kind == SubmissionKind::Commit) {
         valid = valid_commit(message);
-    } else if (kind == "reveal") {
-        valid = valid_reveal(hand, player, integer(hand.round), message);
-    } else if (kind == "action") {
+    } else if (message.kind == SubmissionKind::Reveal) {
+        valid = valid_reveal(hand, player, hand.round, message);
+    } else if (message.kind == SubmissionKind::Action) {
         valid = valid_action(hand, player, current_bet(hand), message);
-    } else if (kind == "show") {
-        valid = validate_show(node, hand, player, message) != null;
-    } else if (kind == "continue") {
+    } else if (message.kind == SubmissionKind::Show) {
+        valid = validate_show(node, hand, player, message).has_value();
+    } else if (message.kind == SubmissionKind::Continue) {
         valid = valid_continuation(hand, player, message);
     } else {
         valid = true;
     }
     if (!valid) {
         String result = "message `";
-        result.push_str(kind);
+        result.push_str(String(message.kind));
         result.push_str("` has an invalid payload");
         return result;
     }
     return "";
 }
 
-var hand_event(const var& hand)
-    throws stainless::JsonError, ConfigError
+HandEvent make_hand_state_event(const Hand& hand)
 {
-    var state = var::parse(hand.to_json());
-    state.hand_id = decimal(integer(state.hand_id));
-    state.start_height = decimal(integer(state.start_height));
-    state.refund_height = decimal(integer(state.refund_height));
-    state.player_timeout = decimal(integer(state.player_timeout));
-    state.deadline = decimal(integer(state.deadline));
-    state.round = decimal(integer(state.round));
-    state.epoch = decimal(integer(state.epoch));
-    if (state.settlement_height != null) {
-        state.settlement_height = decimal(integer(state.settlement_height));
-    }
-    state.small_blind = String(state.small_blind);
-    state.min_rake = String(state.min_rake);
-    state.dealer_rake = String(state.dealer_rake);
-    for (usize i = 0; i < state.players.len(); i += 1) {
-        state.players[i].stack = String(state.players[i].stack);
-        state.players[i].bet = String(state.players[i].bet);
-        if (state.players[i].payout != null) {
-            state.players[i].payout = String(state.players[i].payout);
-        }
-    }
-    for (usize round = 0; round < state.betting.len(); round += 1) {
-        for (usize epoch = 0; epoch < state.betting[round].len();
-             epoch += 1) {
-            for (usize entry = 0;
-                 entry < state.betting[round][epoch].len(); entry += 1) {
-                state.betting[round][epoch][entry][2] =
-                    String(state.betting[round][epoch][entry][2]);
-            }
-        }
-    }
-    if (String(state.phase) == "show") {
-        for (usize i = 0; i < state.players.len(); i += 1) {
-            state.players[i].show = null;
-        }
-    }
-    return {type: "hand_state", table: String(hand.table), hand: state};
+    HandEvent event;
+    event.kind = HandEventKind::HandState;
+    event.table = String(hand.table);
+    event.hand_id = hand.hand_id;
+    event.hand = optional<Hand>(hand);
+    return event;
 }
 
-var start_hand(const Client& node, const var& table, const u64 hand_id, const u64 now)
-    throws stainless::RustError, stainless::JsonError, ConfigError
+PlayerInfo PlayerInfo::parse(const var& value) throws ConfigError
 {
-    String address = String(table.address);
-    var status = table.status;
-    var config = table.config;
-    var players = [];
-    usize count = usize(u64(status.active_count));
-    for (usize i = 0; i < count; i += 1) {
-        var player_address = contract_call(
-            node, address, "get_active_player", [contract_u64(u64(i))]);
-        var info = contract_call(node, address, "get_player_info", [player_address]);
-        players.push({
-            address: String(info.address),
-            public_key: String(info.public_key),
-            stack: quantity(amount(info.stack)),
-            bet: quantity(amount(config.small_blind)),
-            folded: false,
-            commitments: null,
-            commit_signature: null,
-            reveals: [null, null, null, null],
-            show: null,
-            payout: null,
-            continuing: null,
-        });
-    }
-    var checkpoint = contract_call(node, address, "get_start_checkpoint", []);
-    return {
-        table: move(address),
-        hand_id: decimal(hand_id),
-        start_height: decimal(integer(status.start_height)),
-        refund_height: decimal(integer(status.refund_height)),
-        small_blind: quantity(amount(config.small_blind)),
-        player_timeout: decimal(integer(config.player_timeout)),
-        rake_bps: u64(config.rake_bps),
-        min_rake: quantity(amount(config.min_rake)),
-        phase: "commit",
-        round: "0",
-        epoch: "0",
-        deadline: decimal(hand_deadline(now, integer(config.player_timeout))),
-        checkpoint: String(checkpoint),
-        players: players,
-        sources: [],
-        board: null,
-        betting: [[], [], [], []],
-        timeouts: [],
-        shows: [],
-        continuations: [],
-        dealer_rake: "0",
-        settlement_tx: null,
-        settlement_height: null,
-    };
+    return PlayerInfo{String(value.address), String(value.public_key), amount(value.stack)};
 }
 
-var reconcile_table(const Client& node, const var& table, var& hands,
-                    const u64 current_height, const u64 now)
+Hand start_hand(const Client& node, const Table& table, const u64 hand_id, const u64 now)
     throws stainless::RustError, stainless::JsonError, ConfigError
 {
-    if (u64(table.confirmed) == 0) {
-        return {changed: false, event: null};
+    require_config(table.status.has_value() && table.config.has_value(), "confirmed table is missing status or config");
+    TableStatus status = table.status.value_or(TableStatus());
+    TableConfig config = table.config.value_or(TableConfig());
+    Hand hand;
+    hand.table = String(table.address);
+    hand.hand_id = hand_id;
+    hand.start_height = status.start_height.value_or(0);
+    hand.refund_height = status.refund_height.value_or(0);
+    hand.small_blind = config.small_blind;
+    hand.player_timeout = config.player_timeout;
+    hand.rake_bps = config.rake_bps;
+    hand.min_rake = config.min_rake;
+    hand.phase = HandPhase::Commit;
+    hand.deadline = hand_deadline(now, config.player_timeout);
+
+    for (usize i = 0; i < usize(status.active_count); i += 1) {
+        var address_json = contract_call(node, table.address, "get_active_player", [contract_u64(u64(i))]);
+        String address = String(address_json);
+        var info_json = contract_call(node, table.address, "get_player_info", [move(address)]);
+        PlayerInfo info = PlayerInfo::parse(info_json);
+        Player player;
+        player.address = move(info.address);
+        player.public_key = move(info.public_key);
+        player.stack = info.stack;
+        player.bet = config.small_blind;
+        for (usize round = 0; round < 4; round += 1) {
+            player.reveals.push(optional<String>());
+        }
+        hand.players.push(move(player));
     }
-    String address = String(table.address);
-    var status = table.status;
-    u64 hand_id = integer(status.hand_id);
-    u64 start_height = integer(status.start_height);
-    u64 refund_height = integer(status.refund_height);
-    usize index = find_hand_index(hands, address);
+    var checkpoint_json = contract_call(node, table.address, "get_start_checkpoint", []);
+    hand.checkpoint = String(checkpoint_json);
+    for (usize round = 0; round < 4; round += 1) {
+        hand.betting.push(Vec<Vec<BettingEntry>>());
+    }
+    return hand;
+}
+
+ReconcileResult reconcile_table(const Client& node, const Table& table, Vec<Hand>& hands,
+                                const u64 current_height, const u64 now)
+    throws stainless::RustError, stainless::JsonError, ConfigError
+{
+    ReconcileResult result;
+    if (!table.confirmed || !table.status.has_value()) {
+        return result;
+    }
+    TableStatus status = table.status.value_or(TableStatus());
+    u64 start_height = status.start_height.value_or(0);
+    u64 refund_height = status.refund_height.value_or(0);
+    usize index = find_hand_index(hands, table.address);
     if (index != hands.len()) {
-        var old_hand = hands[index];
-        bool finished = hand_id != integer(old_hand.hand_id);
+        Hand old_hand = hands[index];
+        bool finished = status.hand_id != old_hand.hand_id;
         bool expired = refund_height > 0 && current_height >= refund_height;
-        bool invalidated = u64(status.table_open) == 0 ||
-                           start_height != integer(old_hand.start_height) ||
+        bool invalidated = !status.table_open || start_height != old_hand.start_height ||
                            start_height > current_height || expired;
         if (finished || invalidated) {
-            u64 old_hand_id = integer(old_hand.hand_id);
-            hands.remove(index);
-            String kind = "hand_reverted";
+            HandEvent event;
+            event.kind = HandEventKind::HandReverted;
             if (finished) {
-                kind = "settled";
+                event.kind = HandEventKind::Settled;
             } else if (expired) {
-                kind = "hand_expired";
+                event.kind = HandEventKind::HandExpired;
             }
-            return {changed: true, event: {
-                type: move(kind),
-                table: move(address),
-                hand_id: decimal(old_hand_id),
-                height: decimal(current_height),
-            }};
+            event.table = String(table.address);
+            event.hand_id = old_hand.hand_id;
+            event.height = current_height;
+            hands.remove(index);
+            result.changed = true;
+            result.event = optional<HandEvent>(move(event));
         }
-        return {changed: false, event: null};
+        return result;
     }
 
-    if (u64(table.reachable) != 0 && u64(status.table_open) != 0 &&
-        u64(status.active_count) >= 2 &&
-        start_height > 0 && start_height <= current_height &&
-        (refund_height == 0 || current_height < refund_height)) {
-        var hand = start_hand(node, table, hand_id, now);
-        hands.push(hand);
-        return {changed: true, event: hand_event(hand)};
+    if (table.reachable && status.table_open && status.active_count >= 2 && start_height > 0 &&
+        start_height <= current_height && (refund_height == 0 || current_height < refund_height)) {
+        Hand hand = start_hand(node, table, status.hand_id, now);
+        result.event = optional<HandEvent>(make_hand_state_event(hand));
+        result.changed = true;
+        hands.push(move(hand));
     }
-    return {changed: false, event: null};
+    return result;
 }
 
-void begin_continue(var& hand, const u64 now)
-    throws stainless::RustError, stainless::JsonError, ConfigError
+void begin_continue(Hand& hand, const u64 now) throws ConfigError
 {
     allocate_payouts(hand);
-    hand.phase = "continue";
-    hand.round = "0";
-    hand.epoch = "0";
-    hand.deadline = decimal(hand_deadline(now, integer(hand.player_timeout)));
+    hand.phase = HandPhase::Continue;
+    hand.round = 0;
+    hand.epoch = 0;
+    hand.deadline = hand_deadline(now, hand.player_timeout);
 }
 
-void after_betting_or_reveal(var& hand, const u64 now)
-    throws stainless::RustError, stainless::JsonError, ConfigError
+void after_betting_or_reveal(Hand& hand, const u64 now) throws ConfigError
 {
-    String phase = String(hand.phase);
     if (active_count(hand) <= 1) {
         begin_continue(hand, now);
-    } else if ((phase == "reveal" && integer(hand.round) < 3) ||
-               (phase == "betting" && integer(hand.round) < 3) ||
-               phase == "commit") {
-        if (phase == "commit") {
-            hand.round = "0";
-        } else {
-            hand.round = decimal(integer(hand.round) + 1);
+    } else if ((hand.phase == HandPhase::Reveal && hand.round < 3) ||
+               (hand.phase == HandPhase::Betting && hand.round < 3) || hand.phase == HandPhase::Commit) {
+        if (hand.phase != HandPhase::Commit) {
+            hand.round += 1;
         }
-        hand.epoch = "0";
-        hand.phase = "reveal";
-        hand.deadline = decimal(hand_deadline(now, integer(hand.player_timeout)));
+        hand.epoch = 0;
+        hand.phase = HandPhase::Reveal;
+        hand.deadline = hand_deadline(now, hand.player_timeout);
     } else {
-        hand.phase = "show";
-        hand.round = "4";
-        hand.epoch = "0";
-        hand.deadline = decimal(hand_deadline(now, integer(hand.player_timeout)));
+        hand.phase = HandPhase::Show;
+        hand.round = 4;
+        hand.epoch = 0;
+        hand.deadline = hand_deadline(now, hand.player_timeout);
     }
 }
 
-void after_reveal(var& hand, const u64 now)
-    throws stainless::RustError, stainless::JsonError, ConfigError
+void after_reveal(Hand& hand, const u64 now) throws ConfigError
 {
     if (active_count(hand) > 1 && actor_count(hand) > 1) {
-        hand.phase = "betting";
-        hand.epoch = "0";
-        hand.deadline = decimal(hand_deadline(now, integer(hand.player_timeout)));
+        hand.phase = HandPhase::Betting;
+        hand.epoch = 0;
+        hand.deadline = hand_deadline(now, hand.player_timeout);
     } else {
         after_betting_or_reveal(hand, now);
     }
 }
 
-bool advance_commit(var& hand, var& inbox, const u64 now)
-    throws stainless::RustError, stainless::JsonError, ConfigError
+bool advance_commit(Hand& hand, Map<String, Submission>& inbox, const u64 now) throws ConfigError
 {
     bool ready = true;
-    for (usize i = 0; i < hand.players.len(); i += 1) {
-        String key = hand_key(hand, String(hand.players[i].address), "commit", 0, 0);
-        ready = ready && valid_commit(inbox.get(key));
+    for (const Player& player : hand.players) {
+        ready = ready && valid_commit(
+            peek_message(inbox, hand_key(hand, player.address, SubmissionKind::Commit, 0, 0)));
     }
-    if (!ready && now < integer(hand.deadline)) {
+    if (!ready && now < hand.deadline) {
         return false;
     }
     for (usize i = 0; i < hand.players.len(); i += 1) {
-        var player = hand.players[i];
-        String key = hand_key(hand, String(player.address), "commit", 0, 0);
-        var submission = take_message(inbox, key);
+        Player player = hand.players[i];
+        Submission submission = take_message(inbox, hand_key(hand, player.address, SubmissionKind::Commit, 0, 0));
         if (valid_commit(submission)) {
             String digest = commit_hash(hand, player, submission.commitments);
-            player.commitments = submission.commitments;
-            player.commit_signature = String(submission.signature);
-            checkpoint_step(hand, i, 1, 0, 0, 1, amount(player.stack), digest);
+            player.commitments = move(submission.commitments);
+            player.commit_signature = optional<String>(move(submission.signature));
+            checkpoint_step(hand, i, HandPhase::Commit, 0, 0, 1, player.stack, digest);
         } else {
             player.folded = true;
-            hand.timeouts.push([i, 0, "0", "0"]);
-            checkpoint_step(hand, i, 1, 0, 0, 2, amount(player.stack), "");
+            hand.timeouts.push(TimeoutEntry{u32(i), TimeoutPhase::Commit, 0, 0});
+            checkpoint_step(hand, i, HandPhase::Commit, 0, 0, 2, player.stack, "");
         }
+        hand.players[i] = move(player);
     }
     after_betting_or_reveal(hand, now);
     return true;
 }
 
-bool advance_reveal(var& hand, var& inbox, const u64 now)
-    throws stainless::RustError, stainless::JsonError, ConfigError
+bool advance_reveal(Hand& hand, Map<String, Submission>& inbox, const u64 now) throws ConfigError
 {
-    u64 round = integer(hand.round);
+    u64 round = hand.round;
     bool ready = true;
-    for (usize i = 0; i < hand.players.len(); i += 1) {
-        var player = hand.players[i];
-        if (u64(player.folded) == 0) {
-            String key = hand_key(hand, String(player.address), "reveal", round, 0);
-            ready = ready && valid_reveal(hand, player, round, inbox.get(key));
+    for (const Player& player : hand.players) {
+        if (!player.folded) {
+            ready = ready && valid_reveal(
+                hand, player, round,
+                peek_message(inbox, hand_key(hand, player.address, SubmissionKind::Reveal, round, 0)));
         }
     }
-    if (!ready && now < integer(hand.deadline)) {
+    if (!ready && now < hand.deadline) {
         return false;
     }
 
-    String seed_data = "";
+    String seed_data;
     for (usize i = 0; i < hand.players.len(); i += 1) {
-        var player = hand.players[i];
-        if (u64(player.folded) != 0) {
-            checkpoint_step(hand, i, 2, round, 0, 3, amount(player.bet), "");
+        Player player = hand.players[i];
+        if (player.folded) {
+            checkpoint_step(hand, i, HandPhase::Reveal, round, 0, 3, player.bet, "");
         } else {
-            String key = hand_key(hand, String(player.address), "reveal", round, 0);
-            var submission = take_message(inbox, key);
+            Submission submission =
+                take_message(inbox, hand_key(hand, player.address, SubmissionKind::Reveal, round, 0));
             if (valid_reveal(hand, player, round, submission)) {
-                String seed = String(submission.seed);
-                player.reveals[usize(round)] = seed.clone();
-                seed_data.push_str(seed);
-                String data_hash = wallet::sha256_hex(seed);
-                checkpoint_step(hand, i, 2, round, 0, 1, amount(player.bet), data_hash);
+                player.reveals[round] = optional<String>(String(submission.seed));
+                seed_data.push_str(submission.seed);
+                checkpoint_step(hand, i, HandPhase::Reveal, round, 0, 1, player.bet,
+                                wallet::sha256_hex(submission.seed));
             } else {
                 player.folded = true;
-                hand.timeouts.push([i, 1, decimal(round), "0"]);
-                checkpoint_step(hand, i, 2, round, 0, 2, amount(player.bet), "");
+                hand.timeouts.push(TimeoutEntry{u32(i), TimeoutPhase::Reveal, round, 0});
+                checkpoint_step(hand, i, HandPhase::Reveal, round, 0, 2, player.bet, "");
             }
         }
+        hand.players[i] = move(player);
     }
     String source = wallet::sha256_hex(seed_data);
     if (round > 0) {
-        String combined = String(hand.sources[usize(round - 1)]);
+        String combined = hand.sources[round - 1].clone();
         combined.push_str(source);
         source = wallet::sha256_hex(combined);
     }
@@ -642,129 +566,122 @@ bool advance_reveal(var& hand, var& inbox, const u64 now)
     return true;
 }
 
-bool advance_betting(var& hand, var& inbox, const u64 now)
-    throws stainless::RustError, stainless::JsonError, ConfigError
+bool advance_betting(Hand& hand, Map<String, Submission>& inbox, const u64 now) throws ConfigError
 {
+    u64 round = hand.round;
+    u64 epoch = hand.epoch;
     u128 target = current_bet(hand);
     bool ready = true;
-    for (usize i = 0; i < hand.players.len(); i += 1) {
-        var player = hand.players[i];
-        if (u64(player.folded) == 0 && amount(player.bet) < amount(player.stack)) {
-            String key = hand_key(hand, String(player.address), "action",
-                                  integer(hand.round), integer(hand.epoch));
-            ready = ready && valid_action(hand, player, target, inbox.get(key));
+    for (const Player& player : hand.players) {
+        if (!player.folded && player.bet < player.stack) {
+            Submission value =
+                peek_message(inbox, hand_key(hand, player.address, SubmissionKind::Action, round, epoch));
+            ready = ready && valid_action(hand, player, target, value);
         }
     }
-    if (!ready && now < integer(hand.deadline)) {
+    if (!ready && now < hand.deadline) {
         return false;
     }
 
-    var entries = [];
+    Vec<BettingEntry> entries;
     for (usize i = 0; i < hand.players.len(); i += 1) {
-        var player = hand.players[i];
-        u64 round = integer(hand.round);
-        u64 epoch = integer(hand.epoch);
-        if (u64(player.folded) != 0) {
-            checkpoint_step(hand, i, 3, round, epoch, 30, amount(player.bet), "");
-        } else if (amount(player.bet) >= amount(player.stack)) {
-            checkpoint_step(hand, i, 3, round, epoch, 31, amount(player.bet), "");
+        Player player = hand.players[i];
+        if (player.folded) {
+            checkpoint_step(hand, i, HandPhase::Betting, round, epoch, 30, player.bet, "");
+        } else if (player.bet >= player.stack) {
+            checkpoint_step(hand, i, HandPhase::Betting, round, epoch, 31, player.bet, "");
         } else {
-            String key = hand_key(hand, String(player.address), "action", round, epoch);
-            var submission = take_message(inbox, key);
+            Submission submission =
+                take_message(inbox, hand_key(hand, player.address, SubmissionKind::Action, round, epoch));
             if (valid_action(hand, player, target, submission)) {
-                u64 action = u64(submission.action);
-                u128 action_amount = amount(submission.cumulative_bet);
-                entries.push([i, action, quantity(action_amount),
-                              String(submission.signature)]);
+                entries.push(BettingEntry{u32(i), submission.action, submission.cumulative_bet,
+                                          String(submission.signature)});
                 u64 event = 10;
-                if (action == 1) {
-                    player.bet = quantity(action_amount);
+                if (submission.action == BettingAction::BetRaise) {
+                    player.bet = submission.cumulative_bet;
                     event = 11;
-                } else if (action == 2) {
+                } else if (submission.action == BettingAction::Fold) {
                     player.folded = true;
                     event = 12;
                 }
-                checkpoint_step(hand, i, 3, round, epoch, event, action_amount, "");
+                checkpoint_step(hand, i, HandPhase::Betting, round, epoch, event, submission.cumulative_bet, "");
             } else {
-                hand.timeouts.push([i, 2, decimal(round), decimal(epoch)]);
+                hand.timeouts.push(TimeoutEntry{u32(i), TimeoutPhase::Betting, round, epoch});
                 u64 event = 20;
-                if (amount(player.bet) != target) {
+                if (player.bet != target) {
                     player.folded = true;
                     event = 21;
                 }
-                checkpoint_step(hand, i, 3, round, epoch, event,
-                                amount(player.bet), "");
+                checkpoint_step(hand, i, HandPhase::Betting, round, epoch, event, player.bet, "");
             }
         }
+        hand.players[i] = move(player);
     }
-    hand.betting[usize(integer(hand.round))].push(entries);
+    hand.betting[round].push(move(entries));
     u128 next_target = current_bet(hand);
     bool done = active_count(hand) <= 1;
-    for (usize i = 0; i < hand.players.len(); i += 1) {
-        var player = hand.players[i];
-        if (u64(player.folded) == 0 && amount(player.bet) < amount(player.stack) &&
-            amount(player.bet) < next_target) {
+    for (const Player& player : hand.players) {
+        if (!player.folded && player.bet < player.stack && player.bet < next_target) {
             done = false;
         }
     }
     if (done) {
         after_betting_or_reveal(hand, now);
     } else {
-        require_config(integer(hand.epoch) < max_u64(), "betting epoch overflow");
-        hand.epoch = decimal(integer(hand.epoch) + 1);
-        hand.deadline = decimal(hand_deadline(now, integer(hand.player_timeout)));
+        require_config(hand.epoch < max_u64(), "betting epoch overflow");
+        hand.epoch += 1;
+        hand.deadline = hand_deadline(now, hand.player_timeout);
     }
     return true;
 }
 
-i32 compare_rank(const var& left, const var& right)
-    throws stainless::JsonError
+i32 compare_rank(const Rank& left, const Rank& right)
 {
-    if (u64(left[0]) > u64(right[0])) {
+    if (left.category > right.category) {
         return 1;
     }
-    if (u64(left[0]) < u64(right[0])) {
+    if (left.category < right.category) {
         return -1;
     }
-    var left_kickers = left[1];
-    var right_kickers = right[1];
-    usize count = left_kickers.len();
-    if (right_kickers.len() < count) {
-        count = right_kickers.len();
+    usize count = left.kickers.len();
+    if (right.kickers.len() < count) {
+        count = right.kickers.len();
     }
     for (usize i = 0; i < count; i += 1) {
-        if (u64(left_kickers[i]) > u64(right_kickers[i])) {
+        if (left.kickers[i] > right.kickers[i]) {
             return 1;
         }
-        if (u64(left_kickers[i]) < u64(right_kickers[i])) {
+        if (left.kickers[i] < right.kickers[i]) {
             return -1;
         }
     }
-    if (left_kickers.len() > right_kickers.len()) {
+    if (left.kickers.len() > right.kickers.len()) {
         return 1;
     }
-    if (left_kickers.len() < right_kickers.len()) {
+    if (left.kickers.len() < right.kickers.len()) {
         return -1;
     }
     return 0;
 }
 
-var layer_winners(const var& hand, const var& eligible)
-    throws stainless::JsonError, ConfigError
+Vec<usize> layer_winners(const Hand& hand, const Vec<usize>& eligible) throws ConfigError
 {
     require_config(eligible.len() > 0, "poker pot has no eligible player");
     if (eligible.len() == 1) {
-        return [eligible[0]];
+        Vec<usize> only;
+        only.push(eligible[0]);
+        return only;
     }
-    var winners = [];
-    var winning_rank = null;
-    for (usize i = 0; i < eligible.len(); i += 1) {
-        usize index = usize(u64(eligible[i]));
-        var show = hand.players[index].show;
-        require_config(show != null, "missing showdown rank");
-        if (winning_rank == null || compare_rank(show.rank, winning_rank) > 0) {
+    Vec<usize> winners;
+    Rank winning_rank;
+    bool has_winning_rank = false;
+    for (const usize index : eligible) {
+        require_config(hand.players[index].show.has_value(), "missing showdown rank");
+        Show show = hand.players[index].show.value_or(Show());
+        if (!has_winning_rank || compare_rank(show.rank, winning_rank) > 0) {
             winning_rank = show.rank;
-            winners = [];
+            has_winning_rank = true;
+            winners.clear();
             winners.push(index);
         } else if (compare_rank(show.rank, winning_rank) == 0) {
             winners.push(index);
@@ -777,36 +694,31 @@ u128 split_amount(const u128& total, const usize count, const usize index) throw
 {
     require_config(count > 0 && index < count, "invalid payout split");
     u128 divisor = u128(count);
-    u128 numeric_index = u128(index);
     u128 extra = 0;
-    if (numeric_index < total % divisor) {
+    if (u128(index) < total % divisor) {
         extra = 1;
     }
     return total / divisor + extra;
 }
 
-void allocate_payouts(var& hand)
-    throws stainless::RustError, stainless::JsonError, ConfigError
+void allocate_payouts(Hand& hand) throws ConfigError
 {
-    var payouts = [];
-    for (usize i = 0; i < hand.players.len(); i += 1) {
-        u128 stack = amount(hand.players[i].stack);
-        u128 bet = amount(hand.players[i].bet);
-        require_config(bet <= stack, "bet exceeds player stack");
-        payouts.push(quantity(stack - bet));
+    Vec<u128> payouts;
+    for (const Player& player : hand.players) {
+        require_config(player.bet <= player.stack, "bet exceeds player stack");
+        payouts.push(player.stack - player.bet);
     }
-    var layer_amounts = [];
-    var layer_winner_sets = [];
+    Vec<u128> layer_amounts;
+    Vec<Vec<usize>> layer_winner_sets;
     u128 previous = 0;
     u128 matched_total = 0;
 
     for (usize layer = 0; layer < hand.players.len(); layer += 1) {
         u128 level = max_amount();
         bool found = false;
-        for (usize i = 0; i < hand.players.len(); i += 1) {
-            u128 bet = amount(hand.players[i].bet);
-            if (bet > previous && (!found || bet < level)) {
-                level = bet;
+        for (const Player& player : hand.players) {
+            if (player.bet > previous && (!found || player.bet < level)) {
+                level = player.bet;
                 found = true;
             }
         }
@@ -814,370 +726,338 @@ void allocate_payouts(var& hand)
             break;
         }
         u128 delta = level - previous;
-        var contributors = [];
-        var eligible = [];
+        Vec<usize> contributors;
+        Vec<usize> eligible;
         for (usize i = 0; i < hand.players.len(); i += 1) {
-            if (amount(hand.players[i].bet) >= level) {
+            if (hand.players[i].bet >= level) {
                 contributors.push(i);
-                if (u64(hand.players[i].folded) == 0) {
+                if (!hand.players[i].folded) {
                     eligible.push(i);
                 }
             }
         }
         if (contributors.len() == 1 || eligible.len() == 0) {
-            for (usize i = 0; i < contributors.len(); i += 1) {
-                usize index = usize(u64(contributors[i]));
-                payouts[index] = quantity(
-                    safe_amount_add(amount(payouts[index]), delta));
+            for (const usize index : contributors) {
+                payouts[index] = safe_amount_add(payouts[index], delta);
             }
         } else {
             u128 layer_amount = safe_amount_mul(delta, u128(contributors.len()));
-            var winners = layer_winners(hand, eligible);
-            layer_amounts.push(quantity(layer_amount));
-            layer_winner_sets.push(winners);
+            layer_amounts.push(layer_amount);
+            layer_winner_sets.push(layer_winners(hand, eligible));
             matched_total = safe_amount_add(matched_total, layer_amount);
         }
         previous = level;
     }
 
-    u128 minimum_rake = safe_amount_mul(amount(hand.min_rake),
-                                        u128(hand.players.len()));
+    u128 minimum_rake = safe_amount_mul(hand.min_rake, u128(hand.players.len()));
     if (matched_total > 0) {
-        u128 percentage = safe_mul_div(
-            matched_total, u128(u64(hand.rake_bps)), 10000);
-        u128 dealer_rake = percentage;
+        u128 dealer_rake = safe_mul_div(matched_total, u128(hand.rake_bps), 10000);
         if (minimum_rake > dealer_rake) {
             dealer_rake = minimum_rake;
         }
-        require_config(dealer_rake <= matched_total,
-                       "minimum rake exceeds matched pot");
-        hand.dealer_rake = quantity(dealer_rake);
+        require_config(dealer_rake <= matched_total, "minimum rake exceeds matched pot");
+        hand.dealer_rake = dealer_rake;
         u128 matched_seen = 0;
         u128 rake_seen = 0;
         for (usize layer = 0; layer < layer_amounts.len(); layer += 1) {
-            u128 layer_amount = amount(layer_amounts[layer]);
-            matched_seen = safe_amount_add(matched_seen, layer_amount);
-            u128 rake_until = safe_mul_div(dealer_rake, matched_seen,
-                                           matched_total);
-            u128 layer_rake = rake_until - rake_seen;
+            matched_seen = safe_amount_add(matched_seen, layer_amounts[layer]);
+            u128 rake_until = safe_mul_div(dealer_rake, matched_seen, matched_total);
+            u128 net = layer_amounts[layer] - (rake_until - rake_seen);
             rake_seen = rake_until;
-            u128 net = layer_amount - layer_rake;
-            var winners = layer_winner_sets[layer];
+            Vec<usize> winners = layer_winner_sets[layer].clone();
             for (usize offset = 0; offset < winners.len(); offset += 1) {
-                usize index = usize(u64(winners[offset]));
-                u128 share = split_amount(net, winners.len(), offset);
-                payouts[index] = quantity(
-                    safe_amount_add(amount(payouts[index]), share));
+                usize index = winners[offset];
+                payouts[index] = safe_amount_add(payouts[index], split_amount(net, winners.len(), offset));
             }
         }
     } else {
-        require_config(active_count(hand) == 0,
-                       "surviving player has no matched pot");
-        hand.dealer_rake = quantity(minimum_rake);
+        require_config(active_count(hand) == 0, "surviving player has no matched pot");
+        hand.dealer_rake = minimum_rake;
         for (usize i = 0; i < payouts.len(); i += 1) {
-            require_config(amount(payouts[i]) >= amount(hand.min_rake),
-                           "minimum rake exceeds stack");
-            payouts[i] = quantity(
-                amount(payouts[i]) - amount(hand.min_rake));
+            require_config(payouts[i] >= hand.min_rake, "minimum rake exceeds stack");
+            payouts[i] -= hand.min_rake;
         }
     }
 
     u128 total_stack = 0;
-    u128 total_payout = amount(hand.dealer_rake);
+    u128 total_payout = hand.dealer_rake;
     for (usize i = 0; i < hand.players.len(); i += 1) {
-        hand.players[i].payout = String(payouts[i]);
-        total_stack = safe_amount_add(total_stack, amount(hand.players[i].stack));
-        total_payout = safe_amount_add(total_payout, amount(payouts[i]));
+        hand.players[i].payout = optional<u128>(payouts[i]);
+        total_stack = safe_amount_add(total_stack, hand.players[i].stack);
+        total_payout = safe_amount_add(total_payout, payouts[i]);
     }
     require_config(total_stack == total_payout, "payout accounting mismatch");
 }
 
-void make_board(const Client& node, var& hand)
-    throws stainless::RustError, stainless::JsonError, ConfigError
+void make_board(const Client& node, Hand& hand) throws stainless::RustError, stainless::JsonError, ConfigError
 {
-    require_config(hand.sources.len() == 4,
-                   "showdown requires four combined seed sources");
+    require_config(hand.sources.len() == 4, "showdown requires four combined seed sources");
     String first_text = "F1";
-    first_text.push_str(String(hand.sources[1]));
+    first_text.push_str(hand.sources[1]);
     String second_text = "F2";
-    second_text.push_str(String(hand.sources[1]));
+    second_text.push_str(hand.sources[1]);
     String third_text = "F3";
-    third_text.push_str(String(hand.sources[1]));
-    String first = wallet::sha256_hex(first_text);
-    String second = wallet::sha256_hex(second_text);
-    String third = wallet::sha256_hex(third_text);
-    hand.board = contract_call(node, String(hand.table), "deal_cards",
-                               [[move(first), move(second), move(third),
-                                 hand.sources[2], hand.sources[3]]]);
+    third_text.push_str(hand.sources[1]);
+    var board_json = contract_call(node, hand.table, "deal_cards", [[
+        wallet::sha256_hex(first_text), wallet::sha256_hex(second_text), wallet::sha256_hex(third_text),
+        String(hand.sources[2]), String(hand.sources[3]),
+    ]]);
+    hand.board = optional<Vec<u64>>(parse_u64_values(board_json));
 }
 
-bool advance_show(const Client& node, var& hand, var& inbox, const u64 now)
+bool advance_show(const Client& node, Hand& hand, Map<String, Submission>& inbox, const u64 now)
     throws stainless::RustError, stainless::JsonError, ConfigError
 {
-    if (hand.board == null) {
+    if (!hand.board.has_value()) {
         make_board(node, hand);
         return true;
     }
     bool ready = true;
-    for (usize i = 0; i < hand.players.len(); i += 1) {
-        var player = hand.players[i];
-        if (u64(player.folded) == 0) {
-            String show_key = hand_key(hand, String(player.address), "show", 4, 0);
-            String muck_key = hand_key(hand, String(player.address), "muck", 4, 0);
+    for (const Player& player : hand.players) {
+        if (!player.folded) {
+            String show_key = hand_key(hand, player.address, SubmissionKind::Show, 4, 0);
+            String muck_key = hand_key(hand, player.address, SubmissionKind::Muck, 4, 0);
             bool submitted = has_message(inbox, muck_key);
             if (!submitted) {
-                submitted = validate_show(node, hand, player, inbox.get(show_key)) != null;
+                submitted = validate_show(node, hand, player, peek_message(inbox, show_key)).has_value();
             }
             ready = ready && submitted;
         }
     }
-    if (!ready && now < integer(hand.deadline)) {
+    if (!ready && now < hand.deadline) {
         return false;
     }
     for (usize i = 0; i < hand.players.len(); i += 1) {
-        var player = hand.players[i];
-        if (u64(player.folded) != 0) {
-            checkpoint_step(hand, i, 4, 4, 0, 3, amount(player.bet), "");
+        Player player = hand.players[i];
+        if (player.folded) {
+            checkpoint_step(hand, i, HandPhase::Show, 4, 0, 3, player.bet, "");
         } else {
-            String show_key = hand_key(hand, String(player.address), "show", 4, 0);
-            String muck_key = hand_key(hand, String(player.address), "muck", 4, 0);
-            bool mucked = take_message(inbox, muck_key) != null;
-            var submission = take_message(inbox, show_key);
-            var show = null;
-            if (!mucked && submission != null) {
+            String show_key = hand_key(hand, player.address, SubmissionKind::Show, 4, 0);
+            String muck_key = hand_key(hand, player.address, SubmissionKind::Muck, 4, 0);
+            bool mucked = take_message(inbox, muck_key).kind == SubmissionKind::Muck;
+            Submission submission = take_message(inbox, show_key);
+            optional<Show> show;
+            if (!mucked) {
                 show = validate_show(node, hand, player, submission);
             }
-            if (show != null) {
-                hand.shows.push([i, String(show.pocket_seed), show.hand]);
-                String data_hash = wallet::sha256_hex(String(show.pocket_seed));
-                player.show = show;
-                checkpoint_step(hand, i, 4, 4, 0, 1, amount(player.bet), data_hash);
+            if (show.has_value()) {
+                Show value = show.value_or(Show());
+                hand.shows.push(ShowEntry{u32(i), String(value.pocket_seed), value.hand.clone()});
+                player.show = optional<Show>(value);
+                checkpoint_step(hand, i, HandPhase::Show, 4, 0, 1, player.bet,
+                                wallet::sha256_hex(value.pocket_seed));
             } else {
                 player.folded = true;
                 u64 event = 4;
                 if (!mucked) {
-                    hand.timeouts.push([i, 3, "4", "0"]);
+                    hand.timeouts.push(TimeoutEntry{u32(i), TimeoutPhase::Show, 4, 0});
                     event = 2;
                 }
-                checkpoint_step(hand, i, 4, 4, 0, event, amount(player.bet), "");
+                checkpoint_step(hand, i, HandPhase::Show, 4, 0, event, player.bet, "");
             }
         }
+        hand.players[i] = move(player);
     }
     begin_continue(hand, now);
     return true;
 }
 
-var contract_betting(const var& betting)
-    throws stainless::JsonError, ConfigError
+// MMX settlement argument boundaries
+
+var contract_betting(const Vec<Vec<Vec<BettingEntry>>>& betting) throws stainless::JsonError
 {
     var encoded_rounds = [];
-    for (usize round = 0; round < betting.len(); round += 1) {
+    for (const Vec<Vec<BettingEntry>>& round : betting) {
         var encoded_epochs = [];
-        for (usize epoch = 0; epoch < betting[round].len(); epoch += 1) {
+        for (const Vec<BettingEntry>& epoch : round) {
             var encoded_entries = [];
-            for (usize i = 0; i < betting[round][epoch].len(); i += 1) {
-                var entry = betting[round][epoch][i];
+            for (const BettingEntry& entry : epoch) {
                 encoded_entries.push([
-                    contract_u64(u64(entry[0])),
-                    contract_u64(u64(entry[1])),
-                    contract_amount(amount(entry[2])),
-                    String(entry[3]),
+                    contract_u64(u64(entry.player)),
+                    contract_u64(u64(entry.action)),
+                    contract_amount(entry.cumulative_bet),
+                    String(entry.signature),
                 ]);
             }
-            encoded_epochs.push(encoded_entries);
+            encoded_epochs.push(move(encoded_entries));
         }
-        encoded_rounds.push(encoded_epochs);
+        encoded_rounds.push(move(encoded_epochs));
     }
     return encoded_rounds;
 }
 
-var contract_shows(const var& shows) throws stainless::JsonError
+var contract_shows(const Vec<ShowEntry>& shows) throws stainless::JsonError
 {
     var encoded = [];
-    for (usize i = 0; i < shows.len(); i += 1) {
+    for (const ShowEntry& show : shows) {
+        encoded.push([contract_u64(u64(show.player)), String(show.pocket_seed), contract_u64_array(show.hand)]);
+    }
+    return encoded;
+}
+
+var contract_timeouts(const Vec<TimeoutEntry>& timeouts) throws stainless::JsonError
+{
+    var encoded = [];
+    for (const TimeoutEntry& timeout : timeouts) {
         encoded.push([
-            contract_u64(u64(shows[i][0])),
-            String(shows[i][1]),
-            contract_u64_array(shows[i][2]),
+            contract_u64(u64(timeout.player)), contract_u64(u64(timeout.phase)), contract_u64(timeout.round),
+            contract_u64(timeout.epoch),
         ]);
     }
     return encoded;
 }
 
-var contract_timeouts(const var& timeouts)
-    throws stainless::JsonError, ConfigError
+var contract_continuations(const Vec<ContinuationEntry>& continuations) throws stainless::JsonError
 {
     var encoded = [];
-    for (usize i = 0; i < timeouts.len(); i += 1) {
-        encoded.push([
-            contract_u64(u64(timeouts[i][0])),
-            contract_u64(u64(timeouts[i][1])),
-            contract_u64(integer(timeouts[i][2])),
-            contract_u64(integer(timeouts[i][3])),
-        ]);
+    for (const ContinuationEntry& continuation : continuations) {
+        encoded.push([contract_u64(u64(continuation.player)), String(continuation.signature)]);
     }
     return encoded;
 }
 
-var contract_continuations(const var& continuations) throws stainless::JsonError
-{
-    var encoded = [];
-    for (usize i = 0; i < continuations.len(); i += 1) {
-        encoded.push([
-            contract_u64(u64(continuations[i][0])),
-            String(continuations[i][1]),
-        ]);
-    }
-    return encoded;
-}
-
-void submit_settlement(const Client& node, const var& config,
-                       var& hand, const u64 height)
-    throws stainless::RustError, stainless::JsonError, ConfigError
+void submit_settlement(const Client& node, const DealerConfig& config, Hand& hand, const u64 height)
+    throws stainless::RustError, stainless::JsonError
 {
     var commitments = [];
     var signatures = [];
     var reveals = [];
-    for (usize i = 0; i < hand.players.len(); i += 1) {
-        var player = hand.players[i];
-        if (player.commitments == null) {
-            commitments.push([]);
+    for (const Player& player : hand.players) {
+        if (player.commitments.len() != 0) {
+            commitments.push(strings_json(player.commitments));
         } else {
-            commitments.push(player.commitments);
+            commitments.push([]);
         }
-        signatures.push(player.commit_signature);
-        reveals.push(player.reveals);
+        if (player.commit_signature.has_value()) {
+            signatures.push(player.commit_signature.value_or(""));
+        } else {
+            signatures.push(null);
+        }
+        reveals.push(player.json_reveals());
     }
     var request = {
-        index: u32(config.wallet_index),
+        index: config.wallet_index,
         address: String(hand.table),
         method: "settle",
-        args: [commitments, signatures, reveals, contract_betting(hand.betting),
+        args: [move(commitments), move(signatures), move(reveals), contract_betting(hand.betting),
                contract_shows(hand.shows), contract_timeouts(hand.timeouts),
                contract_continuations(hand.continuations)],
         options: {auto_send: true, user: String(config.dealer)},
     };
     var transaction = node_post(node, "/wapi/wallet/execute", request);
     if (transaction.id == null) {
-        hand.settlement_tx = transaction.to_json();
+        hand.settlement_tx = optional<String>(transaction.to_json());
     } else {
-        hand.settlement_tx = String(transaction.id);
+        hand.settlement_tx = optional<String>(String(transaction.id));
     }
-    hand.settlement_height = decimal(height);
-    hand.phase = "settling";
-    hand.deadline = "0";
+    hand.settlement_height = optional<u64>(height);
+    hand.phase = HandPhase::Settling;
+    hand.deadline = 0;
 }
 
-bool advance_continue(const Client& node, const var& config, const var& chain,
-                      var& hand, var& inbox, const u64 now)
-    throws stainless::RustError, stainless::JsonError, ConfigError
+bool advance_continue(const Client& node, const DealerConfig& config, const ChainState& chain, Hand& hand,
+                      Map<String, Submission>& inbox, const u64 now)
+    throws stainless::RustError, stainless::JsonError
 {
     bool ready = true;
-    for (usize i = 0; i < hand.players.len(); i += 1) {
-        var player = hand.players[i];
-        String continue_key = hand_key(hand, String(player.address), "continue", 0, 0);
-        String leave_key = hand_key(hand, String(player.address), "leave", 0, 0);
-        bool submitted = has_message(inbox, leave_key) ||
-                         valid_continuation(hand, player, inbox.get(continue_key));
-        ready = ready && submitted;
+    for (const Player& player : hand.players) {
+        String continue_key = hand_key(hand, player.address, SubmissionKind::Continue, 0, 0);
+        String leave_key = hand_key(hand, player.address, SubmissionKind::Leave, 0, 0);
+        ready = ready && (has_message(inbox, leave_key) ||
+                          valid_continuation(hand, player, peek_message(inbox, continue_key)));
     }
-    if (!ready && now < integer(hand.deadline)) {
+    if (!ready && now < hand.deadline) {
         return false;
     }
     for (usize i = 0; i < hand.players.len(); i += 1) {
-        var player = hand.players[i];
-        String continue_key = hand_key(hand, String(player.address), "continue", 0, 0);
-        String leave_key = hand_key(hand, String(player.address), "leave", 0, 0);
-        bool leaving = take_message(inbox, leave_key) != null;
-        var submission = take_message(inbox, continue_key);
+        Player player = hand.players[i];
+        bool leaving = take_message(inbox, hand_key(hand, player.address, SubmissionKind::Leave, 0, 0)).kind ==
+            SubmissionKind::Leave;
+        Submission submission =
+            take_message(inbox, hand_key(hand, player.address, SubmissionKind::Continue, 0, 0));
         if (!leaving && valid_continuation(hand, player, submission)) {
-            hand.continuations.push([i, String(submission.signature)]);
-            player.continuing = true;
+            hand.continuations.push(ContinuationEntry{u32(i), move(submission.signature)});
+            player.continuing = optional<bool>(true);
         } else {
-            player.continuing = false;
+            player.continuing = optional<bool>(false);
         }
+        hand.players[i] = move(player);
     }
-    submit_settlement(node, config, hand, integer(chain.height));
+    submit_settlement(node, config, hand, chain.height);
     return true;
 }
 
-bool retry_settlement(const Client& node, const var& config, const var& chain,
-                      var& hand)
-    throws stainless::RustError, stainless::JsonError, ConfigError
+bool retry_settlement(const Client& node, const DealerConfig& config, const ChainState& chain, Hand& hand)
+    throws stainless::RustError, stainless::JsonError
 {
-    u64 height = integer(chain.height);
-    bool should_retry = hand.settlement_height == null;
+    bool should_retry = !hand.settlement_height.has_value();
     if (!should_retry) {
-        u64 submitted = integer(hand.settlement_height);
+        u64 submitted = hand.settlement_height.value_or(0);
         should_retry = submitted > max_u64() - settlement_retry_blocks() ||
-                       height >= submitted + settlement_retry_blocks();
+                       chain.height >= submitted + settlement_retry_blocks();
     }
-    if (!should_retry || height >= integer(hand.refund_height)) {
+    if (!should_retry || chain.height >= hand.refund_height) {
         return false;
     }
-    submit_settlement(node, config, hand, height);
+    submit_settlement(node, config, hand, chain.height);
     return true;
 }
 
-bool advance_hand(const Client& node, const var& config, const var& chain,
-                  var& hand, var& inbox, const u64 now)
+bool advance_hand(const Client& node, const DealerConfig& config, const ChainState& chain, Hand& hand,
+                  Map<String, Submission>& inbox, const u64 now)
     throws stainless::RustError, stainless::JsonError, ConfigError
 {
-    String phase = String(hand.phase);
-    if (phase == "commit") {
+    if (hand.phase == HandPhase::Commit) {
         return advance_commit(hand, inbox, now);
     }
-    if (phase == "reveal") {
+    if (hand.phase == HandPhase::Reveal) {
         return advance_reveal(hand, inbox, now);
     }
-    if (phase == "betting") {
+    if (hand.phase == HandPhase::Betting) {
         return advance_betting(hand, inbox, now);
     }
-    if (phase == "show") {
+    if (hand.phase == HandPhase::Show) {
         return advance_show(node, hand, inbox, now);
     }
-    if (phase == "continue") {
+    if (hand.phase == HandPhase::Continue) {
         return advance_continue(node, config, chain, hand, inbox, now);
     }
-    if (phase == "settling") {
+    if (hand.phase == HandPhase::Settling) {
         return retry_settlement(node, config, chain, hand);
     }
     throw ConfigError{stainless::Exception("invalid persisted poker hand phase")};
 }
 
-void reset_hands(const JsonTable1<String>& store, var& hands, var& inbox)
+void reset_hands(const JsonTable1<String>& store, Vec<Hand>& hands, Map<String, Submission>& inbox)
     throws stainless::Exception
 {
-    hands = [];
-    inbox = {};
+    hands.clear();
+    inbox.clear();
     save_hands(store, hands);
 }
 
-var tick_hands(const Client& node, const var& config, const var& chain, const JsonTable1<String>& store,
-               var& hands, var& inbox, const u64 now)
-    throws stainless::Exception
+Vec<HandEvent> tick_hands(const Client& node, const DealerConfig& config, const ChainState& chain,
+                          const JsonTable1<String>& store, Vec<Hand>& hands, Map<String, Submission>& inbox,
+                          const u64 now) throws stainless::Exception
 {
-    var events = [];
-    if (u64(chain.synced) == 0) {
+    Vec<HandEvent> events;
+    if (!chain.synced) {
         return events;
     }
 
     bool changed = false;
-    for (const var& table : chain.tables) {
-        var result = reconcile_table(node, table, hands, integer(chain.height), now);
-        if (u64(result.changed) != 0) {
-            changed = true;
-        }
-        if (result.event != null) {
-            events.push(result.event);
+    for (const Table& table : chain.tables) {
+        ReconcileResult result = reconcile_table(node, table, hands, chain.height, now);
+        changed = changed || result.changed;
+        if (result.event.has_value()) {
+            events.push(result.event.value_or(HandEvent()));
         }
     }
     usize count = hands.len();
     for (usize i = 0; i < count; i += 1) {
-        var hand = hands[i];
-        if (advance_hand(node, config, chain, hand, inbox, now)) {
+        if (advance_hand(node, config, chain, hands[i], inbox, now)) {
             changed = true;
-            events.push(hand_event(hand));
+            events.push(make_hand_state_event(hands[i]));
         }
     }
     if (changed) {

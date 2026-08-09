@@ -1,0 +1,1064 @@
+// Typed dealer state. JSON conversion is deliberately explicit so u64/u128 values remain decimal strings at storage
+// and API boundaries instead of becoming lossy JSON numbers
+
+use rust::{String, Vec};
+
+namespace poker {
+
+// Player WebSocket message discriminator
+
+enum SubmissionKind : u8 {
+    Unknown = 0,
+    Auth = 1,
+    Subscribe = 2,
+    Commit = 3,
+    Reveal = 4,
+    Action = 5,
+    Show = 6,
+    Muck = 7,
+    Continue = 8,
+    Leave = 9,
+};
+
+// Off-chain hand state-machine phase
+
+enum HandPhase : u8 {
+    Unknown = 0,
+    Commit = 1,
+    Reveal = 2,
+    Betting = 3,
+    Show = 4,
+    Continue = 5,
+    Settling = 6,
+};
+
+// Player-facing hand notification discriminator
+
+enum HandEventKind : u8 {
+    Unknown = 0,
+    HandState = 1,
+    Settled = 2,
+    HandReverted = 3,
+    HandExpired = 4,
+};
+
+// Dealer-originated WebSocket message discriminator
+
+enum DealerEventKind : u8 {
+    Challenge = 1,
+    Error = 2,
+    Authenticated = 3,
+    Accepted = 4,
+    Subscribed = 5,
+};
+
+// Contract betting action code
+
+enum BettingAction : u8 {
+    CheckCall = 0,
+    BetRaise = 1,
+    Fold = 2,
+    Unknown = 255,
+};
+
+// Contract timeout phase code
+
+enum TimeoutPhase : u8 {
+    Commit = 0,
+    Reveal = 1,
+    Betting = 2,
+    Show = 3,
+    Unknown = 255,
+};
+
+// Deployment and autoscaling policy for one class of poker table
+
+struct TableTemplate {
+    String id;
+    String currency;
+    u128 small_blind;
+    // Minimum buy-in expressed as a multiple of small_blind
+    u32 min_stack_blinds;
+    u32 max_players;
+    // Contract timing in blocks
+    u64 start_delay;
+    u64 game_timeout;
+    // Off-chain response deadline in seconds
+    u64 player_timeout;
+    // Dealer rake in basis points; min_rake is the minimum charged per player
+    u32 rake_bps;
+    u128 min_rake;
+    // Desired number of available tables, counting pending deployments
+    u32 min_available;
+
+    static TableTemplate parse(const var& value) throws stainless::JsonError, ConfigError;
+    var json_public() const;
+};
+
+// Dealer process configuration loaded from poker.json
+
+struct DealerConfig {
+    String listen;
+    String node_url;
+    String api_token;
+    String data_dir;
+    // Address of the poker2.js executable deployed by the operator
+    String poker_binary;
+    String dealer;
+    u32 wallet_index;
+    // Local scheduling and HTTP deadlines in milliseconds
+    u64 poll_interval_ms;
+    u64 request_timeout_ms;
+    // Number of blocks before an unreachable deployment is abandoned
+    u64 pending_timeout_blocks;
+    // Deployment burst limit for one synchronization pass
+    u32 max_deploy_per_sync;
+    Vec<TableTemplate> templates;
+
+    static DealerConfig parse(const var& value) throws stainless::JsonError, ConfigError;
+    void validate() const throws ConfigError;
+    var json_public() const throws stainless::JsonError;
+};
+
+// Canonical chain point paired with a versioned chain-store snapshot
+
+struct Checkpoint {
+    // Chain snapshot retained as a candidate kvstore rollback ancestor
+    u64 height;
+    String hash;
+
+    static Checkpoint parse(const var& value) throws ConfigError;
+    var json() const;
+};
+
+// Latest mutable poker2.js table state observed through WAPI
+
+struct TableStatus {
+    bool table_open;
+    u64 player_count;
+    // Heights are absent while no hand is scheduled or refundable
+    optional<u64> start_height;
+    optional<u64> refund_height;
+    u128 dealer_rake;
+    // On-chain transcript checkpoint for the current hand
+    String transcript_hash;
+    u64 hand_id;
+    u32 active_count;
+    u32 waiting_count;
+
+    static TableStatus parse(const var& value) throws stainless::JsonError, ConfigError;
+    var json() const;
+};
+
+// Immutable configuration read from a deployed poker2.js table
+
+struct TableConfig {
+    String currency;
+    String dealer;
+    u128 small_blind;
+    u128 min_stack;
+    u32 max_players;
+    u64 start_delay;
+    u64 game_timeout;
+    u64 player_timeout;
+    u32 rake_bps;
+    u128 min_rake;
+
+    static TableConfig parse(const var& value) throws stainless::JsonError, ConfigError;
+    var json() const;
+};
+
+// Tracked on-chain table deployment and its most recent contract snapshot
+
+struct Table {
+    String address;
+    String template_id;
+    // Used to recover deployments when their confirming chain is rolled back
+    u64 deployment_height;
+    // confirmed means the deployment has become a readable poker contract
+    bool confirmed;
+    // Result of the most recent WAPI refresh, independent of confirmation
+    bool reachable;
+    optional<u64> last_seen_height;
+    optional<TableStatus> status;
+    optional<TableConfig> config;
+    optional<String> error;
+
+    static Table parse(const var& value) throws stainless::JsonError, ConfigError;
+    var json(bool include_error) const throws stainless::JsonError;
+    var json_public() const throws stainless::JsonError;
+};
+
+// Submitted table deployment that has not yet become readable on-chain
+
+struct PendingTable {
+    String address;
+    String template_id;
+    // Tip height at submission, used for timeout and reorg recovery
+    u64 deployment_height;
+
+    static PendingTable parse(const var& value) throws ConfigError;
+    static Vec<PendingTable> parse_all(const var& value) throws stainless::JsonError, ConfigError;
+    static var json_all(const Vec<PendingTable>& pending) throws stainless::JsonError;
+    var json() const;
+};
+
+// Dealer view of the canonical chain and all confirmed poker tables
+
+struct ChainState {
+    u64 height;
+    u64 time;
+    String hash;
+    bool synced;
+    // Recent canonical tips corresponding to versioned chain-store snapshots
+    Vec<Checkpoint> checkpoints;
+    Vec<Table> tables;
+
+    static ChainState parse(const var& value) throws stainless::JsonError, ConfigError;
+    var json(bool include_checkpoints) const throws stainless::JsonError;
+    var json_public() const throws stainless::JsonError;
+};
+
+// Authentication and table subscription state for one WebSocket connection
+
+struct Session {
+    String challenge;
+    // Node time in seconds after which the authentication challenge is stale
+    u64 expires_at;
+    bool authenticated;
+    String address;
+    String public_key;
+    String table;
+};
+
+// Typed representation of a player WebSocket message after JSON parsing
+
+struct Submission {
+    // JSON `type`: Auth, Subscribe, Commit, Reveal, Action, Show, Muck, Continue, or Leave
+    SubmissionKind kind = SubmissionKind::Unknown;
+    // auth payload; signature is also used by commit, action, and continue
+    String address;
+    String public_key;
+    String signature;
+    // subscribe payload
+    String table;
+    // Common gameplay envelope; unused by auth and subscribe
+    u64 hand_id;
+    u64 round;
+    u64 epoch;
+    // Five opaque seed hashes are committed up front: four community rounds and one pocket seed
+    Vec<String> commitments;
+    // reveal payload
+    String seed;
+    // CheckCall, BetRaise, or Fold; contract codes remain 0, 1, and 2
+    BettingAction action = BettingAction::Unknown;
+    // Total amount bet after the action, rather than an incremental amount
+    u128 cumulative_bet;
+    // Transcript checkpoint covered by an action or continuation signature
+    String checkpoint;
+    // show payload
+    String pocket_seed;
+    Vec<u64> hand;
+    // continue payload
+    u128 result_stack;
+
+    static Submission parse(const var& value) throws stainless::JsonError, stainless::EnumError, ConfigError;
+};
+
+// Contract-compatible evaluated poker rank
+
+struct Rank {
+    // Contract-defined category followed by descending tie-break values
+    u64 category;
+    Vec<u64> kickers;
+
+    static Rank parse(const var& value) throws stainless::JsonError;
+    var json() const throws stainless::JsonError;
+};
+
+// Verified showdown payload and its contract-evaluated rank
+
+struct Show {
+    String pocket_seed;
+    Vec<u64> hand;
+    Rank rank;
+
+    static Show parse(const var& value) throws stainless::JsonError;
+    var json() const throws stainless::JsonError;
+};
+
+// Per-hand player state maintained by the off-chain coordinator
+
+struct Player {
+    String address;
+    String public_key;
+    // Stack at hand start and total amount committed during this hand
+    u128 stack;
+    u128 bet;
+    bool folded;
+    // Empty before the signed commit message; then contains all five opaque seed hashes
+    Vec<String> commitments;
+    optional<String> commit_signature;
+    // The underlying community seeds are released one round at a time; an empty optional is a timeout
+    Vec<optional<String>> reveals;
+    optional<Show> show;
+    optional<u128> payout;
+    optional<bool> continuing;
+
+    static Player parse(const var& value) throws stainless::JsonError, ConfigError;
+    var json(bool redact_show) const throws stainless::JsonError;
+    var json_reveals() const throws stainless::JsonError;
+};
+
+// Accepted parallel betting action recorded for contract settlement
+
+struct BettingEntry {
+    // Stable index into Hand::players, as expected by poker2.js
+    u32 player;
+    BettingAction action = BettingAction::Unknown;
+    u128 cumulative_bet;
+    String signature;
+
+    static BettingEntry parse(const var& value) throws stainless::EnumError, ConfigError;
+    var json() const;
+};
+
+// Missing player response recorded for contract settlement
+
+struct TimeoutEntry {
+    u32 player;
+    // Contract phase code: 0 = commit, 1 = reveal, 2 = betting, 3 = show
+    TimeoutPhase phase = TimeoutPhase::Unknown;
+    u64 round;
+    u64 epoch;
+
+    static TimeoutEntry parse(const var& value) throws stainless::EnumError, ConfigError;
+    var json() const;
+};
+
+// Verified showdown selection recorded for contract settlement
+
+struct ShowEntry {
+    u32 player;
+    String pocket_seed;
+    // Five indexes selecting the player's evaluated hand from seven cards
+    Vec<u64> hand;
+
+    static ShowEntry parse(const var& value) throws stainless::JsonError;
+    var json() const throws stainless::JsonError;
+};
+
+// Signed decision to remain at the table after settlement
+
+struct ContinuationEntry {
+    u32 player;
+    String signature;
+
+    static ContinuationEntry parse(const var& value);
+    var json() const;
+};
+
+// Complete typed state of one in-progress off-chain poker hand
+
+struct Hand {
+    String table;
+    u64 hand_id;
+    // Contract block heights anchoring hand validity and emergency refund
+    u64 start_height;
+    u64 refund_height;
+    u128 small_blind;
+    u64 player_timeout;
+    u32 rake_bps;
+    u128 min_rake;
+    // Current state-machine phase: Commit, Reveal, Betting, Show, Continue, or Settling
+    HandPhase phase = HandPhase::Unknown;
+    u64 round;
+    u64 epoch;
+    // Node-time deadline in seconds for the current off-chain phase
+    u64 deadline;
+    // Canonical transcript hash signed by player actions and continuations
+    String checkpoint;
+    Vec<Player> players;
+    Vec<String> sources;
+    optional<Vec<u64>> board;
+    // Betting is indexed by community round, then parallel betting epoch
+    Vec<Vec<Vec<BettingEntry>>> betting;
+    Vec<TimeoutEntry> timeouts;
+    Vec<ShowEntry> shows;
+    Vec<ContinuationEntry> continuations;
+    u128 dealer_rake;
+    optional<String> settlement_tx;
+    // Submission height is retained so failed settlement can be retried
+    optional<u64> settlement_height;
+
+    static Hand parse(const var& value) throws stainless::JsonError, stainless::EnumError, ConfigError;
+    static Vec<Hand> parse_all(const var& value) throws stainless::JsonError, stainless::EnumError, ConfigError;
+    static var json_all(const Vec<Hand>& hands) throws stainless::JsonError;
+    var json(bool redact_show) const throws stainless::JsonError;
+    var json_event() const throws stainless::JsonError;
+};
+
+// Hand-state or terminal notification sent to subscribed players
+
+struct HandEvent {
+    // HandState, Settled, HandReverted, or HandExpired
+    HandEventKind kind = HandEventKind::Unknown;
+    String table;
+    u64 hand_id;
+    u64 height;
+    // Present for hand_state; terminal events carry only identifiers and height
+    optional<Hand> hand;
+
+    var json() const throws stainless::JsonError;
+};
+
+// Result of reconciling one tracked table against its active dealer hand
+
+struct ReconcileResult {
+    bool changed;
+    optional<HandEvent> event;
+};
+
+// Player identity and stack subset returned by get_player_info
+
+struct PlayerInfo {
+    String address;
+    String public_key;
+    u128 stack;
+
+    static PlayerInfo parse(const var& value) throws ConfigError;
+};
+
+optional<u64> parse_optional_u64(const var& value) throws ConfigError
+{
+    if (value == null) {
+        return optional<u64>();
+    }
+    return optional<u64>(integer(value));
+}
+
+var optional_u64_json(const optional<u64>& value)
+{
+    if (!value.has_value()) {
+        return null;
+    }
+    return decimal(value.value_or(0));
+}
+
+Vec<String> parse_strings(const var& values) throws stainless::JsonError
+{
+    Vec<String> result;
+    for (const var& value : values) {
+        result.push(String(value));
+    }
+    return result;
+}
+
+var strings_json(const Vec<String>& values) throws stainless::JsonError
+{
+    var result = [];
+    for (const String& value : values) {
+        result.push(String(value));
+    }
+    return result;
+}
+
+Vec<u64> parse_u64_values(const var& values) throws stainless::JsonError
+{
+    Vec<u64> result;
+    for (const var& value : values) {
+        result.push(u64(value));
+    }
+    return result;
+}
+
+var u64_values_json(const Vec<u64>& values) throws stainless::JsonError
+{
+    var result = [];
+    for (const u64 value : values) {
+        result.push(u32(value));
+    }
+    return result;
+}
+
+TableTemplate TableTemplate::parse(const var& value) throws stainless::JsonError, ConfigError
+{
+    return TableTemplate{
+        String(value.id), String(value.currency), amount(value.small_blind), u32(value.min_stack_blinds),
+        u32(value.max_players), integer(value.start_delay), integer(value.game_timeout), integer(value.player_timeout),
+        u32(value.rake_bps), amount(value.min_rake), u32(value.min_available),
+    };
+}
+
+DealerConfig DealerConfig::parse(const var& value) throws stainless::JsonError, ConfigError
+{
+    DealerConfig config;
+    config.listen = String(value.listen);
+    config.node_url = String(value.node_url);
+    config.api_token = String(value.api_token);
+    config.data_dir = String(value.data_dir);
+    config.poker_binary = String(value.poker_binary);
+    config.dealer = String(value.dealer);
+    config.wallet_index = u32(value.wallet_index);
+    config.poll_interval_ms = integer(value.poll_interval_ms);
+    config.request_timeout_ms = integer(value.request_timeout_ms);
+    config.pending_timeout_blocks = integer(value.pending_timeout_blocks);
+    config.max_deploy_per_sync = u32(value.max_deploy_per_sync);
+    for (const var& item : value.templates) {
+        config.templates.push(TableTemplate::parse(item));
+    }
+    return config;
+}
+
+var TableTemplate::json_public() const
+{
+    return {
+        id: id.clone(),
+        currency: currency.clone(),
+        small_blind: quantity(small_blind),
+        min_stack_blinds: min_stack_blinds,
+        max_players: max_players,
+        start_delay: decimal(start_delay),
+        game_timeout: decimal(game_timeout),
+        player_timeout: decimal(player_timeout),
+        rake_bps: rake_bps,
+        min_rake: quantity(min_rake),
+        min_available: min_available,
+    };
+}
+
+Checkpoint Checkpoint::parse(const var& value) throws ConfigError
+{
+    return Checkpoint{integer(value.height), String(value.hash)};
+}
+
+var Checkpoint::json() const
+{
+    return {height: decimal(height), hash: hash.clone()};
+}
+
+TableStatus TableStatus::parse(const var& value) throws stainless::JsonError, ConfigError
+{
+    return TableStatus{
+        u64(value.table_open) != 0,
+        integer(value.player_count),
+        parse_optional_u64(value.start_height),
+        parse_optional_u64(value.refund_height),
+        amount(value.dealer_rake),
+        String(value.transcript_hash),
+        integer(value.hand_id),
+        u32(value.active_count),
+        u32(value.waiting_count),
+    };
+}
+
+var TableStatus::json() const
+{
+    return {
+        table_open: table_open,
+        player_count: decimal(player_count),
+        start_height: optional_u64_json(start_height),
+        refund_height: optional_u64_json(refund_height),
+        dealer_rake: quantity(dealer_rake),
+        transcript_hash: transcript_hash.clone(),
+        hand_id: decimal(hand_id),
+        active_count: active_count,
+        waiting_count: waiting_count,
+    };
+}
+
+TableConfig TableConfig::parse(const var& value) throws stainless::JsonError, ConfigError
+{
+    return TableConfig{
+        String(value.currency),
+        String(value.dealer),
+        amount(value.small_blind),
+        amount(value.min_stack),
+        u32(value.max_players),
+        integer(value.start_delay),
+        integer(value.game_timeout),
+        integer(value.player_timeout),
+        u32(value.rake_bps),
+        amount(value.min_rake),
+    };
+}
+
+var TableConfig::json() const
+{
+    return {
+        currency: currency.clone(),
+        dealer: dealer.clone(),
+        small_blind: quantity(small_blind),
+        min_stack: quantity(min_stack),
+        max_players: max_players,
+        start_delay: decimal(start_delay),
+        game_timeout: decimal(game_timeout),
+        player_timeout: decimal(player_timeout),
+        rake_bps: rake_bps,
+        min_rake: quantity(min_rake),
+    };
+}
+
+Table Table::parse(const var& value) throws stainless::JsonError, ConfigError
+{
+    Table table;
+    table.address = String(value.address);
+    table.template_id = String(value.template_id);
+    table.deployment_height = integer(value.deployment_height);
+    table.confirmed = u64(value.confirmed) != 0;
+    table.reachable = u64(value.reachable) != 0;
+    table.last_seen_height = parse_optional_u64(value.last_seen_height);
+    if (value.status != null) {
+        table.status = optional<TableStatus>(TableStatus::parse(value.status));
+    }
+    if (value.config != null) {
+        table.config = optional<TableConfig>(TableConfig::parse(value.config));
+    }
+    if (value.error != null) {
+        table.error = optional<String>(String(value.error));
+    }
+    return table;
+}
+
+var Table::json(const bool include_error) const throws stainless::JsonError
+{
+    var result = {
+        address: address.clone(),
+        template_id: template_id.clone(),
+        deployment_height: decimal(deployment_height),
+        confirmed: confirmed,
+        reachable: reachable,
+        last_seen_height: optional_u64_json(last_seen_height),
+        status: null,
+        config: null,
+    };
+    if (status.has_value()) {
+        result.status = status.value_or(TableStatus()).json();
+    }
+    if (config.has_value()) {
+        result.config = config.value_or(TableConfig()).json();
+    }
+    if (include_error) {
+        if (error.has_value()) {
+            result.error = error.value_or("");
+        } else {
+            result.error = null;
+        }
+    }
+    return result;
+}
+
+PendingTable PendingTable::parse(const var& value) throws ConfigError
+{
+    return PendingTable{String(value.address), String(value.template_id), integer(value.deployment_height)};
+}
+
+var PendingTable::json() const
+{
+    return {
+        address: address.clone(),
+        template_id: template_id.clone(),
+        deployment_height: decimal(deployment_height),
+        confirmed: false,
+    };
+}
+
+ChainState ChainState::parse(const var& value) throws stainless::JsonError, ConfigError
+{
+    ChainState chain;
+    chain.height = integer(value.height);
+    chain.time = integer(value.time);
+    chain.hash = String(value.hash);
+    chain.synced = u64(value.synced) != 0;
+    for (const var& checkpoint : value.checkpoints) {
+        chain.checkpoints.push(Checkpoint::parse(checkpoint));
+    }
+    for (const var& table : value.tables) {
+        chain.tables.push(Table::parse(table));
+    }
+    return chain;
+}
+
+var ChainState::json(const bool include_checkpoints) const throws stainless::JsonError
+{
+    var checkpoint_values = [];
+    if (include_checkpoints) {
+        for (const Checkpoint& checkpoint : checkpoints) {
+            checkpoint_values.push(checkpoint.json());
+        }
+    }
+    var table_values = [];
+    for (const Table& table : tables) {
+        table_values.push(table.json(include_checkpoints));
+    }
+    var result = {
+        height: decimal(height),
+        time: decimal(time),
+        hash: hash.clone(),
+        synced: synced,
+        tables: move(table_values),
+    };
+    if (include_checkpoints) {
+        result.checkpoints = move(checkpoint_values);
+    }
+    return result;
+}
+
+Vec<PendingTable> PendingTable::parse_all(const var& value) throws stainless::JsonError, ConfigError
+{
+    Vec<PendingTable> pending;
+    for (const var& table : value) {
+        pending.push(PendingTable::parse(table));
+    }
+    return pending;
+}
+
+var PendingTable::json_all(const Vec<PendingTable>& pending) throws stainless::JsonError
+{
+    var result = [];
+    for (const PendingTable& table : pending) {
+        result.push(table.json());
+    }
+    return result;
+}
+
+Submission Submission::parse(const var& value) throws stainless::JsonError, stainless::EnumError, ConfigError
+{
+    Submission message;
+    message.kind = SubmissionKind(String(value.type));
+    if (message.kind == SubmissionKind::Auth) {
+        message.address = String(value.address);
+        message.public_key = String(value.public_key);
+        message.signature = String(value.signature);
+        return message;
+    }
+    if (message.kind == SubmissionKind::Subscribe) {
+        message.table = String(value.table);
+        return message;
+    }
+    if (message.kind == SubmissionKind::Unknown) {
+        return message;
+    }
+    message.hand_id = integer(value.hand_id);
+    message.round = integer(value.round);
+    message.epoch = integer(value.epoch);
+    if (message.kind == SubmissionKind::Commit || message.kind == SubmissionKind::Action ||
+        message.kind == SubmissionKind::Continue) {
+        message.signature = String(value.signature);
+    }
+    if (message.kind == SubmissionKind::Commit) {
+        message.commitments = parse_strings(value.commitments);
+    } else if (message.kind == SubmissionKind::Reveal) {
+        message.seed = String(value.seed);
+    } else if (message.kind == SubmissionKind::Action) {
+        message.action = BettingAction(String(value.action));
+        message.cumulative_bet = amount(value.cumulative_bet);
+        message.checkpoint = String(value.checkpoint);
+    } else if (message.kind == SubmissionKind::Show) {
+        message.pocket_seed = String(value.pocket_seed);
+        message.hand = parse_u64_values(value.hand);
+    } else if (message.kind == SubmissionKind::Continue) {
+        message.result_stack = amount(value.result_stack);
+        message.checkpoint = String(value.checkpoint);
+    }
+    return message;
+}
+
+Rank Rank::parse(const var& value) throws stainless::JsonError
+{
+    return Rank{u64(value[0]), parse_u64_values(value[1])};
+}
+
+Show Show::parse(const var& value) throws stainless::JsonError
+{
+    return Show{String(value.pocket_seed), parse_u64_values(value.hand), Rank::parse(value.rank)};
+}
+
+var Rank::json() const throws stainless::JsonError
+{
+    return [u32(category), u64_values_json(kickers)];
+}
+
+var Show::json() const throws stainless::JsonError
+{
+    return {pocket_seed: pocket_seed.clone(), hand: u64_values_json(hand), rank: rank.json()};
+}
+
+Player Player::parse(const var& value) throws stainless::JsonError, ConfigError
+{
+    Player player;
+    player.address = String(value.address);
+    player.public_key = String(value.public_key);
+    player.stack = amount(value.stack);
+    player.bet = amount(value.bet);
+    player.folded = u64(value.folded) != 0;
+    if (value.commitments != null) {
+        player.commitments = parse_strings(value.commitments);
+    }
+    if (value.commit_signature != null) {
+        player.commit_signature = optional<String>(String(value.commit_signature));
+    }
+    for (const var& reveal : value.reveals) {
+        if (reveal == null) {
+            player.reveals.push(optional<String>());
+        } else {
+            player.reveals.push(optional<String>(String(reveal)));
+        }
+    }
+    if (value.show != null) {
+        player.show = optional<Show>(Show::parse(value.show));
+    }
+    if (value.payout != null) {
+        player.payout = optional<u128>(amount(value.payout));
+    }
+    if (value.continuing != null) {
+        player.continuing = optional<bool>(u64(value.continuing) != 0);
+    }
+    return player;
+}
+
+var Player::json(const bool redact_show) const throws stainless::JsonError
+{
+    var commitment_values = null;
+    if (commitments.len() != 0) {
+        commitment_values = strings_json(commitments);
+    }
+    var signature_value = null;
+    if (commit_signature.has_value()) {
+        signature_value = commit_signature.value_or("");
+    }
+    var reveal_values = this.json_reveals();
+    var show_value = null;
+    if (!redact_show && show.has_value()) {
+        Show current_show = show.value_or(Show());
+        show_value = current_show.json();
+    }
+    var payout_value = null;
+    if (payout.has_value()) {
+        payout_value = quantity(payout.value_or(0));
+    }
+    var continuing_value = null;
+    if (continuing.has_value()) {
+        continuing_value = continuing.value_or(false);
+    }
+    return {
+        address: address.clone(),
+        public_key: public_key.clone(),
+        stack: quantity(stack),
+        bet: quantity(bet),
+        folded: folded,
+        commitments: move(commitment_values),
+        commit_signature: move(signature_value),
+        reveals: move(reveal_values),
+        show: move(show_value),
+        payout: move(payout_value),
+        continuing: move(continuing_value),
+    };
+}
+
+var Player::json_reveals() const throws stainless::JsonError
+{
+    var result = [];
+    for (const optional<String>& reveal : reveals) {
+        if (reveal.has_value()) {
+            result.push(reveal.value_or(""));
+        } else {
+            result.push(null);
+        }
+    }
+    return result;
+}
+
+BettingEntry BettingEntry::parse(const var& value) throws stainless::EnumError, ConfigError
+{
+    BettingAction action = BettingAction(String(value[1]));
+    require_config(action != BettingAction::Unknown, "unknown betting action");
+    return BettingEntry{u32(value[0]), action, amount(value[2]), String(value[3])};
+}
+
+var BettingEntry::json() const
+{
+    return [player, String(action), quantity(cumulative_bet), signature.clone()];
+}
+
+TimeoutEntry TimeoutEntry::parse(const var& value) throws stainless::EnumError, ConfigError
+{
+    TimeoutPhase phase = TimeoutPhase(String(value[1]));
+    require_config(phase != TimeoutPhase::Unknown, "unknown timeout phase");
+    return TimeoutEntry{u32(value[0]), phase, integer(value[2]), integer(value[3])};
+}
+
+var TimeoutEntry::json() const
+{
+    return [player, String(phase), decimal(round), decimal(epoch)];
+}
+
+ShowEntry ShowEntry::parse(const var& value) throws stainless::JsonError
+{
+    return ShowEntry{u32(value[0]), String(value[1]), parse_u64_values(value[2])};
+}
+
+var ShowEntry::json() const throws stainless::JsonError
+{
+    return [player, pocket_seed.clone(), u64_values_json(hand)];
+}
+
+ContinuationEntry ContinuationEntry::parse(const var& value)
+{
+    return ContinuationEntry{u32(value[0]), String(value[1])};
+}
+
+var ContinuationEntry::json() const
+{
+    return [player, signature.clone()];
+}
+
+Hand Hand::parse(const var& value) throws stainless::JsonError, stainless::EnumError, ConfigError
+{
+    Hand hand;
+    hand.table = String(value.table);
+    hand.hand_id = integer(value.hand_id);
+    hand.start_height = integer(value.start_height);
+    hand.refund_height = integer(value.refund_height);
+    hand.small_blind = amount(value.small_blind);
+    hand.player_timeout = integer(value.player_timeout);
+    hand.rake_bps = u32(value.rake_bps);
+    hand.min_rake = amount(value.min_rake);
+    hand.phase = HandPhase(String(value.phase));
+    require_config(hand.phase != HandPhase::Unknown, "unknown hand phase");
+    hand.round = integer(value.round);
+    hand.epoch = integer(value.epoch);
+    hand.deadline = integer(value.deadline);
+    hand.checkpoint = String(value.checkpoint);
+    for (const var& player : value.players) {
+        hand.players.push(Player::parse(player));
+    }
+    hand.sources = parse_strings(value.sources);
+    if (value.board != null) {
+        hand.board = optional<Vec<u64>>(parse_u64_values(value.board));
+    }
+    for (const var& round : value.betting) {
+        Vec<Vec<BettingEntry>> parsed_round;
+        for (const var& epoch : round) {
+            Vec<BettingEntry> parsed_epoch;
+            for (const var& entry : epoch) {
+                parsed_epoch.push(BettingEntry::parse(entry));
+            }
+            parsed_round.push(move(parsed_epoch));
+        }
+        hand.betting.push(move(parsed_round));
+    }
+    for (const var& timeout : value.timeouts) {
+        hand.timeouts.push(TimeoutEntry::parse(timeout));
+    }
+    for (const var& show : value.shows) {
+        hand.shows.push(ShowEntry::parse(show));
+    }
+    for (const var& continuation : value.continuations) {
+        hand.continuations.push(ContinuationEntry::parse(continuation));
+    }
+    hand.dealer_rake = amount(value.dealer_rake);
+    if (value.settlement_tx != null) {
+        hand.settlement_tx = optional<String>(String(value.settlement_tx));
+    }
+    hand.settlement_height = parse_optional_u64(value.settlement_height);
+    return hand;
+}
+
+var Hand::json(const bool redact_show) const throws stainless::JsonError
+{
+    var player_values = [];
+    for (const Player& player : players) {
+        player_values.push(player.json(redact_show));
+    }
+    var board_value = null;
+    if (board.has_value()) {
+        board_value = u64_values_json(board.value_or(Vec<u64>()));
+    }
+    var betting_values = [];
+    for (const Vec<Vec<BettingEntry>>& betting_round : betting) {
+        var epoch_values = [];
+        for (const Vec<BettingEntry>& epoch : betting_round) {
+            var entry_values = [];
+            for (const BettingEntry& entry : epoch) {
+                entry_values.push(entry.json());
+            }
+            epoch_values.push(move(entry_values));
+        }
+        betting_values.push(move(epoch_values));
+    }
+    var timeout_values = [];
+    for (const TimeoutEntry& timeout : timeouts) {
+        timeout_values.push(timeout.json());
+    }
+    var show_values = [];
+    for (const ShowEntry& show : shows) {
+        show_values.push(show.json());
+    }
+    var continuation_values = [];
+    for (const ContinuationEntry& continuation : continuations) {
+        continuation_values.push(continuation.json());
+    }
+    var settlement_tx_value = null;
+    if (settlement_tx.has_value()) {
+        settlement_tx_value = settlement_tx.value_or("");
+    }
+    return {
+        table: table.clone(),
+        hand_id: decimal(hand_id),
+        start_height: decimal(start_height),
+        refund_height: decimal(refund_height),
+        small_blind: quantity(small_blind),
+        player_timeout: decimal(player_timeout),
+        rake_bps: rake_bps,
+        min_rake: quantity(min_rake),
+        phase: String(phase),
+        round: decimal(round),
+        epoch: decimal(epoch),
+        deadline: decimal(deadline),
+        checkpoint: checkpoint.clone(),
+        players: move(player_values),
+        sources: strings_json(sources),
+        board: move(board_value),
+        betting: move(betting_values),
+        timeouts: move(timeout_values),
+        shows: move(show_values),
+        continuations: move(continuation_values),
+        dealer_rake: quantity(dealer_rake),
+        settlement_tx: move(settlement_tx_value),
+        settlement_height: optional_u64_json(settlement_height),
+    };
+}
+
+var Hand::json_event() const throws stainless::JsonError
+{
+    return {type: String(HandEventKind::HandState), table: table.clone(), hand: this.json(phase == HandPhase::Show)};
+}
+
+var HandEvent::json() const throws stainless::JsonError
+{
+    if (hand.has_value()) {
+        return hand.value_or(Hand()).json_event();
+    }
+    return {type: String(kind), table: table.clone(), hand_id: decimal(hand_id), height: decimal(height)};
+}
+
+Vec<Hand> Hand::parse_all(const var& value) throws stainless::JsonError, stainless::EnumError, ConfigError
+{
+    Vec<Hand> hands;
+    for (const var& hand : value) {
+        hands.push(Hand::parse(hand));
+    }
+    return hands;
+}
+
+var Hand::json_all(const Vec<Hand>& hands) throws stainless::JsonError
+{
+    var result = [];
+    for (const Hand& hand : hands) {
+        result.push(hand.json(false));
+    }
+    return result;
+}
+
+} // namespace poker

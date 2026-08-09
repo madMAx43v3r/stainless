@@ -12,11 +12,12 @@ store before resynchronizing. Pending deployments and in-progress hand state
 are durable in separate logs.
 
 The dealer is implemented in Stainless. `protocol.stl` owns the
-consensus-facing `poker2.js` hashes; `poker.stl` owns the player API,
-authentication, WAPI calls, rollback handling, table discovery, and scaling;
-`hand.stl` owns the hand state machine, transcript checkpoints, timeouts,
-showdown, side pots/rake, and settlement payload; and `main.stl` owns the
-server event loop.
+consensus-facing `poker2.js` hashes; `model.stl` defines the typed internal
+state and its associated `parse()`, `json()`, and `json_public()` boundary
+conversions; `poker.stl` owns the player API, authentication, WAPI calls,
+rollback handling, table discovery, and scaling; `hand.stl` owns the hand
+state machine, transcript checkpoints, timeouts, showdown, side pots/rake,
+and settlement payload; and `main.stl` owns the server event loop.
 
 ## Running
 
@@ -67,6 +68,10 @@ and in the player HTTP/WebSocket protocol. Bounded `u32` fields such as
 arguments are converted to lowercase `0x` hexadecimal strings before WAPI
 submission.
 
+WebSocket enum values use their declared Stainless member names, matching VNX
+enum-to-string conversion. They are case-sensitive: for example, `Commit`,
+`HandState`, and `Settling`.
+
 ## Player API
 
 All REST responses are JSON:
@@ -87,7 +92,7 @@ the dealer and authenticates ownership of the same key.
 The server first sends:
 
 ```json
-{"type":"challenge","protocol_version":1,"dealer":"mmx1...","challenge":"32-byte-hex","expires_at":"1786000000"}
+{"type":"Challenge","protocol_version":1,"dealer":"mmx1...","challenge":"32-byte-hex","expires_at":"1786000000"}
 ```
 
 The player signs the SHA-256 hash of:
@@ -99,12 +104,12 @@ MMX_POKER_DEALER_AUTH_V1/{dealer}/{challenge}/{expires_at}/{address}
 and replies:
 
 ```json
-{"type":"auth","address":"mmx1...","public_key":"33-byte-compressed-hex","signature":"64-byte-compact-hex"}
+{"type":"Auth","address":"mmx1...","public_key":"33-byte-compressed-hex","signature":"64-byte-compact-hex"}
 ```
 
-After `authenticated`, subscribe with
-`{"type":"subscribe","table":"mmx1..."}`. The player must already be
-registered in that table contract. The dealer sends `hand_state` whenever a
+After `Authenticated`, subscribe with
+`{"type":"Subscribe","table":"mmx1..."}`. The player must already be
+registered in that table contract. The dealer sends `HandState` whenever a
 hand starts or changes phase. It includes the exact `checkpoint`, deadline,
 roster stacks/bets/folds, public transcript collected so far, board when known,
 and computed result stacks before continuation.
@@ -116,13 +121,13 @@ are compact 64-byte secp256k1 signatures. Hash construction is available from
 the poker package's `poker::protocol` namespace and is byte-for-byte aligned
 with `poker2.js`.
 
-- Commit: `{"type":"commit","hand_id":"7","round":"0","epoch":"0","commitments":["..."],"signature":"..."}`
-- Reveal: `{"type":"reveal","hand_id":"7","round":"0","epoch":"0","seed":"32-byte-hex"}`
-- Action: `{"type":"action","hand_id":"7","round":"0","epoch":"0","action":1,"cumulative_bet":"2000","checkpoint":"...","signature":"..."}`
-- Show: `{"type":"show","hand_id":"7","round":"4","epoch":"0","pocket_seed":"32-byte-hex","hand":[0,1,2,3,4]}`
-- Muck immediately: `{"type":"muck","hand_id":"7","round":"4","epoch":"0"}`
-- Continue: `{"type":"continue","hand_id":"7","round":"0","epoch":"0","result_stack":"3100","checkpoint":"...","signature":"..."}`
-- Leave immediately: `{"type":"leave","hand_id":"7","round":"0","epoch":"0"}`
+- Commit: `{"type":"Commit","hand_id":"7","round":"0","epoch":"0","commitments":["..."],"signature":"..."}`
+- Reveal: `{"type":"Reveal","hand_id":"7","round":"0","epoch":"0","seed":"32-byte-hex"}`
+- Action: `{"type":"Action","hand_id":"7","round":"0","epoch":"0","action":"BetRaise","cumulative_bet":"2000","checkpoint":"...","signature":"..."}`
+- Show: `{"type":"Show","hand_id":"7","round":"4","epoch":"0","pocket_seed":"32-byte-hex","hand":[0,1,2,3,4]}`
+- Muck immediately: `{"type":"Muck","hand_id":"7","round":"4","epoch":"0"}`
+- Continue: `{"type":"Continue","hand_id":"7","round":"0","epoch":"0","result_stack":"3100","checkpoint":"...","signature":"..."}`
+- Leave immediately: `{"type":"Leave","hand_id":"7","round":"0","epoch":"0"}`
 
 Commit, action, and continuation signatures use the corresponding canonical
 contract hashes. Reveals and shows are authenticated by the WebSocket session
@@ -130,7 +135,7 @@ and checked against their earlier seed commitments. The dealer rejects stale
 hand/round/epoch/checkpoint messages before placing them in the hand inbox.
 Missing submissions become the timeout records defined by the contract.
 Stack, bet, rake, and payout fields are handled as exact `u128` values and are
-emitted as decimal strings in `hand_state`. All `u64`/`u128` player inputs are
+emitted as decimal strings in `HandState`. All `u64`/`u128` player inputs are
 parsed exactly, without floating-point coercion. Every integer passed to an MMX
 contract is encoded as a hexadecimal string.
 

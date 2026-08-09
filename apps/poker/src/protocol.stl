@@ -1,5 +1,5 @@
 // Consensus-facing poker2.js message hashes. Keep these byte-for-byte aligned
-// with the contract implementation in mmx-node.
+// with the contract implementation in mmx-node
 
 use rust::{String, Vec};
 

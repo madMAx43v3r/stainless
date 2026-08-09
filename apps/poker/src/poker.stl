@@ -1,11 +1,13 @@
-// MMX poker dealer. Routing, authentication, versioned state, chain rollback,
-// table discovery, and dynamic scaling live in Stainless.
+// MMX poker dealer. JSON is confined to storage, HTTP, WebSocket, and MMX WAPI boundaries; dealer state and protocol
+// decisions use typed Stainless structs
 
-use rust::{String, Vec, println};
+use rust::{Map, String, Vec, println};
 use rust::stainless_http::{Client, Server};
 use kvstore::{JsonTable1};
 
 namespace poker {
+
+// Invalid dealer configuration or externally supplied poker state
 
 struct ConfigError : stainless::Exception {
 };
@@ -24,16 +26,19 @@ String append(const String& left, const String& right)
     return result;
 }
 
+// Parses a decimal-string amount at a JSON boundary
+
 u128 amount(const var& value) throws ConfigError
 {
-    require_config(value.is_string(),
-                   "u64/u128 JSON values must be decimal strings");
+    require_config(value.is_string(), "u64/u128 JSON values must be decimal strings");
     try {
         return crypto::parse_decimal_u128(String(value));
     } catch (const crypto::DecimalError& error) {
         throw ConfigError{stainless::Exception(String(error.message))};
     }
 }
+
+// Parses a decimal-string u64 at a JSON boundary
 
 u64 integer(const var& value) throws ConfigError
 {
@@ -62,187 +67,113 @@ String quantity(const u128& value)
     return crypto::uint_decimal(value);
 }
 
-var public_template(const var& item)
+void DealerConfig::validate() const throws ConfigError
 {
-    return {
-        id: String(item.id),
-        currency: String(item.currency),
-        small_blind: String(item.small_blind),
-        min_stack_blinds: u32(item.min_stack_blinds),
-        max_players: u32(item.max_players),
-        start_delay: String(item.start_delay),
-        game_timeout: String(item.game_timeout),
-        player_timeout: String(item.player_timeout),
-        rake_bps: u32(item.rake_bps),
-        min_rake: String(item.min_rake),
-        min_available: u32(item.min_available),
-    };
-}
-
-var public_table_status(const var& status) throws stainless::JsonError, ConfigError
-{
-    var start_height = null;
-    var refund_height = null;
-    if (status.start_height != null) {
-        start_height = decimal(integer(status.start_height));
-    }
-    if (status.refund_height != null) {
-        refund_height = decimal(integer(status.refund_height));
-    }
-    return {
-        table_open: u64(status.table_open) != 0,
-        player_count: decimal(integer(status.player_count)),
-        start_height: start_height,
-        refund_height: refund_height,
-        dealer_rake: String(status.dealer_rake),
-        transcript_hash: status.transcript_hash,
-        hand_id: decimal(integer(status.hand_id)),
-        active_count: u32(status.active_count),
-        waiting_count: u32(status.waiting_count),
-    };
-}
-
-var public_table_config(const var& config)
-{
-    return {
-        currency: String(config.currency),
-        dealer: String(config.dealer),
-        small_blind: String(config.small_blind),
-        min_stack: String(config.min_stack),
-        max_players: u32(config.max_players),
-        start_delay: String(config.start_delay),
-        game_timeout: String(config.game_timeout),
-        player_timeout: String(config.player_timeout),
-        rake_bps: u32(config.rake_bps),
-        min_rake: String(config.min_rake),
-    };
-}
-
-var public_table(const var& table) throws stainless::JsonError, ConfigError
-{
-    var result = {
-        address: String(table.address),
-        template_id: String(table.template_id),
-        deployment_height: decimal(integer(table.deployment_height)),
-        confirmed: u64(table.confirmed) != 0,
-        reachable: u64(table.reachable) != 0,
-    };
-    if (table.last_seen_height != null) {
-        result.last_seen_height = decimal(integer(table.last_seen_height));
-    }
-    if (table.status != null) {
-        result.status = public_table_status(table.status);
-    }
-    if (table.config != null) {
-        result.config = public_table_config(table.config);
-    }
-    return result;
-}
-
-var public_chain(const var& chain) throws stainless::JsonError, ConfigError
-{
-    var tables = [];
-    for (const var& table : chain.tables) {
-        tables.push(public_table(table));
-    }
-    return {
-        height: decimal(integer(chain.height)),
-        time: decimal(integer(chain.time)),
-        hash: String(chain.hash),
-        synced: u64(chain.synced) != 0,
-        tables: tables,
-    };
-}
-
-void validate_config(const var& config) throws ConfigError, stainless::JsonError
-{
-    require_config(String(config.listen).len() > 0, "missing listen address");
-    require_config(String(config.node_url).len() > 0, "missing node_url");
-    require_config(String(config.data_dir).len() > 0, "missing data_dir");
-    require_config(String(config.poker_binary).len() > 0, "missing poker_binary");
-    require_config(String(config.poker_binary) != "MMX" &&
-                   wallet::validate_address(String(config.poker_binary)),
+    require_config(listen.len() > 0, "missing listen address");
+    require_config(node_url.len() > 0, "missing node_url");
+    require_config(data_dir.len() > 0, "missing data_dir");
+    require_config(poker_binary.len() > 0, "missing poker_binary");
+    require_config(poker_binary != "MMX" && wallet::validate_address(poker_binary),
                    "poker_binary is not an MMX address");
-    require_config(String(config.dealer) != "MMX" &&
-                   wallet::validate_address(String(config.dealer)),
+    require_config(dealer != "MMX" && wallet::validate_address(dealer),
                    "dealer is not an MMX address");
-    require_config(config.templates.len() > 0, "at least one table template is required");
-    require_config(integer(config.poll_interval_ms) > 0,
-                   "poll_interval_ms must be positive");
-    require_config(integer(config.request_timeout_ms) > 0,
-                   "request_timeout_ms must be positive");
-    require_config(integer(config.pending_timeout_blocks) > 0,
-                   "pending_timeout_blocks must be positive");
-    require_config(u64(config.max_deploy_per_sync) > 0,
-                   "max_deploy_per_sync must be positive");
-    require_config(u64(config.wallet_index) <= 4294967295,
-                   "wallet_index exceeds the node API range");
+    require_config(templates.len() > 0, "at least one table template is required");
+    require_config(poll_interval_ms > 0, "poll_interval_ms must be positive");
+    require_config(request_timeout_ms > 0, "request_timeout_ms must be positive");
+    require_config(pending_timeout_blocks > 0, "pending_timeout_blocks must be positive");
+    require_config(max_deploy_per_sync > 0, "max_deploy_per_sync must be positive");
 
-    for (usize i = 0; i < config.templates.len(); i += 1) {
-        var item = config.templates[i];
-        require_config(String(item.id).len() > 0, "template id is required");
-        require_config(wallet::validate_address(String(item.currency)),
-                       "template currency is not an MMX address");
-        require_config(amount(item.small_blind) > 0, "small_blind must be positive");
-        require_config(u64(item.min_stack_blinds) >= 2,
-                       "min_stack_blinds must be at least two");
-        require_config(u64(item.max_players) >= 2 && u64(item.max_players) <= 10,
-                       "max_players must be between two and ten");
-        require_config(integer(item.start_delay) > 0, "start_delay must be positive");
-        require_config(integer(item.game_timeout) > 0, "game_timeout must be positive");
-        require_config(integer(item.player_timeout) > 0, "player_timeout must be positive");
-        require_config(u64(item.rake_bps) <= 10000, "rake_bps exceeds 100 percent");
-        require_config(amount(item.min_rake) <= amount(item.small_blind),
-                       "min_rake exceeds small_blind");
-        require_config(u64(item.min_available) > 0, "min_available must be positive");
+    for (usize i = 0; i < templates.len(); i += 1) {
+        TableTemplate item = templates[i];
+        require_config(item.id.len() > 0, "template id is required");
+        require_config(wallet::validate_address(item.currency), "template currency is not an MMX address");
+        require_config(item.small_blind > 0, "small_blind must be positive");
+        require_config(item.min_stack_blinds >= 2, "min_stack_blinds must be at least two");
+        require_config(item.max_players >= 2 && item.max_players <= 10, "max_players must be between two and ten");
+        require_config(item.start_delay > 0, "start_delay must be positive");
+        require_config(item.game_timeout > 0, "game_timeout must be positive");
+        require_config(item.player_timeout > 0, "player_timeout must be positive");
+        require_config(item.rake_bps <= 10000, "rake_bps exceeds 100 percent");
+        require_config(item.min_rake <= item.small_blind, "min_rake exceeds small_blind");
+        require_config(item.min_available > 0, "min_available must be positive");
         for (usize j = 0; j < i; j += 1) {
-            require_config(String(config.templates[j].id) != String(item.id),
-                           "template ids must be unique");
+            require_config(templates[j].id != item.id, "template ids must be unique");
         }
     }
 }
 
-var public_config(const var& config) throws stainless::JsonError
+var DealerConfig::json_public() const throws stainless::JsonError
 {
-    var templates = [];
-    for (const var& item : config.templates) {
-        templates.push(public_template(item));
+    var template_values = [];
+    for (const TableTemplate& item : templates) {
+        template_values.push(item.json_public());
     }
     return {
-        dealer: String(config.dealer),
-        poker_binary: String(config.poker_binary),
-        templates: templates,
+        dealer: dealer.clone(),
+        poker_binary: poker_binary.clone(),
+        templates: move(template_values),
         websocket_path: "/v1/ws",
         protocol_version: 1,
     };
 }
 
-var empty_chain()
+var Table::json_public() const throws stainless::JsonError
 {
+    var result = {
+        address: address.clone(),
+        template_id: template_id.clone(),
+        deployment_height: decimal(deployment_height),
+        confirmed: confirmed,
+        reachable: reachable,
+    };
+    if (last_seen_height.has_value()) {
+        result.last_seen_height = decimal(last_seen_height.value_or(0));
+    }
+    if (status.has_value()) {
+        result.status = status.value_or(TableStatus()).json();
+    }
+    if (config.has_value()) {
+        result.config = config.value_or(TableConfig()).json();
+    }
+    return result;
+}
+
+var ChainState::json_public() const throws stainless::JsonError
+{
+    var table_values = [];
+    for (const Table& table : tables) {
+        table_values.push(table.json_public());
+    }
     return {
-        height: "0",
-        time: "0",
-        hash: "",
-        synced: false,
-        checkpoints: [],
-        tables: [],
+        height: decimal(height),
+        time: decimal(time),
+        hash: hash.clone(),
+        synced: synced,
+        tables: move(table_values),
     };
 }
 
-var load_state(const JsonTable1<String>& store, const String& key, const var& fallback)
-    throws stainless::Exception
+ChainState load_chain(const JsonTable1<String>& store) throws stainless::Exception
 {
     var loaded = null;
-    if (!store.find(key, loaded)) {
-        return fallback;
+    if (!store.find("chain", loaded)) {
+        return ChainState();
     }
-    return loaded;
+    return ChainState::parse(loaded);
 }
 
-void save_pending(const JsonTable1<String>& store, const var& pending)
-    throws stainless::Exception
+Vec<PendingTable> load_pending(const JsonTable1<String>& store) throws stainless::Exception
 {
-    store.insert("pending", pending.clone());
+    var loaded = null;
+    if (!store.find("pending", loaded)) {
+        return Vec<PendingTable>();
+    }
+    return PendingTable::parse_all(loaded);
+}
+
+void save_pending(const JsonTable1<String>& store, const Vec<PendingTable>& pending) throws stainless::Exception
+{
+    store.insert("pending", PendingTable::json_all(pending));
     u32 next = store.current_version() + 1;
     bool committed = false;
     if (next != 0) {
@@ -253,11 +184,14 @@ void save_pending(const JsonTable1<String>& store, const var& pending)
     }
 }
 
-var node_get(const Client& node, const String& path)
-    throws stainless::RustError, stainless::JsonError
+// MMX WAPI JSON boundary
+
+var node_get(const Client& node, const String& path) throws stainless::RustError, stainless::JsonError
 {
     return http::get_json(node, path);
 }
+
+// MMX WAPI JSON boundary
 
 var node_post(const Client& node, const String& path, const var& body)
     throws stainless::RustError, stainless::JsonError
@@ -274,8 +208,9 @@ String contract_path(const String& address, const String& method)
     return path;
 }
 
-var contract_call(const Client& node, const String& address,
-                  const String& method, const var& args)
+// MMX contract JSON boundary; callers convert the result to a typed value immediately
+
+var contract_call(const Client& node, const String& address, const String& method, const var& args)
     throws stainless::RustError, stainless::JsonError
 {
     return node_post(node, contract_path(address, method), {args: args});
@@ -288,129 +223,115 @@ String header_path(const u64 height)
     return path;
 }
 
-bool table_known(const var& chain, const String& address) throws stainless::JsonError
+usize find_table_index(const ChainState& chain, const String& address)
 {
-    for (const var& table : chain.tables) {
-        if (String(table.address) == address) {
+    for (usize i = 0; i < chain.tables.len(); i += 1) {
+        if (chain.tables[i].address == address) {
+            return i;
+        }
+    }
+    return chain.tables.len();
+}
+
+bool table_known(const ChainState& chain, const String& address)
+{
+    return find_table_index(chain, address) != chain.tables.len();
+}
+
+bool pending_known(const Vec<PendingTable>& pending, const String& address)
+{
+    for (const PendingTable& table : pending) {
+        if (table.address == address) {
             return true;
         }
     }
     return false;
 }
 
-bool pending_known(const var& pending, const String& address)
-    throws stainless::JsonError
+bool recover_reorg_deployments(const ChainState& old_chain, const ChainState& chain,
+                               Vec<PendingTable>& pending, const u64 tip_height)
 {
-    for (const var& table : pending) {
-        if (String(table.address) == address) {
-            return true;
+    bool changed = false;
+    for (const Table& table : old_chain.tables) {
+        if (!table_known(chain, table.address) && !pending_known(pending, table.address)) {
+            pending.push(PendingTable{String(table.address), String(table.template_id), tip_height});
+            changed = true;
         }
     }
-    return false;
+    return changed;
 }
 
-void recover_reorg_deployments(const var& old_chain, const var& chain,
-                               var& pending, const u64 tip_height)
-    throws stainless::JsonError
+void refresh_tables(const Client& node, ChainState& chain) throws stainless::JsonError, ConfigError
 {
-    for (const var& table : old_chain.tables) {
-        String address = String(table.address);
-        if (!table_known(chain, address) && !pending_known(pending, address)) {
-            pending.push({
-                address: move(address),
-                template_id: String(table.template_id),
-                deployment_height: decimal(tip_height),
-                confirmed: false,
-            });
-        }
-    }
-}
-
-var get_table(const var& chain, const String& address) throws stainless::JsonError
-{
-    for (const var& table : chain.tables) {
-        if (String(table.address) == address) {
-            return table;
-        }
-    }
-    return null;
-}
-
-void refresh_tables(const Client& node, var& chain)
-    throws stainless::JsonError, ConfigError
-{
-    for (var table : chain.tables) {
+    u64 height = chain.height;
+    for (auto& table : chain.tables) {
         try {
-            table.status = contract_call(node, String(table.address),
-                                         "get_table_status", []);
-            table.config = contract_call(node, String(table.address),
-                                         "get_config", []);
+            var status = contract_call(node, table.address, "get_table_status", []);
+            var config = contract_call(node, table.address, "get_config", []);
+            table.status = optional<TableStatus>(TableStatus::parse(status));
+            table.config = optional<TableConfig>(TableConfig::parse(config));
             table.confirmed = true;
             table.reachable = true;
-            table.last_seen_height = decimal(integer(chain.height));
-            table.error = null;
+            table.last_seen_height = optional<u64>(height);
+            table.error = optional<String>();
         } catch (const stainless::RustError& error) {
             table.reachable = false;
-            table.error = String(error.message);
+            table.error = optional<String>(String(error.message));
         }
     }
 }
 
-void merge_pending(const Client& node, const var& config, var& chain,
-                   var& pending)
+bool merge_pending(const Client& node, const DealerConfig& config, ChainState& chain, Vec<PendingTable>& pending)
     throws stainless::JsonError, ConfigError
 {
-    var remaining = [];
+    Vec<PendingTable> remaining;
     bool changed = false;
-    u64 height = integer(chain.height);
-    for (var table : pending) {
-        bool confirmed = false;
+    for (const PendingTable& pending_table : pending) {
         try {
-            var status = contract_call(node, String(table.address),
-                                       "get_table_status", []);
-            var table_config = contract_call(node, String(table.address),
-                                             "get_config", []);
-            if (!table_known(chain, String(table.address))) {
-                table.status = status;
-                table.config = table_config;
+            var status = contract_call(node, pending_table.address, "get_table_status", []);
+            var table_config = contract_call(node, pending_table.address, "get_config", []);
+            if (!table_known(chain, pending_table.address)) {
+                Table table;
+                table.address = String(pending_table.address);
+                table.template_id = String(pending_table.template_id);
+                table.deployment_height = pending_table.deployment_height;
                 table.confirmed = true;
                 table.reachable = true;
-                table.last_seen_height = decimal(height);
-                table.error = null;
-                chain.tables.push(table);
+                table.last_seen_height = optional<u64>(chain.height);
+                table.status = optional<TableStatus>(TableStatus::parse(status));
+                table.config = optional<TableConfig>(TableConfig::parse(table_config));
+                chain.tables.push(move(table));
             }
-            confirmed = true;
             changed = true;
         } catch (const stainless::RustError& error) {
-            u64 deployed = integer(table.deployment_height);
-            if (height <= deployed + integer(config.pending_timeout_blocks)) {
-                remaining.push(table);
+            if (chain.height <= pending_table.deployment_height + config.pending_timeout_blocks) {
+                remaining.push(pending_table);
             } else {
                 changed = true;
             }
         }
     }
     if (changed) {
-        pending = remaining;
+        pending = move(remaining);
     }
+    return changed;
 }
 
-bool checkpoint_matches(const Client& node, const var& checkpoint, const u64 tip_height)
-    throws stainless::RustError, stainless::JsonError, ConfigError
+bool checkpoint_matches(const Client& node, const Checkpoint& checkpoint, const u64 tip_height)
+    throws stainless::RustError, stainless::JsonError
 {
-    u64 height = integer(checkpoint.height);
-    if (height > tip_height) {
+    if (checkpoint.height > tip_height) {
         return false;
     }
-    var header = node_get(node, header_path(height));
-    return String(header.hash).eq_ignore_ascii_case(String(checkpoint.hash));
+    var header = node_get(node, header_path(checkpoint.height));
+    return String(header.hash).eq_ignore_ascii_case(checkpoint.hash);
 }
 
-bool rollback_if_needed(const Client& node, const JsonTable1<String>& store, const u64 tip_height, var& chain)
-    throws stainless::Exception
+bool rollback_if_needed(const Client& node, const JsonTable1<String>& store, const u64 tip_height,
+                        ChainState& chain) throws stainless::Exception
 {
-    u64 old_height = integer(chain.height);
-    if (old_height == 0 || String(chain.hash).len() == 0) {
+    u64 old_height = chain.height;
+    if (old_height == 0 || chain.hash.len() == 0) {
         return false;
     }
 
@@ -418,7 +339,7 @@ bool rollback_if_needed(const Client& node, const JsonTable1<String>& store, con
     if (old_height <= tip_height) {
         try {
             var current = node_get(node, header_path(old_height));
-            current_matches = String(current.hash).eq_ignore_ascii_case(String(chain.hash));
+            current_matches = String(current.hash).eq_ignore_ascii_case(chain.hash);
         } catch (const stainless::RustError& error) {
             current_matches = false;
         }
@@ -432,10 +353,9 @@ bool rollback_if_needed(const Client& node, const JsonTable1<String>& store, con
     usize count = chain.checkpoints.len();
     for (; count > 0 && !found;) {
         count -= 1;
-        var checkpoint = chain.checkpoints[count];
         try {
-            if (checkpoint_matches(node, checkpoint, tip_height)) {
-                ancestor = integer(checkpoint.height);
+            if (checkpoint_matches(node, chain.checkpoints[count], tip_height)) {
+                ancestor = chain.checkpoints[count].height;
                 found = true;
             }
         } catch (const stainless::RustError& error) {
@@ -445,39 +365,37 @@ bool rollback_if_needed(const Client& node, const JsonTable1<String>& store, con
     if (ancestor >= 4294967295) {
         throw ConfigError{stainless::Exception("rollback height exceeds kvstore range")};
     }
-    bool reverted = store.revert(u32(ancestor + 1));
-    if (!reverted) {
+    if (!store.revert(u32(ancestor + 1))) {
         throw ConfigError{stainless::Exception("kvstore could not revert chain state")};
     }
-    chain = load_state(store, "chain", empty_chain());
+    chain = load_chain(store);
     println!("chain rollback {} -> {}", old_height, ancestor);
     return true;
 }
 
-usize available_for_template(const var& chain, const var& pending,
-                             const String& template_id)
-    throws stainless::JsonError
+usize available_for_template(const ChainState& chain, const Vec<PendingTable>& pending, const String& template_id)
 {
     usize count = 0;
-    for (const var& table : chain.tables) {
-        if (String(table.template_id) == template_id && u64(table.confirmed) != 0 &&
-            u64(table.reachable) != 0 &&
-            u64(table.status.table_open) != 0 &&
-            u64(table.status.active_count) + u64(table.status.waiting_count)
-                < u64(table.config.max_players)) {
-            count += 1;
+    for (const Table& table : chain.tables) {
+        if (table.template_id == template_id && table.confirmed && table.reachable && table.status.has_value() &&
+            table.config.has_value()) {
+            TableStatus status = table.status.value_or(TableStatus());
+            TableConfig config = table.config.value_or(TableConfig());
+            if (status.table_open && status.active_count + status.waiting_count < config.max_players) {
+                count += 1;
+            }
         }
     }
-    for (const var& table : pending) {
-        if (String(table.template_id) == template_id) {
+    for (const PendingTable& table : pending) {
+        if (table.template_id == template_id) {
             count += 1;
         }
     }
     return count;
 }
 
-String deploy_table(const Client& node, const var& config, const var& spec)
-    throws stainless::RustError, stainless::JsonError, ConfigError
+String deploy_table(const Client& node, const DealerConfig& config, const TableTemplate& spec)
+    throws stainless::RustError, stainless::JsonError
 {
     var payload = {
         __type: "mmx.contract.Executable",
@@ -485,47 +403,40 @@ String deploy_table(const Client& node, const var& config, const var& spec)
         init_args: [
             String(spec.currency),
             String(config.dealer),
-            contract_amount(amount(spec.small_blind)),
+            contract_amount(spec.small_blind),
             contract_u64(u64(spec.min_stack_blinds)),
             contract_u64(u64(spec.max_players)),
-            contract_u64(integer(spec.start_delay)),
-            contract_u64(integer(spec.game_timeout)),
-            contract_u64(integer(spec.player_timeout)),
+            contract_u64(spec.start_delay),
+            contract_u64(spec.game_timeout),
+            contract_u64(spec.player_timeout),
             contract_u64(u64(spec.rake_bps)),
-            contract_amount(amount(spec.min_rake)),
+            contract_amount(spec.min_rake),
         ],
     };
     var request = {
-        index: u32(config.wallet_index),
-        payload: payload,
+        index: config.wallet_index,
+        payload: move(payload),
         options: {auto_send: true},
     };
     var result = node_post(node, "/wapi/wallet/deploy", request);
     return String(result);
 }
 
-bool scale_template(const Client& node, const var& config, const var& chain,
-                    var& pending, const JsonTable1<String>& pending_store,
-                    const var& spec)
+bool scale_template(const Client& node, const DealerConfig& config, const ChainState& chain,
+                    Vec<PendingTable>& pending, const JsonTable1<String>& pending_store, const TableTemplate& spec)
     throws stainless::Exception
 {
-    if (u64(chain.synced) == 0 ||
-        u64(available_for_template(chain, pending, String(spec.id)))
-            >= u64(spec.min_available)) {
+    if (!chain.synced || available_for_template(chain, pending, spec.id) >= usize(spec.min_available)) {
         return false;
     }
     String address = deploy_table(node, config, spec);
-    var table = {
-        address: String(address),
-        template_id: String(spec.id),
-        deployment_height: decimal(integer(chain.height)),
-        confirmed: false,
-    };
-    pending.push(table);
+    pending.push(PendingTable{String(address), String(spec.id), chain.height});
     save_pending(pending_store, pending);
-    println!("deployed pending poker table {} ({})", address, String(spec.id));
+    println!("deployed pending poker table {} ({})", address, spec.id);
     return true;
 }
+
+// Player HTTP API boundary
 
 void respond(const Server& server, const u64 request_id, const u16 status, const var& body)
 {
@@ -535,8 +446,7 @@ void respond(const Server& server, const u64 request_id, const u16 status, const
 void respond_error(const Server& server, const u64 request_id, const u16 status, const String& code,
                    const String& message)
 {
-    respond(server, request_id, status,
-            {error: {code: String(code), message: String(message)}});
+    respond(server, request_id, status, {error: {code: String(code), message: String(message)}});
 }
 
 var openapi()
@@ -554,112 +464,97 @@ var openapi()
     };
 }
 
-void handle_http(const Server& server, const var& event,
-                 const var& config, const var& chain, const var& pending)
-    throws stainless::JsonError, ConfigError
+// Player HTTP event boundary
+
+void handle_http(const Server& server, const var& event, const DealerConfig& config, const ChainState& chain,
+                 const Vec<PendingTable>& pending) throws stainless::JsonError
 {
     u64 request_id = u64(event.request_id);
     String method = String(event.method);
     String path = String(event.path);
     if (method != "GET") {
-        respond_error(server, request_id, 405, "method_not_allowed",
-                      "the player REST API is read-only");
+        respond_error(server, request_id, 405, "method_not_allowed", "the player REST API is read-only");
         return;
     }
     if (path == "/v1/health") {
         respond(server, request_id, 200, {
-            ok: u64(chain.synced) != 0,
-            height: decimal(integer(chain.height)),
-            hash: chain.hash,
+            ok: chain.synced,
+            height: decimal(chain.height),
+            hash: String(chain.hash),
             tracked_tables: decimal(u64(chain.tables.len())),
             pending_tables: decimal(u64(pending.len())),
         });
     } else if (path == "/v1/templates") {
-        respond(server, request_id, 200, public_config(config));
+        respond(server, request_id, 200, config.json_public());
     } else if (path == "/v1/tables") {
-        respond(server, request_id, 200, public_chain(chain));
+        respond(server, request_id, 200, chain.json_public());
     } else if (path == "/v1/openapi.json") {
         respond(server, request_id, 200, openapi());
     } else if (path.starts_with("/v1/tables/")) {
         String address = path.replace("/v1/tables/", "");
-        var table = get_table(chain, address);
-        if (table == null) {
-            respond_error(server, request_id, 404, "table_not_found",
-                          "the dealer does not track this table");
+        usize index = find_table_index(chain, address);
+        if (index == chain.tables.len()) {
+            respond_error(server, request_id, 404, "table_not_found", "the dealer does not track this table");
         } else {
-            respond(server, request_id, 200, public_table(table));
+            respond(server, request_id, 200, chain.tables[index].json_public());
         }
     } else {
         respond_error(server, request_id, 404, "not_found", "unknown API path");
     }
 }
 
-String auth_hash(const var& config, const var& session, const String& address)
-    throws ConfigError
+String auth_hash(const DealerConfig& config, const Session& session, const String& address)
 {
-    return protocol::auth_hash(String(config.dealer), String(session.challenge),
-                               integer(session.expires_at), address);
+    return protocol::auth_hash(config.dealer, session.challenge, session.expires_at, address);
 }
+
+// Player WebSocket JSON boundary
 
 void ws_send(const Server& server, const u64 connection_id, const var& message)
 {
     http::send_json(server, connection_id, message);
 }
 
-var open_session(const Server& server, const var& config, const u64 connection_id, const u64 now)
-    throws stainless::RustError, stainless::JsonError
+Session open_session(const Server& server, const DealerConfig& config, const u64 connection_id, const u64 now)
+    throws stainless::RustError
 {
     String challenge = crypto::random_hex(32);
-    u64 expires_at = now + 30;
-    var session = {
-        challenge: String(challenge),
-        expires_at: decimal(expires_at),
-        authenticated: false,
-        address: "",
-        public_key: "",
-        table: "",
-    };
+    Session session;
+    session.challenge = String(challenge);
+    session.expires_at = now + 30;
     ws_send(server, connection_id, {
-        type: "challenge",
+        type: String(DealerEventKind::Challenge),
         protocol_version: 1,
         dealer: String(config.dealer),
-        challenge: String(challenge),
-        expires_at: decimal(expires_at),
+        challenge: move(challenge),
+        expires_at: decimal(session.expires_at),
     });
     return session;
 }
 
-void authenticate(const Server& server, const var& config, const u64 connection_id, var& session,
-                  const var& message, const u64 now)
-    throws stainless::RustError, stainless::JsonError, ConfigError
+void authenticate(const Server& server, const DealerConfig& config, const u64 connection_id, Session& session,
+                  const Submission& message, const u64 now) throws stainless::RustError
 {
-    String address = String(message.address);
-    String public_key = String(message.public_key);
-    String signature = String(message.signature);
-    if (now > integer(session.expires_at) ||
-        !wallet::validate_address(address) ||
-        !wallet::is_hex(public_key, 33) ||
-        !wallet::is_hex(signature, 64)) {
-        ws_send(server, connection_id,
-                {type: "error", code: "authentication_invalid"});
+    if (now > session.expires_at || !wallet::validate_address(message.address) ||
+        !wallet::is_hex(message.public_key, 33) || !wallet::is_hex(message.signature, 64)) {
+        ws_send(server, connection_id, {type: String(DealerEventKind::Error), code: "authentication_invalid"});
         return;
     }
-    String derived = wallet::address_from_public_key(public_key);
-    String hash = auth_hash(config, session, address);
-    if (derived != address || !wallet::verify(hash, public_key, signature)) {
-        ws_send(server, connection_id,
-                {type: "error", code: "authentication_failed"});
+    String derived = wallet::address_from_public_key(message.public_key);
+    String hash = auth_hash(config, session, message.address);
+    if (derived != message.address || !wallet::verify(hash, message.public_key, message.signature)) {
+        ws_send(server, connection_id, {type: String(DealerEventKind::Error), code: "authentication_failed"});
         return;
     }
-    session.address = String(address);
-    session.public_key = String(public_key);
+    session.address = String(message.address);
+    session.public_key = String(message.public_key);
     session.authenticated = true;
     session.challenge = "";
     ws_send(server, connection_id,
-            {type: "authenticated", address: String(address)});
+            {type: String(DealerEventKind::Authenticated), address: String(message.address)});
 }
 
-String inbox_key(const String& table, const u64 hand_id, const String& address, const String& kind,
+String inbox_key(const String& table, const u64 hand_id, const String& address, const SubmissionKind kind,
                  const u64 round, const u64 epoch)
 {
     String key = table.clone();
@@ -668,7 +563,7 @@ String inbox_key(const String& table, const u64 hand_id, const String& address, 
     key.push_str("/");
     key.push_str(address);
     key.push_str("/");
-    key.push_str(kind);
+    key.push_str(String(kind));
     key.push_str("/");
     key.push_str(decimal(round));
     key.push_str("/");
@@ -676,107 +571,95 @@ String inbox_key(const String& table, const u64 hand_id, const String& address, 
     return key;
 }
 
-bool validate_signed_submission(const Client& node, const var& session,
-                                const var& message)
-    throws stainless::RustError, stainless::JsonError, ConfigError
+bool validate_signed_submission(const Client& node, const Session& session, const Submission& message)
+    throws stainless::RustError, stainless::JsonError
 {
-    String kind = String(message.type);
-    if (kind != "commit" && kind != "action" && kind != "continue") {
+    if (message.kind != SubmissionKind::Commit && message.kind != SubmissionKind::Action &&
+        message.kind != SubmissionKind::Continue) {
         return true;
     }
-    String signature = String(message.signature);
-    if (!wallet::is_hex(signature, 64)) {
+    if (!wallet::is_hex(message.signature, 64)) {
         return false;
     }
-    var hash = null;
-    if (kind == "commit") {
-        hash = contract_call(node, String(session.table), "get_commit_hash",
-                             [String(session.address), message.commitments]);
-    } else if (kind == "action") {
-        hash = contract_call(node, String(session.table), "get_action_hash", [
+    String hash;
+    if (message.kind == SubmissionKind::Commit) {
+        var result = contract_call(node, session.table, "get_commit_hash", [String(session.address),
+                                   strings_json(message.commitments)]);
+        hash = String(result);
+    } else if (message.kind == SubmissionKind::Action) {
+        var result = contract_call(node, session.table, "get_action_hash", [
             String(session.address),
-            contract_u64(integer(message.round)),
-            contract_u64(integer(message.epoch)),
+            contract_u64(message.round),
+            contract_u64(message.epoch),
             contract_u64(u64(message.action)),
-            contract_amount(amount(message.cumulative_bet)),
-            message.checkpoint,
+            contract_amount(message.cumulative_bet),
+            String(message.checkpoint),
         ]);
-    } else if (kind == "continue") {
-        hash = contract_call(node, String(session.table), "get_continue_hash", [
+        hash = String(result);
+    } else {
+        var result = contract_call(node, session.table, "get_continue_hash", [
             String(session.address),
-            contract_amount(amount(message.result_stack)),
-            message.checkpoint,
+            contract_amount(message.result_stack),
+            String(message.checkpoint),
         ]);
+        hash = String(result);
     }
-    return wallet::verify(String(hash), String(session.public_key), signature);
+    return wallet::verify(hash, session.public_key, message.signature);
 }
 
-void accept_submission(const Client& node, const Server& server,
-                       const u64 connection_id, const var& session,
-                       const var& message, var& inbox)
-    throws stainless::RustError, stainless::JsonError, ConfigError
+void accept_submission(const Client& node, const Server& server, const u64 connection_id, const Session& session,
+                       const Submission& message, Map<String, Submission>& inbox)
+    throws stainless::RustError, stainless::JsonError
 {
-    String kind = String(message.type);
-    if (kind != "commit" && kind != "reveal" && kind != "action" &&
-        kind != "show" && kind != "muck" && kind != "continue" &&
-        kind != "leave") {
-        ws_send(server, connection_id,
-                {type: "error", code: "unknown_message_type"});
+    if (message.kind != SubmissionKind::Commit && message.kind != SubmissionKind::Reveal &&
+        message.kind != SubmissionKind::Action && message.kind != SubmissionKind::Show &&
+        message.kind != SubmissionKind::Muck && message.kind != SubmissionKind::Continue &&
+        message.kind != SubmissionKind::Leave) {
+        ws_send(server, connection_id, {type: String(DealerEventKind::Error), code: "unknown_message_type"});
         return;
     }
     if (!validate_signed_submission(node, session, message)) {
-        ws_send(server, connection_id,
-                {type: "error", code: "signature_invalid"});
+        ws_send(server, connection_id, {type: String(DealerEventKind::Error), code: "signature_invalid"});
         return;
     }
-    u64 hand_id = integer(message.hand_id);
-    u64 round = integer(message.round);
-    u64 epoch = integer(message.epoch);
-    String key = inbox_key(String(session.table), hand_id, String(session.address),
-                           kind, round, epoch);
-    inbox.set(key, message);
+    String key = inbox_key(session.table, message.hand_id, session.address, message.kind, message.round, message.epoch);
+    inbox.insert(move(key), message);
     ws_send(server, connection_id, {
-        type: "accepted",
-        message_type: String(kind),
-        hand_id: decimal(hand_id),
-        round: decimal(round),
-        epoch: decimal(epoch),
+        type: String(DealerEventKind::Accepted),
+        message_type: String(message.kind),
+        hand_id: decimal(message.hand_id),
+        round: decimal(message.round),
+        epoch: decimal(message.epoch),
     });
 }
 
-void handle_session_message(const Client& node, const Server& server,
-                            const var& config, const var& chain,
-                            const u64 connection_id, var& session,
-                            const var& message, var& inbox, const u64 now)
-    throws stainless::RustError, stainless::JsonError, ConfigError
+void handle_session_message(const Client& node, const Server& server, const DealerConfig& config,
+                            const ChainState& chain, const u64 connection_id, Session& session,
+                            const Submission& message, Map<String, Submission>& inbox, const u64 now)
+    throws stainless::RustError, stainless::JsonError
 {
-    String kind = String(message.type);
-    if (kind == "auth") {
+    if (message.kind == SubmissionKind::Auth) {
         authenticate(server, config, connection_id, session, message, now);
         return;
     }
-    if (u64(session.authenticated) == 0) {
-        ws_send(server, connection_id,
-                {type: "error", code: "authentication_required"});
+    if (!session.authenticated) {
+        ws_send(server, connection_id, {type: String(DealerEventKind::Error), code: "authentication_required"});
         return;
     }
-    if (kind == "subscribe") {
-        String address = String(message.table);
-        var table = get_table(chain, address);
-        if (table == null || u64(table.confirmed) == 0) {
-            ws_send(server, connection_id,
-                    {type: "error", code: "table_not_found"});
+    if (message.kind == SubmissionKind::Subscribe) {
+        usize index = find_table_index(chain, message.table);
+        if (index == chain.tables.len() || !chain.tables[index].confirmed) {
+            ws_send(server, connection_id, {type: String(DealerEventKind::Error), code: "table_not_found"});
             return;
         }
-        contract_call(node, address, "get_player_info", [session.address]);
-        session.table = move(address);
+        contract_call(node, message.table, "get_player_info", [String(session.address)]);
+        session.table = String(message.table);
         ws_send(server, connection_id,
-                {type: "subscribed", table: public_table(table)});
+                {type: String(DealerEventKind::Subscribed), table: chain.tables[index].json_public()});
         return;
     }
-    if (String(session.table).len() == 0) {
-        ws_send(server, connection_id,
-                {type: "error", code: "subscription_required"});
+    if (session.table.len() == 0) {
+        ws_send(server, connection_id, {type: String(DealerEventKind::Error), code: "subscription_required"});
         return;
     }
     accept_submission(node, server, connection_id, session, message, inbox);
