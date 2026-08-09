@@ -46,6 +46,7 @@ pub(crate) fn lower(
                             | "IoError"
                             | "FormatError"
                             | "JsonError"
+                            | "EnumError"
                             | "ThreadError"
                     )
         )
@@ -2751,6 +2752,59 @@ impl Lowerer<'_> {
                 Some(hir::Expression::Cast {
                     expression: Box::new(self.lower_expression(expression, ExpressionMode::Value)?),
                     target: self.lower_type(target, call.span)?,
+                })
+            }
+            CallTarget::Intrinsic(Intrinsic::EnumFromInteger { structure }) => {
+                let symbol = self.semantics.structure(*structure)?;
+                Some(hir::Expression::AssociatedCall {
+                    rust_path: format!(
+                        "{}::__stainless_from_integer",
+                        user_type_path(&symbol.path)
+                    ),
+                    arguments: vec![
+                        self.lower_expression(arguments.first()?, ExpressionMode::Value)?,
+                    ],
+                })
+            }
+            CallTarget::Intrinsic(Intrinsic::EnumFromString { structure }) => {
+                let symbol = self.semantics.structure(*structure)?;
+                let string = TypeRef::shared_ref(TypeRef::native("rust::String", Vec::new()));
+                let value = self.lower_bound_expression(arguments.first()?, &string)?;
+                Some(hir::Expression::AssociatedCall {
+                    rust_path: format!("{}::__stainless_from_string", user_type_path(&symbol.path)),
+                    arguments: vec![hir::Expression::MethodCall {
+                        receiver: Box::new(value),
+                        rust_name: "as_str".to_owned(),
+                        receiver_mode: Receiver::Shared,
+                        arguments: Vec::new(),
+                    }],
+                })
+            }
+            CallTarget::Intrinsic(Intrinsic::EnumToString {
+                structure,
+                receiver,
+            }) => {
+                let symbol = self.semantics.structure(*structure)?;
+                let value = if *receiver {
+                    let Some(ast::Expression {
+                        kind: ExpressionKind::Field { receiver, .. },
+                        ..
+                    }) = callee
+                    else {
+                        self.push(
+                            "HIR011",
+                            "enum name call has no receiver".to_owned(),
+                            call.span,
+                        );
+                        return None;
+                    };
+                    self.lower_expression(receiver, ExpressionMode::Value)?
+                } else {
+                    self.lower_expression(arguments.first()?, ExpressionMode::Value)?
+                };
+                Some(hir::Expression::AssociatedCall {
+                    rust_path: format!("{}::__stainless_to_string", user_type_path(&symbol.path)),
+                    arguments: vec![value],
                 })
             }
             CallTarget::Intrinsic(Intrinsic::JsonCast { target }) => {

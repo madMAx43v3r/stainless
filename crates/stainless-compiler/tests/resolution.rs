@@ -237,8 +237,73 @@ enum Empty : u32 {};
 }
 
 #[test]
-fn integers_cannot_construct_enums() {
+fn enums_convert_to_and_from_integers_and_strings() {
     let analysis = analyze(
+        r#"use rust::String;
+
+enum State : u8 { Ready = 1, Done = 2, };
+
+State decode_integer(u16 value) throws stainless::EnumError {
+    return State(value);
+}
+
+State decode_name(const String& value) throws stainless::EnumError {
+    return State(value);
+}
+
+String encode_name(State value) {
+    return String(value);
+}
+
+String member_name(State value) {
+    return value.name();
+}
+"#,
+    );
+
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+    assert_eq!(
+        analysis
+            .semantics
+            .calls
+            .iter()
+            .filter(|call| matches!(
+                call.target,
+                CallTarget::Intrinsic(Intrinsic::EnumFromInteger { .. })
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        analysis
+            .semantics
+            .calls
+            .iter()
+            .filter(|call| matches!(
+                call.target,
+                CallTarget::Intrinsic(Intrinsic::EnumFromString { .. })
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        analysis
+            .semantics
+            .calls
+            .iter()
+            .filter(|call| matches!(
+                call.target,
+                CallTarget::Intrinsic(Intrinsic::EnumToString { .. })
+            ))
+            .count(),
+        2
+    );
+
+    let unchecked = analyze(
         r"enum State : u8 { Ready = 1, };
 
 State decode(u8 value) {
@@ -246,14 +311,14 @@ State decode(u8 value) {
 }
 ",
     );
-
     assert!(
-        analysis
+        unchecked
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("constructor")),
+            .any(|diagnostic| diagnostic.code == "RES075"
+                && diagnostic.message.contains("stainless::EnumError")),
         "{:#?}",
-        analysis.diagnostics
+        unchecked.diagnostics
     );
 }
 

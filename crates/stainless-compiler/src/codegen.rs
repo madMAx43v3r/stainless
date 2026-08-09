@@ -362,7 +362,7 @@ impl Emitter {
         variants: &[hir::StaticConstant],
     ) -> Result<TokenStream, String> {
         let representation = type_tokens(representation, None)?;
-        let variants = variants
+        let definitions = variants
             .iter()
             .map(|variant| {
                 let name = identifier(&variant.rust_name)?;
@@ -370,12 +370,86 @@ impl Emitter {
                 Ok(quote!(#name = #value))
             })
             .collect::<Result<Vec<_>, String>>()?;
+        let integer_arms = variants
+            .iter()
+            .map(|variant| {
+                let name = identifier(&variant.rust_name)?;
+                let value = literal(LiteralKind::Integer, &variant.value)?;
+                Ok(quote!(#value => Ok(Self::#name)))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let string_arms = variants
+            .iter()
+            .map(|variant| {
+                let name = identifier(&variant.rust_name)?;
+                let source_name = &variant.rust_name;
+                Ok(quote!(#source_name => Ok(Self::#name)))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let name_arms = variants
+            .iter()
+            .map(|variant| {
+                let name = identifier(&variant.rust_name)?;
+                let source_name = &variant.rust_name;
+                Ok(quote!(Self::#name => ::std::string::String::from(#source_name)))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         Ok(quote! {
             #[repr(#representation)]
             #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
             #[allow(non_snake_case)]
             pub enum #name {
-                #(#variants),*
+                #(#definitions),*
+            }
+
+            impl #name {
+                fn __stainless_enum_error(
+                    value: &dyn ::std::fmt::Display,
+                ) -> crate::__StainlessExceptionBox {
+                    Box::new(crate::__stainless_namespace_stainless::EnumError {
+                        __stainless_base_Exception:
+                            crate::__stainless_namespace_stainless::Exception {
+                                message: ::std::format!(
+                                    "invalid {} value `{}`",
+                                    ::core::stringify!(#name),
+                                    value,
+                                ),
+                            },
+                    }) as crate::__StainlessExceptionBox
+                }
+
+                pub(crate) fn __stainless_from_integer<T>(
+                    value: T,
+                ) -> ::std::result::Result<Self, crate::__StainlessExceptionBox>
+                where
+                    T: ::core::marker::Copy + ::std::fmt::Display,
+                    #representation: ::core::convert::TryFrom<T>,
+                {
+                    let converted: #representation =
+                        match <#representation as ::core::convert::TryFrom<T>>::try_from(value) {
+                            Ok(value) => value,
+                            Err(_) => return Err(Self::__stainless_enum_error(&value)),
+                        };
+                    match converted {
+                        #(#integer_arms),*,
+                        _ => Err(Self::__stainless_enum_error(&value)),
+                    }
+                }
+
+                pub(crate) fn __stainless_from_string(
+                    value: &str,
+                ) -> ::std::result::Result<Self, crate::__StainlessExceptionBox> {
+                    match value {
+                        #(#string_arms),*,
+                        _ => Err(Self::__stainless_enum_error(&value)),
+                    }
+                }
+
+                pub(crate) fn __stainless_to_string(value: Self) -> ::std::string::String {
+                    match value {
+                        #(#name_arms),*
+                    }
+                }
             }
         })
     }

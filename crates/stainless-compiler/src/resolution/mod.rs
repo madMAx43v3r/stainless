@@ -492,6 +492,23 @@ pub enum Intrinsic {
         /// Destination primitive type.
         target: TypeRef,
     },
+    /// Checked construction of an enum from an integer value.
+    EnumFromInteger {
+        /// Destination enum declaration.
+        structure: StructId,
+    },
+    /// Checked construction of an enum from its member name.
+    EnumFromString {
+        /// Destination enum declaration.
+        structure: StructId,
+    },
+    /// Convert an enum value to its member name.
+    EnumToString {
+        /// Source enum declaration.
+        structure: StructId,
+        /// Whether the source value is the receiver of `.name()`.
+        receiver: bool,
+    },
     /// Convert a JSON `var` through its JavaScript-compatible scalar rules.
     JsonCast {
         /// Destination primitive or `rust::String` type.

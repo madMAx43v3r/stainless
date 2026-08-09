@@ -196,6 +196,7 @@ impl Resolver<'_> {
         self.install_exception_builtin(root, "IoError");
         self.install_exception_builtin(root, "FormatError");
         self.install_exception_builtin(root, "JsonError");
+        self.install_exception_builtin(root, "EnumError");
         self.install_exception_builtin(root, "ThreadError");
     }
 
@@ -2982,6 +2983,17 @@ impl Resolver<'_> {
             .expect("installing exception builtins creates JsonError")
     }
 
+    fn enum_error_struct(&mut self) -> StructId {
+        if self.exception_root().is_none() {
+            self.install_exception_builtins();
+        }
+        let path = vec!["stainless".to_owned(), "EnumError".to_owned()];
+        self.struct_by_path
+            .get(&path)
+            .copied()
+            .expect("installing exception builtins creates EnumError")
+    }
+
     fn thread_error_struct(&mut self) -> StructId {
         if self.exception_root().is_none() {
             self.install_exception_builtins();
@@ -5569,6 +5581,11 @@ impl Resolver<'_> {
                 let Some(structure) = self.struct_by_path.get(path).copied() else {
                     return (error_info(), None);
                 };
+                if self.model.structs[structure.0].enum_repr.is_some()
+                    && matches!(name.segments.as_slice(), [method] if method == "name")
+                {
+                    return self.resolve_enum_name(structure, arguments, span, context);
+                }
                 let mut pointee_receiver = receiver_info.clone();
                 pointee_receiver.category =
                     pointee_category(&receiver_info.ty, receiver_info.category);
@@ -5669,6 +5686,40 @@ impl Resolver<'_> {
                 (error_info(), None)
             }
         }
+    }
+
+    fn resolve_enum_name(
+        &mut self,
+        structure: StructId,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        for argument in arguments {
+            self.resolve_expression(argument, None, context);
+        }
+        if !arguments.is_empty() {
+            self.push(
+                "RES132",
+                format!(
+                    "enum `{}::name()` does not accept arguments",
+                    display_path(&self.model.structs[structure.0].path)
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+        let return_type = TypeRef::native("rust::String", Vec::new());
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::EnumToString {
+                structure,
+                receiver: true,
+            }),
+            return_type: return_type.clone(),
+            throws: Vec::new(),
+        };
+        (temporary(return_type), Some(call))
     }
 
     fn resolve_array_method(
@@ -7606,6 +7657,15 @@ impl Resolver<'_> {
         context: &mut FunctionContext,
     ) -> (ExpressionInfo, Option<ResolvedCall>) {
         let structure_symbol = self.model.structs[structure.0].clone();
+        if structure_symbol.enum_repr.is_some() {
+            return self.resolve_enum_constructor(
+                structure,
+                structure_type,
+                arguments,
+                span,
+                context,
+            );
+        }
         if structure_symbol.kind == ast::UserTypeKind::Interface {
             for argument in arguments {
                 self.resolve_expression(argument, None, context);
@@ -7843,6 +7903,70 @@ impl Resolver<'_> {
             throws: symbol.throws,
         };
         (temporary(return_type), Some(call))
+    }
+
+    fn resolve_enum_constructor(
+        &mut self,
+        structure: StructId,
+        structure_type: TypeRef,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        if arguments.len() != 1 {
+            for argument in arguments {
+                self.resolve_expression(argument, None, context);
+            }
+            self.push(
+                "RES132",
+                format!(
+                    "enum `{}` conversion requires exactly one integer, String, or enum value",
+                    display_path(&self.model.structs[structure.0].path)
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+
+        let argument = self.resolve_expression(&arguments[0], None, context);
+        if canonical(&argument.ty) == canonical(&structure_type) {
+            let call = ResolvedCall {
+                span,
+                target: CallTarget::Intrinsic(Intrinsic::ValueInitialization {
+                    target: structure_type.clone(),
+                }),
+                return_type: structure_type.clone(),
+                throws: Vec::new(),
+            };
+            return (temporary(structure_type), Some(call));
+        }
+
+        let intrinsic = if is_integer(canonical_ref(&argument.ty)) {
+            Intrinsic::EnumFromInteger { structure }
+        } else if is_string_type(&argument.ty) {
+            Intrinsic::EnumFromString { structure }
+        } else {
+            self.push(
+                "RES132",
+                format!(
+                    "enum `{}` can only be constructed from an integer or String, found `{}`",
+                    display_path(&self.model.structs[structure.0].path),
+                    display_type(&argument.ty)
+                ),
+                arguments[0].span,
+            );
+            return (error_info(), None);
+        };
+
+        let exception = self.enum_error_struct();
+        self.validate_checked_effect(exception, span, context);
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(intrinsic),
+            return_type: structure_type.clone(),
+            throws: vec![exception],
+        };
+        (temporary(structure_type), Some(call))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -8140,6 +8264,24 @@ impl Resolver<'_> {
                 span,
                 target: CallTarget::Intrinsic(Intrinsic::JsonCast {
                     target: target.clone(),
+                }),
+                return_type: target.clone(),
+                throws: Vec::new(),
+            };
+            return (temporary(target), Some(call));
+        }
+        if instance.type_path == "rust::String"
+            && style == CallStyle::Constructor
+            && name == "String"
+            && actual.len() == 1
+            && let Some(structure) = self.enum_structure(&actual[0].ty)
+        {
+            let target = TypeRef::native("rust::String", Vec::new());
+            let call = ResolvedCall {
+                span,
+                target: CallTarget::Intrinsic(Intrinsic::EnumToString {
+                    structure,
+                    receiver: false,
                 }),
                 return_type: target.clone(),
                 throws: Vec::new(),
@@ -8475,11 +8617,19 @@ impl Resolver<'_> {
     }
 
     fn enum_representation(&self, ty: &TypeRef) -> Option<&TypeRef> {
+        let structure = self.enum_structure(ty)?;
+        self.model.structs[structure.0].enum_repr.as_ref()
+    }
+
+    fn enum_structure(&self, ty: &TypeRef) -> Option<StructId> {
         let TypeRef::Struct { path, .. } = canonical_ref(ty) else {
             return None;
         };
-        let structure = self.struct_by_path.get(path)?;
-        self.model.structs[structure.0].enum_repr.as_ref()
+        let structure = self.struct_by_path.get(path).copied()?;
+        self.model.structs[structure.0]
+            .enum_repr
+            .as_ref()
+            .map(|_| structure)
     }
 
     fn is_interface_owner_binding(&self, expected: &TypeRef, actual: &TypeRef) -> bool {
@@ -11075,6 +11225,14 @@ fn is_integer(ty: &TypeRef) -> bool {
     )
 }
 
+fn is_string_type(ty: &TypeRef) -> bool {
+    match canonical_ref(ty) {
+        TypeRef::Native { path, arguments } => path == "rust::String" && arguments.is_empty(),
+        TypeRef::Reference { target, .. } => is_string_type(target),
+        _ => false,
+    }
+}
+
 fn is_non_narrowing_same_signed_integer(source: &TypeRef, target: &TypeRef) -> bool {
     let Some((source_signed, source_bits)) = fixed_width_integer_layout(source) else {
         return false;
@@ -11790,6 +11948,7 @@ fn source_uses_exceptions(source: &SourceFile) -> bool {
                                                     | "IoError"
                                                     | "FormatError"
                                                     | "JsonError"
+                                                    | "EnumError"
                                                     | "ThreadError"
                                             )
                                 )
@@ -11812,7 +11971,8 @@ fn source_uses_exceptions(source: &SourceFile) -> bool {
                 !function.throws.is_empty()
                     || function.body.as_ref().is_some_and(block_uses_exceptions)
             }
-            Item::Enum(_) | Item::Use(_) => false,
+            Item::Enum(_) => true,
+            Item::Use(_) => false,
         })
     }
 

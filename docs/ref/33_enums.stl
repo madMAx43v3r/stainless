@@ -1,3 +1,5 @@
+use rust::String;
+
 namespace samples {
 
 enum RecordKind : u8 {
@@ -14,6 +16,26 @@ u32 preserve_encoding(u32 value)
 u32 encode_kind(RecordKind kind)
 {
     return preserve_encoding(kind);
+}
+
+RecordKind decode_kind(u32 value) throws stainless::EnumError
+{
+    return RecordKind(value);
+}
+
+RecordKind decode_kind_name(const String& name) throws stainless::EnumError
+{
+    return RecordKind(name);
+}
+
+String kind_name(RecordKind kind)
+{
+    return kind.name();
+}
+
+String kind_name_explicit(RecordKind kind)
+{
+    return String(kind);
 }
 
 u32 kind_weight(RecordKind kind)

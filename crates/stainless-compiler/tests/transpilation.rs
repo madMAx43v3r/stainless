@@ -135,6 +135,95 @@ fn scoped_enums_lower_to_repr_enums_and_enum_patterns() {
 }
 
 #[test]
+fn enum_conversion_wrappers_validate_integers_and_names() {
+    let source = r#"use rust::String;
+
+enum State : u8 {
+    Ready = 1,
+    Done = 2,
+};
+
+bool valid_conversions()
+{
+    try {
+        State ready = State(1);
+        String done_name = "Done";
+        State done = State(done_name);
+        return ready == State::Ready &&
+            done == State::Done &&
+            done_name == "Done" &&
+            String(ready) == "Ready" &&
+            done.name() == "Done";
+    } catch (const stainless::EnumError& _error) {
+        return false;
+    }
+}
+
+bool invalid_integer_fails()
+{
+    try {
+        State invalid = State(300);
+        return invalid == State::Ready;
+    } catch (const stainless::EnumError& _error) {
+        return true;
+    }
+}
+
+bool invalid_name_fails()
+{
+    try {
+        State invalid = State("Missing");
+        return invalid == State::Ready;
+    } catch (const stainless::EnumError& _error) {
+        return true;
+    }
+}
+"#;
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let function_name = |source_name: &str| {
+        result
+            .analysis
+            .semantics
+            .functions
+            .iter()
+            .find(|function| function.path == [source_name])
+            .unwrap_or_else(|| panic!("missing `{source_name}` function"))
+            .mangled_name
+            .clone()
+    };
+    let valid = function_name("valid_conversions");
+    let invalid_integer = function_name("invalid_integer_fails");
+    let invalid_name = function_name("invalid_name_fails");
+    let mut rust = result.rust.expect("enum conversions should emit Rust");
+    assert!(rust.contains("__stainless_from_integer"), "{rust}");
+    assert!(rust.contains("__stainless_from_string"), "{rust}");
+    assert!(rust.contains("__stainless_to_string"), "{rust}");
+    assert!(rust.contains("EnumError"), "{rust}");
+    write!(
+        rust,
+        "\nfn main() {{ assert!({valid}()); assert!({invalid_integer}()); assert!({invalid_name}()); }}\n"
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("enum-conversions", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .expect("generated enum conversion program should run");
+    assert!(
+        output.status.success(),
+        "status: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    remove_temporary_parent(&binary);
+}
+
+#[test]
 fn while_statements_lower_to_labeled_rust_loops() {
     let source = include_str!("../../../docs/ref/31_while.stl");
     let result = transpile(source);

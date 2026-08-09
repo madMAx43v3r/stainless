@@ -193,7 +193,8 @@ implemented:
   indexing, methods, and range iteration.
 - [`33_enums.stl`](docs/ref/33_enums.stl) — scoped, explicitly valued enums,
   fixed-width unsigned representations, enum switch patterns, and implicit
-  same-signed widening integer conversion.
+  same-signed widening integer conversion, plus checked integer/String parsing
+  and generated member names.
 
 `01_basics.stl`, `02_structs_and_data_inheritance.stl`,
 `11_vec_and_string.stl`, `13_range_for.stl`, and `14_constructors.stl` are
@@ -526,6 +527,10 @@ enum RecordKind : u8 {
 RecordKind kind = RecordKind::Insert;
 u8 encoded = kind;
 u32 widened = kind;
+RecordKind decoded = RecordKind(encoded);       // throws stainless::EnumError
+RecordKind named = RecordKind("Insert");         // throws stainless::EnumError
+String name = kind.name();                      // "Insert"
+String same_name = String(kind);                // "Insert"
 ```
 
 The representation must be `u8`, `u16`, `u32`, or `u64`. Member names and
@@ -537,8 +542,10 @@ to any signed integer. Narrowing and platform-sized `usize`/`isize`
 conversions are also rejected. The compiler inserts the corresponding Rust
 `as` cast when an integer binding, return, or argument requires it. These
 conversions never select between competing overloads. Integer-to-enum
-construction is not currently supported because an arbitrary integer may not
-name a valid member.
+and String-to-enum construction use compiler-generated checked wrappers. An
+integer must equal a declared discriminant and a String must equal a member
+name; otherwise the wrapper throws `stainless::EnumError`. `String(value)` and
+`value.name()` both return the declared member name and cannot throw.
 
 Enums lower to Rust `#[repr(...)] enum` declarations and have copy value
 semantics. They cannot contain fields, functions, constructors, generic
@@ -1606,6 +1613,12 @@ namespace stainless {
     struct FormatError : Exception {
     };
 
+    struct JsonError : Exception {
+    };
+
+    struct EnumError : Exception {
+    };
+
     struct ThreadError : Exception {
     };
 }
@@ -1626,6 +1639,11 @@ operations. Its inherited `message` contains Rust's human-readable
 `write!` and `writeln!`. Its message is obtained from Rust's
 `std::fmt::Error`. Like every checked exception, it must be caught or listed in
 the enclosing function's `throws` clause.
+
+`stainless::EnumError` is produced by checked enum construction when an
+integer does not equal a declared discriminant or a String does not equal a
+declared member name. The inherited message identifies the enum and rejected
+value.
 
 `stainless::ThreadError` is produced when an owned thread fails during
 `join()`, or when a panic escapes a lexical `thread::scope`. String and
@@ -3280,7 +3298,7 @@ The initial `stainless_compiler::resolution` pass now provides:
   diagnostics;
 - exact enum-member typing, fixed-width unsigned representation validation,
   implicit same-signed non-narrowing integer conversion, and enum-member switch
-  patterns;
+  patterns; checked integer/String construction through `stainless::EnumError`;
 - single data inheritance for structs; interface inheritance and exact
   implementation-contract validation; move-only, non-assignable class values;
   static interface implementations for structs and classes; dynamic interface

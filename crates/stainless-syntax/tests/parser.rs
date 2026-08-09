@@ -80,7 +80,7 @@ fn parses_scoped_enums_and_enum_switch_patterns_losslessly() {
     assert_eq!(enumeration.variants().count(), 3);
     assert_eq!(count_kind(&parsed.syntax(), SyntaxKind::EnumDefinition), 1);
     assert_eq!(count_kind(&parsed.syntax(), SyntaxKind::EnumVariant), 3);
-    assert_eq!(count_kind(&parsed.syntax(), SyntaxKind::NameExpression), 7);
+    assert_eq!(count_kind(&parsed.syntax(), SyntaxKind::NameExpression), 14);
 }
 
 #[test]

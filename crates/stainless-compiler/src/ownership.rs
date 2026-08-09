@@ -1166,6 +1166,7 @@ impl Analyzer<'_> {
             }
             CallTarget::Intrinsic(
                 Intrinsic::PrimitiveCast { .. }
+                | Intrinsic::EnumFromInteger { .. }
                 | Intrinsic::JsonCast { .. }
                 | Intrinsic::JsonWrap
                 | Intrinsic::ExceptionRoot { .. }
@@ -1173,6 +1174,26 @@ impl Analyzer<'_> {
             ) => {
                 if let Some(argument) = arguments.first() {
                     self.expression(argument, Usage::Read);
+                }
+                None
+            }
+            CallTarget::Intrinsic(Intrinsic::EnumFromString { .. }) => {
+                if let Some(argument) = arguments.first() {
+                    let origin = self.expression(argument, Usage::BorrowShared);
+                    if let Some(loan) = self.acquire_temporary_loan(origin, false, argument.span) {
+                        self.state.release(loan);
+                    }
+                }
+                None
+            }
+            CallTarget::Intrinsic(Intrinsic::EnumToString { receiver, .. }) => {
+                let value = if *receiver {
+                    call_receiver(expression)
+                } else {
+                    arguments.first()
+                };
+                if let Some(value) = value {
+                    self.expression(value, Usage::Read);
                 }
                 None
             }
