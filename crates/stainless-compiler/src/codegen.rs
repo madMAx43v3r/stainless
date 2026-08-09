@@ -1575,6 +1575,48 @@ impl Emitter {
                 error_message,
                 target,
             } => self.unwrap_rust_result(expression, *exception, *error_message, target),
+            hir::Expression::OptionalValue {
+                optional,
+                mutable,
+                checked,
+            } => {
+                let optional = self.expression(optional)?;
+                let borrow = if *mutable {
+                    quote!((#optional).as_mut())
+                } else {
+                    quote!((#optional).as_ref())
+                };
+                let value = self.temporary("optional_value")?;
+                if *checked {
+                    Ok(quote! {
+                        match #borrow {
+                            ::core::option::Option::Some(#value) =>
+                                ::core::result::Result::Ok(#value),
+                            ::core::option::Option::None =>
+                                ::core::result::Result::Err(
+                                    Box::new(
+                                        crate::__stainless_namespace_stainless::OptionalError {
+                                            __stainless_base_Exception:
+                                                crate::__stainless_namespace_stainless::Exception {
+                                                    message: ::std::string::String::from(
+                                                        "optional has no value",
+                                                    ),
+                                                },
+                                        },
+                                    ) as crate::__StainlessExceptionBox,
+                                ),
+                        }
+                    })
+                } else {
+                    Ok(quote! {
+                        match #borrow {
+                            ::core::option::Option::Some(#value) => #value,
+                            ::core::option::Option::None =>
+                                ::core::unreachable!("proven non-empty optional was empty"),
+                        }
+                    })
+                }
+            }
             hir::Expression::Success(value) => {
                 let value = value
                     .as_deref()

@@ -494,6 +494,15 @@ pub enum Intrinsic {
     },
     /// Convert an optional value to whether it contains a value.
     OptionalToBool,
+    /// Borrow the contained optional value or produce checked `OptionalError`.
+    OptionalValue {
+        /// Contained value type.
+        target: TypeRef,
+        /// Whether the returned reference permits mutation.
+        mutable: bool,
+        /// Whether an empty receiver remains possible at this program point.
+        checked: bool,
+    },
     /// Checked construction of an enum from an integer value.
     EnumFromInteger {
         /// Destination enum declaration.

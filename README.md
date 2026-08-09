@@ -243,9 +243,11 @@ constructs with direct Rust equivalents:
   runtime, with checked parsing/mutation and reference-counted object/array
   identity;
 - built-in `optional<T>` values with empty and value construction,
-  `has_value()`, `value_or()`, and `clone()`; these lower to Rust `Option<T>`
-  and convert to `bool` through `is_some()` explicitly with `bool(value)` or
-  contextually in conditions, `!`, `&&`, and `||`; a `T` binds implicitly to
+  `has_value()`, `value()`, `value_or()`, and `clone()`; these lower to Rust
+  `Option<T>` and convert to `bool` through `is_some()` explicitly with
+  `bool(value)` or contextually in conditions, `!`, `&&`, and `||`; `value()`
+  returns a reference and throws checked `stainless::OptionalError` unless
+  flow analysis proves the value is present; a `T` binds implicitly to
   `optional<T>` as `Some(value)` without participating in overload selection;
 - direct use of safe Rust `core`, `alloc`, and `std` APIs plus generated,
   compile-checked wrappers for external Cargo dependencies, all reached through
@@ -1622,6 +1624,9 @@ namespace stainless {
     struct EnumError : Exception {
     };
 
+    struct OptionalError : Exception {
+    };
+
     struct ThreadError : Exception {
     };
 }
@@ -1647,6 +1652,14 @@ the enclosing function's `throws` clause.
 integer does not equal a declared discriminant or a String does not equal a
 declared member name. The inherited message identifies the enum and rejected
 value.
+
+`stainless::OptionalError` is produced by `optional<T>.value()` when the value
+is empty. A mutable optional returns `T&`; a const or shared optional returns
+`const T&`. The checked effect is omitted when flow analysis proves the named
+receiver is populated, including after value construction or assignment, in a
+successful `value()` continuation, and inside a true `optional`,
+`bool(optional)`, or `has_value()` guard. Assignments and branch merges update
+or discard that fact conservatively.
 
 `stainless::ThreadError` is produced when an owned thread fails during
 `join()`, or when a panic escapes a lexical `thread::scope`. String and
@@ -1943,6 +1956,27 @@ Stainless rejects a pointer or synchronized pointer-slot type as its direct
 `T`. Pointer nullability must use `unique_nullptr<T>` or
 `shared_nullptr<T>`, preserving the ownership-specific refinement and
 conversion rules instead of allowing both representations.
+
+`optional<T>.value()` borrows the contained value rather than copying it. It
+returns `T&` for a mutable receiver and `const T&` for a shared receiver. If
+the receiver might be empty, the call throws checked
+`stainless::OptionalError`; ordinary catch-or-feed-forward rules apply. A
+non-empty guard removes that checked effect:
+
+```cpp
+u32 read(optional<u32>& value) throws stainless::OptionalError
+{
+    return value.value();
+}
+
+u32 read_if_present(optional<u32>& value)
+{
+    if (!value) {
+        return 0;
+    }
+    return value.value(); // proven present; no throws clause required
+}
+```
 
 Allocation uses `make_unique<T>(...)`, `make_shared<T>(...)`, or their brace
 forms. There is no owning `new`, `delete`, placement allocation, or dynamically

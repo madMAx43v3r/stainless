@@ -109,6 +109,139 @@ u32 call(u32 value) { return select(value); }
 }
 
 #[test]
+fn optional_value_returns_a_reference_and_uses_flow_sensitive_checked_effects() {
+    let analysis = analyze(
+        r"u32 guarded(optional<u32>& value) {
+    if (!value) {
+        return 0;
+    }
+    u32& reference = value.value();
+    reference += 1;
+    return reference;
+}
+
+u32 guarded_with_has_value(const optional<u32>& value) {
+    if (value.has_value()) {
+        return value.value();
+    }
+    return 0;
+}
+
+u32 populated() {
+    optional<u32> value = 4;
+    return value.value();
+}
+
+u32 checked(optional<u32>& value) throws stainless::OptionalError {
+    return value.value();
+}
+",
+    );
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+
+    let accesses = analysis
+        .semantics
+        .calls
+        .iter()
+        .filter_map(|call| match &call.target {
+            CallTarget::Intrinsic(Intrinsic::OptionalValue {
+                mutable, checked, ..
+            }) => Some((*mutable, *checked, call.throws.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(accesses.len(), 4, "{accesses:#?}");
+    assert_eq!(
+        accesses.iter().filter(|(_, checked, _)| *checked).count(),
+        1
+    );
+    assert!(
+        accesses
+            .iter()
+            .filter(|(_, checked, _)| !checked)
+            .all(|(_, _, throws)| throws.is_empty())
+    );
+    assert!(
+        accesses
+            .iter()
+            .any(|(mutable, checked, throws)| { *mutable && *checked && throws.len() == 1 })
+    );
+}
+
+#[test]
+fn optional_value_requires_a_checked_effect_when_presence_is_unknown() {
+    let unchecked = analyze(
+        r"void reset(optional<u32>& value) {
+    value = optional<u32>();
+}
+
+u32 invalid(optional<u32>& value) {
+    return value.value();
+}
+
+u32 invalid_after_reset() {
+    optional<u32> value = 1;
+    reset(value);
+    return value.value();
+}
+",
+    );
+    assert!(
+        unchecked
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.code == "RES075"
+                    && diagnostic.message.contains("stainless::OptionalError")
+            })
+            .count()
+            >= 2,
+        "{:#?}",
+        unchecked.diagnostics
+    );
+
+    let temporary = analyze(
+        r"const u32& invalid() throws stainless::OptionalError {
+    return optional<u32>(1).value();
+}
+",
+    );
+    assert!(
+        temporary
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "RES133"),
+        "{:#?}",
+        temporary.diagnostics
+    );
+}
+
+#[test]
+fn optional_value_reference_keeps_the_optional_borrowed() {
+    let analysis = analyze(
+        r"u32 invalid() {
+    optional<u32> value = 1;
+    u32& reference = value.value();
+    value = 2;
+    return reference;
+}
+",
+    );
+    assert!(
+        analysis
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "OWN003"),
+        "{:#?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
 fn positive_integer_literals_default_to_u32_and_infer_from_context() {
     let analysis = analyze(
         r"void literals() {

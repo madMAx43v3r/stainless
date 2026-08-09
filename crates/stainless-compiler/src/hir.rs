@@ -788,6 +788,15 @@ pub enum Expression {
         /// Active checked boundary.
         target: ExceptionTarget,
     },
+    /// Borrow an optional value through a checked `as_ref()` or `as_mut()`.
+    OptionalValue {
+        /// Optional receiver expression.
+        optional: Box<Expression>,
+        /// Whether to borrow the contained value mutably.
+        mutable: bool,
+        /// Whether this operation returns a checked result for an empty value.
+        checked: bool,
+    },
     /// Convert a normal return value into `Ok`.
     Success(Option<Box<Expression>>),
     /// Extract a successful checked call or propagate its erased error.

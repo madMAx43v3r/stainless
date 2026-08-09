@@ -1164,6 +1164,18 @@ impl Analyzer<'_> {
                 self.call_arguments(arguments, function.parameters.iter());
                 None
             }
+            CallTarget::Intrinsic(Intrinsic::OptionalValue { mutable, .. }) => {
+                call_receiver(expression).and_then(|receiver| {
+                    self.expression(
+                        receiver,
+                        if *mutable {
+                            Usage::BorrowMutable
+                        } else {
+                            Usage::BorrowShared
+                        },
+                    )
+                })
+            }
             CallTarget::Intrinsic(
                 Intrinsic::PrimitiveCast { .. }
                 | Intrinsic::OptionalToBool

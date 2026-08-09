@@ -47,6 +47,7 @@ pub(crate) fn lower(
                             | "FormatError"
                             | "JsonError"
                             | "EnumError"
+                            | "OptionalError"
                             | "ThreadError"
                     )
         )
@@ -2792,6 +2793,27 @@ impl Lowerer<'_> {
                     rust_name: "is_some".to_owned(),
                     receiver_mode: Receiver::Shared,
                     arguments: Vec::new(),
+                })
+            }
+            CallTarget::Intrinsic(Intrinsic::OptionalValue {
+                mutable, checked, ..
+            }) => {
+                let Some(ast::Expression {
+                    kind: ExpressionKind::Field { receiver, .. },
+                    ..
+                }) = callee
+                else {
+                    self.push(
+                        "HIR011",
+                        "optional value access has no receiver".to_owned(),
+                        call.span,
+                    );
+                    return None;
+                };
+                Some(hir::Expression::OptionalValue {
+                    optional: Box::new(self.lower_expression(receiver, ExpressionMode::Reference)?),
+                    mutable: *mutable,
+                    checked: *checked,
                 })
             }
             CallTarget::Intrinsic(Intrinsic::EnumFromInteger { structure }) => {

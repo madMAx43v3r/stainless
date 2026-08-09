@@ -84,6 +84,21 @@ i32 copied_and_moved_map_entries()
     return total;
 }
 
+i32 mutate_optional(optional<i32>& value)
+{
+    if (!value) {
+        return 0;
+    }
+    i32& item = value.value();
+    item += 1;
+    return item;
+}
+
+i32 require_optional(optional<i32>& value) throws stainless::OptionalError
+{
+    return value.value();
+}
+
 i32 ordered_map_ranges()
 {
     Map<i32, i32> values;

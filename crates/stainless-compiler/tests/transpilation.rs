@@ -321,6 +321,62 @@ bool optional_value_conversion()
 }
 
 #[test]
+fn optional_value_borrows_and_throws_optional_error_when_empty() {
+    let source = r#"u32 mutate_present()
+{
+    optional<u32> value = 4;
+    u32& reference = value.value();
+    reference += 3;
+    return value.value();
+}
+
+bool empty_throws()
+{
+    optional<u32> value;
+    try {
+        const u32& reference = value.value();
+        return reference == 0;
+    } catch (const stainless::OptionalError& error) {
+        return error.message == "optional has no value";
+    }
+}
+"#;
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let function_name = |name: &str| {
+        result
+            .analysis
+            .semantics
+            .functions
+            .iter()
+            .find(|function| function.path == [name])
+            .unwrap_or_else(|| panic!("missing `{name}` function"))
+            .mangled_name
+            .clone()
+    };
+    let mutate_present = function_name("mutate_present");
+    let empty_throws = function_name("empty_throws");
+    let mut rust = result.rust.expect("optional value access should emit Rust");
+    assert!(rust.contains("OptionalError"), "{rust}");
+    assert!(rust.contains("optional has no value"), "{rust}");
+    write!(
+        rust,
+        "\nfn main() {{ assert_eq!({mutate_present}(), 7); assert!({empty_throws}()); }}\n"
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("optional-value", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .expect("generated optional value program should run");
+    assert!(output.status.success(), "{output:?}");
+    remove_temporary_parent(&binary);
+}
+
+#[test]
 fn while_statements_lower_to_labeled_rust_loops() {
     let source = include_str!("../../../docs/ref/31_while.stl");
     let result = transpile(source);

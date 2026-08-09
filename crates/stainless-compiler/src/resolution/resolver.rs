@@ -197,6 +197,7 @@ impl Resolver<'_> {
         self.install_exception_builtin(root, "FormatError");
         self.install_exception_builtin(root, "JsonError");
         self.install_exception_builtin(root, "EnumError");
+        self.install_exception_builtin(root, "OptionalError");
         self.install_exception_builtin(root, "ThreadError");
     }
 
@@ -2997,6 +2998,17 @@ impl Resolver<'_> {
             .expect("installing exception builtins creates EnumError")
     }
 
+    fn optional_error_struct(&mut self) -> StructId {
+        if self.exception_root().is_none() {
+            self.install_exception_builtins();
+        }
+        let path = vec!["stainless".to_owned(), "OptionalError".to_owned()];
+        self.struct_by_path
+            .get(&path)
+            .copied()
+            .expect("installing exception builtins creates OptionalError")
+    }
+
     fn thread_error_struct(&mut self) -> StructId {
         if self.exception_root().is_none() {
             self.install_exception_builtins();
@@ -3061,7 +3073,7 @@ impl Resolver<'_> {
 
         let null_state = local.initializer.as_ref().map_or_else(
             || default_constructed_null_state(&resolved_type),
-            |initializer| self.expression_null_state(initializer, context),
+            |initializer| self.binding_null_state(&resolved_type, initializer, context),
         );
         let variable = Variable {
             mutable: if resolved_type.is_reference() {
@@ -3114,22 +3126,83 @@ impl Resolver<'_> {
                 match intrinsic {
                     Some(Intrinsic::PointerDefault { .. }) => NullState::Null,
                     Some(Intrinsic::MakeOwner { .. }) => NullState::NonNull,
-                    Some(
-                        Intrinsic::Move
-                        | Intrinsic::ValueInitialization { .. }
-                        | Intrinsic::PointerConversion { .. },
-                    ) => arguments.first().map_or(NullState::Unknown, |argument| {
-                        self.expression_null_state(argument, context)
-                    }),
+                    Some(Intrinsic::ValueInitialization { target })
+                        if optional_value_type(target).is_some() =>
+                    {
+                        arguments.first().map_or(NullState::Null, |argument| {
+                            let argument_type = self
+                                .model
+                                .expression(argument.span)
+                                .map(|resolution| canonical(&resolution.ty));
+                            if argument_type.as_ref() == Some(&canonical(target)) {
+                                self.expression_null_state(argument, context)
+                            } else {
+                                NullState::NonNull
+                            }
+                        })
+                    }
+                    Some(Intrinsic::Move | Intrinsic::PointerConversion { .. }) => {
+                        arguments.first().map_or(NullState::Unknown, |argument| {
+                            self.expression_null_state(argument, context)
+                        })
+                    }
                     Some(Intrinsic::LockWeak { .. } | Intrinsic::AtomicLoad { .. }) => {
                         NullState::Unknown
                     }
-                    _ => self
-                        .model
-                        .expression(expression.span)
-                        .map_or(NullState::Unknown, |resolution| {
-                            initial_null_state(&resolution.ty)
-                        }),
+                    _ => {
+                        let call = self
+                            .model
+                            .expression(expression.span)
+                            .and_then(|resolution| resolution.call.as_ref());
+                        if call.is_some_and(|call| {
+                            matches!(
+                                &call.target,
+                                CallTarget::Native(native)
+                                    if native.type_path == "rust::Option"
+                                        && native.style == CallStyle::Constructor
+                                        && native.parameter_types.is_empty()
+                            )
+                        }) {
+                            NullState::Null
+                        } else if call.is_some_and(|call| {
+                            matches!(
+                                &call.target,
+                                CallTarget::Native(native)
+                                    if native.type_path == "rust::Option"
+                                        && native.style == CallStyle::Constructor
+                                        && native.parameter_types.len() == 1
+                            )
+                        }) {
+                            NullState::NonNull
+                        } else if call.is_some_and(|call| {
+                            matches!(
+                                &call.target,
+                                CallTarget::Native(native)
+                                    if native.type_path == "rust::Option"
+                                        && native.style == CallStyle::Method
+                                        && native.source_name == "clone"
+                            )
+                        }) {
+                            let receiver = match &expression.kind {
+                                ExpressionKind::Call { callee, .. } => match &callee.kind {
+                                    ExpressionKind::Field { receiver, .. } => {
+                                        Some(receiver.as_ref())
+                                    }
+                                    _ => None,
+                                },
+                                _ => None,
+                            };
+                            receiver.map_or(NullState::Unknown, |receiver| {
+                                self.expression_null_state(receiver, context)
+                            })
+                        } else {
+                            self.model
+                                .expression(expression.span)
+                                .map_or(NullState::Unknown, |resolution| {
+                                    initial_null_state(&resolution.ty)
+                                })
+                        }
+                    }
                 }
             }
             _ => self
@@ -3138,6 +3211,43 @@ impl Resolver<'_> {
                 .map_or(NullState::Unknown, |resolution| {
                     initial_null_state(&resolution.ty)
                 }),
+        }
+    }
+
+    fn binding_null_state(
+        &self,
+        expected: &TypeRef,
+        expression: &Expression,
+        context: &FunctionContext,
+    ) -> NullState {
+        let Some(value_type) = optional_value_type(expected) else {
+            return self.expression_null_state(expression, context);
+        };
+        let Some(actual) = self.model.expression(expression.span) else {
+            return NullState::Unknown;
+        };
+        if canonical_ref(&actual.ty) == canonical_ref(value_type) {
+            NullState::NonNull
+        } else if canonical_ref(&actual.ty) == canonical_ref(expected) {
+            self.expression_null_state(expression, context)
+        } else {
+            NullState::Unknown
+        }
+    }
+
+    fn invalidate_mutable_optional_argument(
+        expected: &TypeRef,
+        expression: &Expression,
+        context: &mut FunctionContext,
+    ) {
+        if matches!(
+            expected,
+            TypeRef::Reference {
+                mutable: true,
+                target,
+            } if is_optional_test(target)
+        ) {
+            set_expression_null_state(expression, NullState::Unknown, context);
         }
     }
 
@@ -3189,6 +3299,35 @@ impl Resolver<'_> {
             } if !truth => {
                 Self::refine_null_condition(left, false, context);
                 Self::refine_null_condition(right, false, context);
+            }
+            ExpressionKind::Call { callee, arguments }
+                if arguments.is_empty()
+                    && matches!(
+                        &callee.kind,
+                        ExpressionKind::Field { name, .. }
+                            if name.segments.as_slice() == ["has_value"]
+                    ) =>
+            {
+                let ExpressionKind::Field { receiver, .. } = &callee.kind else {
+                    unreachable!("optional has_value syntax was matched")
+                };
+                set_expression_null_state(
+                    receiver,
+                    if truth {
+                        NullState::NonNull
+                    } else {
+                        NullState::Null
+                    },
+                    context,
+                );
+            }
+            ExpressionKind::Call { callee, arguments }
+                if matches!(
+                    &callee.kind,
+                    ExpressionKind::Name(path) if path.segments.as_slice() == ["bool"]
+                ) && arguments.len() == 1 =>
+            {
+                Self::refine_null_condition(&arguments[0], truth, context);
             }
             ExpressionKind::Name(_) => set_expression_null_state(
                 expression,
@@ -4931,7 +5070,7 @@ impl Resolver<'_> {
                     let json_error = self.json_error_struct();
                     self.validate_checked_effect(json_error, left.span, context);
                 }
-                let null_state = self.expression_null_state(right, context);
+                let null_state = self.binding_null_state(&left_type, right, context);
                 set_expression_null_state(left, null_state, context);
             } else {
                 self.require_exact(&left_type, &right_info.ty, right.span, "assignment");
@@ -5654,6 +5793,19 @@ impl Resolver<'_> {
                 path,
                 arguments: type_arguments,
             } if name.segments.len() == 1 => {
+                if path == "rust::Option" && name.segments[0] == "value" {
+                    let [target] = type_arguments.as_slice() else {
+                        return (error_info(), None);
+                    };
+                    return self.resolve_optional_value_method(
+                        receiver,
+                        target,
+                        receiver_info,
+                        arguments,
+                        span,
+                        context,
+                    );
+                }
                 if path == "rust::Result" && name.segments[0] == "unwrap" {
                     return self.resolve_rust_result_unwrap(
                         receiver,
@@ -5696,6 +5848,67 @@ impl Resolver<'_> {
                 (error_info(), None)
             }
         }
+    }
+
+    fn resolve_optional_value_method(
+        &mut self,
+        receiver: &Expression,
+        target: &TypeRef,
+        receiver_info: &ExpressionInfo,
+        arguments: &[Expression],
+        span: Span,
+        context: &mut FunctionContext,
+    ) -> (ExpressionInfo, Option<ResolvedCall>) {
+        for argument in arguments {
+            self.resolve_expression(argument, None, context);
+        }
+        if !arguments.is_empty() {
+            self.push(
+                "RES133",
+                format!(
+                    "`optional<T>.value()` does not accept arguments, found {}",
+                    arguments.len()
+                ),
+                span,
+            );
+            return (error_info(), None);
+        }
+        if receiver_info.category == ValueCategory::Temporary {
+            self.push(
+                "RES133",
+                "`optional<T>.value()` requires a named receiver because it returns a reference"
+                    .to_owned(),
+                receiver.span,
+            );
+            return (error_info(), None);
+        }
+
+        let mutable = receiver_info.category == ValueCategory::MutablePlace;
+        let checked = self.expression_null_state(receiver, context) != NullState::NonNull;
+        let throws = if checked {
+            vec![self.optional_error_struct()]
+        } else {
+            Vec::new()
+        };
+        let return_type = TypeRef::Reference {
+            mutable,
+            target: Box::new(target.clone()),
+        };
+        let call = ResolvedCall {
+            span,
+            target: CallTarget::Intrinsic(Intrinsic::OptionalValue {
+                target: target.clone(),
+                mutable,
+                checked,
+            }),
+            return_type: return_type.clone(),
+            throws,
+        };
+
+        // A checked call that returns has necessarily established the same
+        // non-empty fact as an explicit condition guard.
+        set_expression_null_state(receiver, NullState::NonNull, context);
+        (info_for_return_type(return_type), Some(call))
     }
 
     fn resolve_enum_name(
@@ -6419,6 +6632,7 @@ impl Resolver<'_> {
         for ((expected, actual), syntax) in function.parameters.iter().zip(&actual).zip(arguments) {
             let actual = self.adjusted_binding_actual(expected, actual, syntax, context);
             self.validate_binding(expected, &actual, syntax.span, "stored function argument");
+            Self::invalidate_mutable_optional_argument(expected, syntax, context);
         }
         let mutable = function.kind == StoredFunctionKind::Mutable;
         if mutable && callee.category != ValueCategory::MutablePlace {
@@ -6683,6 +6897,7 @@ impl Resolver<'_> {
             let parameter_ty = substitute_type(&parameter.ty, &substitutions);
             let argument = self.adjusted_binding_actual(&parameter_ty, argument, syntax, context);
             self.validate_binding(&parameter_ty, &argument, syntax.span, "argument");
+            Self::invalidate_mutable_optional_argument(&parameter_ty, syntax, context);
         }
         let return_type = substitute_type(&symbol.return_type, &substitutions);
         let call = ResolvedCall {
@@ -7893,6 +8108,7 @@ impl Resolver<'_> {
                 expression.span,
                 "constructor argument",
             );
+            Self::invalidate_mutable_optional_argument(&parameter_ty, expression, context);
         }
         if symbol.is_deleted {
             self.push(
@@ -8144,6 +8360,7 @@ impl Resolver<'_> {
             let argument =
                 self.adjusted_binding_actual(&parameter.ty, argument, expression, context);
             self.validate_binding(&parameter.ty, &argument, expression.span, "argument");
+            Self::invalidate_mutable_optional_argument(&parameter.ty, expression, context);
         }
         let return_type = symbol.return_type;
         let call = ResolvedCall {
@@ -8398,6 +8615,7 @@ impl Resolver<'_> {
             candidate.parameter_types.iter().zip(actual).zip(arguments)
         {
             self.validate_binding(expected, argument, expression.span, "argument");
+            Self::invalidate_mutable_optional_argument(expected, expression, context);
         }
         let (result_adaptation, throws) = if let Some(error_type) = &candidate.rust_result_error {
             let (exception_id, exception) = self.native_result_exception(error_type);
@@ -10910,6 +11128,7 @@ fn default_constructed_null_state(ty: &TypeRef) -> NullState {
             kind: PointerKind::UniqueNullable | PointerKind::SharedNullable | PointerKind::Weak,
             ..
         } => NullState::Null,
+        ty if optional_value_type(ty).is_some() => NullState::Null,
         _ => initial_null_state(ty),
     }
 }
@@ -11097,6 +11316,10 @@ fn is_optional_test(ty: &TypeRef) -> bool {
     }
 }
 
+fn is_nullable_value_test(ty: &TypeRef) -> bool {
+    is_nullable_pointer_test(ty) || is_optional_test(ty)
+}
+
 fn optional_value_type(ty: &TypeRef) -> Option<&TypeRef> {
     let TypeRef::Native { path, arguments } = canonical_ref(ty) else {
         return None;
@@ -11131,7 +11354,7 @@ fn set_expression_null_state(
         .iter_mut()
         .rev()
         .find_map(|scope| scope.get_mut(name))
-        && is_nullable_pointer_test(&variable.ty)
+        && is_nullable_value_test(&variable.ty)
     {
         variable.null_state = null_state;
     }
@@ -11173,7 +11396,7 @@ fn unknown_nullable_scopes(
 ) -> Vec<BTreeMap<String, Variable>> {
     let mut scopes = scopes.to_vec();
     for variable in scopes.iter_mut().flat_map(BTreeMap::values_mut) {
-        if is_nullable_pointer_test(&variable.ty) {
+        if is_nullable_value_test(&variable.ty) {
             variable.null_state = NullState::Unknown;
         }
     }
@@ -12001,6 +12224,7 @@ fn source_uses_exceptions(source: &SourceFile) -> bool {
                                                     | "FormatError"
                                                     | "JsonError"
                                                     | "EnumError"
+                                                    | "OptionalError"
                                                     | "ThreadError"
                                             )
                                 )
