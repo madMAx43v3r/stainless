@@ -55,7 +55,8 @@ i32 collection_order()
         set_order = set_order * 10 + value;
     }
 
-    if (!lookup.contains_key(1) || !sorted.contains(2)) {
+    optional<i32> first = lookup.get(1);
+    if (first.value_or(0) != 11 || !sorted.contains(2)) {
         return 0;
     }
     return linked_order + queue_order + map_key_order + map_value_total

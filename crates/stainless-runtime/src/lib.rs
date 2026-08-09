@@ -104,6 +104,15 @@ impl fmt::Display for RandomError {
 
 impl Error for RandomError {}
 
+/// Returns an owned copy of the map value when `key` exists.
+pub fn btree_map_get<K, V>(map: &BTreeMap<K, V>, key: &K) -> Option<V>
+where
+    K: Ord,
+    V: Clone,
+{
+    map.get(key).cloned()
+}
+
 /// Invokes `callback` with a shared map value when `key` exists.
 ///
 /// This confines the borrow to one non-escaping callback instead of exposing
@@ -2109,10 +2118,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        BigEndian, Fs, LittleEndian, MultiMap, PositionedFile, Random, Var, btree_map_retain,
-        btree_map_retain_keys, btree_map_with_first_after, btree_map_with_first_in_range,
-        btree_map_with_last_before, btree_map_with_last_in_range, btree_map_with_range,
-        vec_copy_range, vec_with_range,
+        BigEndian, Fs, LittleEndian, MultiMap, PositionedFile, Random, Var, btree_map_get,
+        btree_map_retain, btree_map_retain_keys, btree_map_with_first_after,
+        btree_map_with_first_in_range, btree_map_with_last_before, btree_map_with_last_in_range,
+        btree_map_with_range, vec_copy_range, vec_with_range,
     };
 
     #[test]
@@ -2290,6 +2299,15 @@ mod tests {
         assert_eq!(values.len(), 2);
         btree_map_retain_keys(&mut values, |key| key.0 == "alpha");
         assert_eq!(values.len(), 1);
+    }
+
+    #[test]
+    fn ordered_map_get_returns_an_owned_copy() {
+        let values = BTreeMap::from([(1, String::from("one"))]);
+        let value = btree_map_get(&values, &1).expect("existing map value");
+        assert_eq!(value, "one");
+        assert_eq!(values.get(&1).map(String::as_str), Some("one"));
+        assert_eq!(btree_map_get(&values, &2), None);
     }
 
     #[test]

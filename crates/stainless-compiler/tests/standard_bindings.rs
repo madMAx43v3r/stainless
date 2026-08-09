@@ -393,6 +393,23 @@ fn ordered_collections_preserve_ord_requirements() {
     assert_eq!(map_insert.requirements[0].parameter, "K");
     assert_eq!(map_insert.requirements[0].rust_trait, "::core::cmp::Ord");
 
+    let map_get = map
+        .find_callable(CallStyle::Method, "get", &[TypeRef::shared_ref(k.clone())])
+        .unwrap();
+    assert_eq!(
+        map_get.return_type,
+        TypeRef::native("rust::Option", vec![v.clone()])
+    );
+    assert_eq!(map_get.requirements[0].parameter, "K");
+    assert_eq!(map_get.requirements[0].rust_trait, "::core::cmp::Ord");
+    assert_eq!(map_get.requirements[1].parameter, "V");
+    assert_eq!(map_get.requirements[1].rust_trait, "::core::clone::Clone");
+    assert!(matches!(
+        map_get.lowering,
+        RustLowering::FunctionWithReceiver { ref rust_path }
+            if rust_path == "::stainless_runtime::btree_map_get"
+    ));
+
     let multimap_insert = multimap
         .find_callable(CallStyle::Method, "insert", &[k, v])
         .unwrap();
@@ -1113,13 +1130,7 @@ fn unsupported_borrowing_and_iterator_methods_are_not_exposed() {
         assert!(!string_methods.contains(unsupported));
     }
 
-    for path in [
-        "rust::List",
-        "rust::Map",
-        "rust::MultiMap",
-        "rust::Queue",
-        "rust::Set",
-    ] {
+    for path in ["rust::List", "rust::MultiMap", "rust::Queue", "rust::Set"] {
         let methods = method_names(bindings.type_by_path(path).unwrap());
         for unsupported in ["get", "get_mut", "iter", "iter_mut", "front", "back"] {
             assert!(
@@ -1127,6 +1138,15 @@ fn unsupported_borrowing_and_iterator_methods_are_not_exposed() {
                 "{path} exposed {unsupported}"
             );
         }
+    }
+
+    let map_methods = method_names(bindings.type_by_path("rust::Map").unwrap());
+    assert!(map_methods.contains("get"));
+    for unsupported in ["get_mut", "iter", "iter_mut", "front", "back"] {
+        assert!(
+            !map_methods.contains(unsupported),
+            "rust::Map exposed {unsupported}"
+        );
     }
 }
 

@@ -1116,6 +1116,23 @@ fn map_binding() -> NativeTypeBinding {
                 key_ord(),
             ),
             CallableBinding {
+                source_name: "get".to_owned(),
+                style: CallStyle::Method,
+                receiver: Some(Receiver::Shared),
+                parameters: vec![Parameter::new("key", TypeRef::shared_ref(k.clone()))],
+                is_async: false,
+                return_type: option_of(v.clone()),
+                rust_result_error: None,
+                return_borrow: None,
+                requirements: vec![
+                    requirement(K, "::core::cmp::Ord"),
+                    requirement(V, "::core::clone::Clone"),
+                ],
+                lowering: RustLowering::FunctionWithReceiver {
+                    rust_path: "::stainless_runtime::btree_map_get".to_owned(),
+                },
+            },
+            CallableBinding {
                 source_name: "with".to_owned(),
                 style: CallStyle::Method,
                 receiver: Some(Receiver::Shared),
