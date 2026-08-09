@@ -11,7 +11,7 @@ i32 main() throws stainless::Exception
     config.max_body_bytes = 65536;
     Server server = http::listen(config);
     String address = http::local_address(server);
-    if (address.len() == 0) {
+    if (address.empty()) {
         return 1;
     }
     String base_url = "http://";
@@ -83,7 +83,7 @@ i32 main() throws stainless::Exception
         return 7;
     }
     Vec<u8> empty_body = http::request_bytes(server, u64(get_event.request_id));
-    if (empty_body.len() != 0) {
+    if (!empty_body.empty()) {
         return 8;
     }
     Vec<u8> get_response;
@@ -101,7 +101,7 @@ i32 main() throws stainless::Exception
     http_only_config.request_timeout_ms = 100;
     http_only_config.max_body_bytes = 65536;
     Server http_only = http::listen(http_only_config);
-    if (http::local_address(http_only).len() == 0) {
+    if (http::local_address(http_only).empty()) {
         return 11;
     }
     Vec<u8> message;

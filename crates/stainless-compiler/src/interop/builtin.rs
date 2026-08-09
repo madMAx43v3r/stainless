@@ -710,7 +710,7 @@ fn var_binding() -> NativeTypeBinding {
                 json_error.clone(),
             ),
             fallible_method(
-                "is_empty",
+                "empty",
                 "is_empty",
                 Receiver::Shared,
                 vec![],
@@ -861,7 +861,7 @@ fn list_binding() -> NativeTypeBinding {
                 },
             ),
             method("len", Receiver::Shared, vec![], TypeRef::Usize),
-            method("is_empty", Receiver::Shared, vec![], TypeRef::Bool),
+            renamed_method("empty", "is_empty", Receiver::Shared, vec![], TypeRef::Bool),
             method("clear", Receiver::Mutable, vec![], TypeRef::Void),
             method(
                 "push_front",
@@ -930,7 +930,7 @@ fn queue_binding() -> NativeTypeBinding {
                 "::std::collections::VecDeque::with_capacity",
             ),
             method("len", Receiver::Shared, vec![], TypeRef::Usize),
-            method("is_empty", Receiver::Shared, vec![], TypeRef::Bool),
+            renamed_method("empty", "is_empty", Receiver::Shared, vec![], TypeRef::Bool),
             method("capacity", Receiver::Shared, vec![], TypeRef::Usize),
             method(
                 "reserve",
@@ -1105,7 +1105,7 @@ fn map_binding() -> NativeTypeBinding {
                 },
             ),
             method("len", Receiver::Shared, vec![], TypeRef::Usize),
-            method("is_empty", Receiver::Shared, vec![], TypeRef::Bool),
+            renamed_method("empty", "is_empty", Receiver::Shared, vec![], TypeRef::Bool),
             method("clear", Receiver::Mutable, vec![], TypeRef::Void),
             method_with_requirements(
                 "insert",
@@ -1365,7 +1365,7 @@ fn multimap_binding() -> NativeTypeBinding {
             ),
             method("len", Receiver::Shared, vec![], TypeRef::Usize),
             method("key_len", Receiver::Shared, vec![], TypeRef::Usize),
-            method("is_empty", Receiver::Shared, vec![], TypeRef::Bool),
+            renamed_method("empty", "is_empty", Receiver::Shared, vec![], TypeRef::Bool),
             method("clear", Receiver::Mutable, vec![], TypeRef::Void),
             method_with_requirements(
                 "insert",
@@ -1465,7 +1465,7 @@ fn set_binding() -> NativeTypeBinding {
                 },
             ),
             method("len", Receiver::Shared, vec![], TypeRef::Usize),
-            method("is_empty", Receiver::Shared, vec![], TypeRef::Bool),
+            renamed_method("empty", "is_empty", Receiver::Shared, vec![], TypeRef::Bool),
             method("clear", Receiver::Mutable, vec![], TypeRef::Void),
             method_with_requirements(
                 "insert",

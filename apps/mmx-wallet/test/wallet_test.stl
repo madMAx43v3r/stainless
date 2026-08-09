@@ -6,7 +6,7 @@ bool test_hex_helpers()
 {
     Vec<u8> bytes = wallet::decode_hex("00a1ff");
     return bytes.len() == 3 && bytes.contains(0) && bytes.contains(161) &&
-        bytes.contains(255) && wallet::decode_hex("xyz").len() == 0 &&
+        bytes.contains(255) && wallet::decode_hex("xyz").empty() &&
         wallet::bech32_character(31) == "l" &&
         wallet::bech32_character(32) == "";
 }

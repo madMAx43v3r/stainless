@@ -58,7 +58,7 @@ bool rejects_scalar_range()
             return value == null;
         }
     } catch (const stainless::JsonError& error) {
-        return error.message.len() > 0;
+        return !error.message.empty();
     }
     return false;
 }

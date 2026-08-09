@@ -451,6 +451,37 @@ fn ordered_collections_preserve_ord_requirements() {
 }
 
 #[test]
+fn collection_empty_uses_cpp_spelling_and_rust_lowering() {
+    let bindings = standard_bindings().unwrap();
+
+    for path in [
+        "rust::List",
+        "rust::Queue",
+        "rust::Map",
+        "rust::MultiMap",
+        "rust::Set",
+        "rust::stainless_runtime::Var",
+    ] {
+        let binding = bindings.type_by_path(path).unwrap();
+        let empty = binding
+            .find_callable(CallStyle::Method, "empty", &[])
+            .unwrap();
+
+        assert_eq!(empty.receiver, Some(Receiver::Shared));
+        assert_eq!(empty.return_type, TypeRef::Bool);
+        assert!(matches!(
+            empty.lowering,
+            RustLowering::Method { ref rust_name } if rust_name == "is_empty"
+        ));
+        assert!(
+            binding
+                .find_callable(CallStyle::Method, "is_empty", &[])
+                .is_none()
+        );
+    }
+}
+
+#[test]
 fn ordered_map_interval_callbacks_have_exact_non_escaping_bindings() {
     let bindings = standard_bindings().unwrap();
     let map = bindings.type_by_path("rust::Map").unwrap();

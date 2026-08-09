@@ -1281,13 +1281,17 @@ reference-valued expression and cannot be rebound:
 
 ```cpp
 const String& name = config.name();
+String& item = values[index];
 ```
 
-The borrow of `config` remains active until the last use of `name`. Moving or
-mutating the owner while that borrow is active is rejected; a mutable returned
-borrow additionally excludes every other access to the owner. Rust's
-non-lexical lifetime analysis verifies the emitted borrow boundaries, while
-the Stainless semantic pass remains responsible for source-level diagnostics.
+Field and index projections recursively retain their stable root binding, so
+references to nested fields and indexed elements do not require intermediate
+copies. Indexing a temporary remains invalid. The owner borrow remains active
+until the reference's last use. Moving or mutating the owner while that borrow
+is active is rejected; a mutable returned borrow additionally excludes every
+other access to the owner. Rust's non-lexical lifetime analysis verifies the
+emitted borrow boundaries, while the Stainless semantic pass remains
+responsible for source-level diagnostics.
 Ordinary `auto&` and `const auto&` inference remains unavailable; guarded
 `require` declarations and range-for bindings retain their dedicated
 inferred-reference syntax.
@@ -2441,15 +2445,15 @@ The compiler crate currently registers the following source-visible APIs:
   `eq_ignore_ascii_case`, `replace`, `repeat`, `to_lowercase`, and
   `to_uppercase`.
 - `rust::List<T>`: a doubly linked list backed by Rust `LinkedList<T>`, with
-  `List()`, `len`, `is_empty`, `clear`, `push_front`, `push_back`, `pop_front`,
+  `List()`, `len`, `empty`, `clear`, `push_front`, `push_back`, `pop_front`,
   `pop_back`, `append`, `contains`, and `clone`.
 - `rust::Queue<T>`: a double-ended queue backed by Rust `VecDeque<T>`, with
   `Queue()`, `Queue::with_capacity`, capacity/reservation methods, `len`,
-  `is_empty`, `clear`, `truncate`, front/back push and pop, indexed `insert`
+  `empty`, `clear`, `truncate`, front/back push and pop, indexed `insert`
   and `remove`, front/back swap removal, `append`, rotation, `contains`, and
   `clone`.
 - `rust::Map<K, V>`: an ordered map backed by Rust `BTreeMap<K, V>`, with
-  `Map()`, `len`, `is_empty`, `clear`, `insert`, `remove`, `contains_key`,
+  `Map()`, `len`, `empty`, `clear`, `insert`, `remove`, `contains_key`,
   `with`, `with_mut`, `with_range`, `with_first_in_range`, `with_first_after`,
   `with_last_in_range`, `with_last_before`, `retain`, `append`, `clone`, and
   key/value structured-binding range iteration. `with(key, callback)` and
@@ -2467,14 +2471,14 @@ The compiler crate currently registers the following source-visible APIs:
   map and are not used by kvstore revert.
 - `rust::MultiMap<K, V>`: an ordered multimap backed by the compact runtime's
   B-tree with private `List<V>` buckets. `MultiMap()`, `insert`, `len`,
-  `key_len`, `is_empty`, `clear`, `contains_key`, `remove`, `remove_all`,
+  `key_len`, `empty`, `clear`, `contains_key`, `remove`, `remove_all`,
   `with`, `with_mut`, `retain`, `clone`, and flat key/value range iteration are
   available. `remove(key, value)` removes the first matching association.
   `len()` counts associations, while `key_len()` counts distinct keys.
   `with(key, callback)` invokes the callback once for every matching value and
   returns the number of matches; no nested collection escapes.
 - `rust::Set<T>`: an ordered set backed by Rust `BTreeSet<T>`, with `Set()`,
-  `len`, `is_empty`, `clear`, `insert`, `replace`, `remove`, `take`,
+  `len`, `empty`, `clear`, `insert`, `replace`, `remove`, `take`,
   `contains`, `append`, and `clone`.
 
 The metadata records `&self`, `&mut self`, and consuming `self` separately.
@@ -2563,7 +2567,7 @@ may update the same aggregate. The initial method surface is:
 - objects: `set(const String&, var)`, `remove(const String&)`, and
   `contains_key(const String&)`;
 - arrays: `push(var)`, `pop()`, `insert(usize, var)`, and `remove(usize)`;
-- arrays or objects: `len()`, `is_empty()`, and `clear()`.
+- arrays or objects: `len()`, `empty()`, and `clear()`.
 
 `pop()` and object `remove()` return `null` when no value exists. Array
 `remove()` rejects an out-of-bounds index, while `insert()` accepts indices up

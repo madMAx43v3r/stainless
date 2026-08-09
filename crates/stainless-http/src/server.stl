@@ -46,7 +46,7 @@ String local_address(const Server& server)
 var receive(const Server& server, const u64 timeout_ms) throws stainless::RustError, stainless::JsonError
 {
     String event = server.next_event(timeout_ms);
-    if (event.len() == 0) {
+    if (event.empty()) {
         return null;
     }
     return var::parse(event).unwrap();

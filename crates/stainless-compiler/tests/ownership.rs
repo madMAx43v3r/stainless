@@ -310,6 +310,74 @@ const String& invalid(const String& input) {
 }
 
 #[test]
+fn indexed_places_are_stable_reference_sources() {
+    let valid = analyze(
+        r"use rust::Vec;
+
+void update(Vec<i32>& values) {
+    i32& value = values[0];
+    value += 1;
+}
+
+i32 read(const Vec<i32>& values) {
+    const i32& value = values[0];
+    return value;
+}
+",
+    );
+    assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);
+
+    let temporary = analyze(
+        r"use rust::Vec;
+
+Vec<i32> values() {
+    Vec<i32> result;
+    result.push(1);
+    return result;
+}
+
+i32 invalid() {
+    const i32& value = values()[0];
+    return value;
+}
+",
+    );
+    assert_codes(&temporary, &["OWN004"]);
+}
+
+#[test]
+fn indexed_reference_declared_inside_a_loop_ends_after_its_last_use() {
+    let valid = analyze(
+        r"use rust::Vec;
+
+void update(Vec<i32>& values) {
+    for (usize i = 0; i < values.len(); i += 1) {
+        i32& value = values[i];
+        value += 1;
+        values.push(0);
+        return;
+    }
+}
+",
+    );
+    assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);
+
+    let repeated = analyze(
+        r"use rust::Vec;
+
+void invalid(Vec<i32>& values) {
+    i32& value = values[0];
+    for (usize i = 0; i < 1; i += 1) {
+        value += 1;
+        values.push(0);
+    }
+}
+",
+    );
+    assert_codes(&repeated, &["OWN003"]);
+}
+
+#[test]
 fn permits_reference_returns_tied_to_the_single_reference_parameter() {
     let source = r"use rust::String;
 

@@ -931,9 +931,9 @@ impl Analyzer<'_> {
             }
             ExpressionKind::Field { receiver, .. } => self.expression(receiver, usage),
             ExpressionKind::Index { receiver, index } => {
-                self.expression(receiver, usage);
+                let origin = self.expression(receiver, usage);
                 self.expression(index, Usage::Read);
-                None
+                origin
             }
         }
     }
@@ -1638,7 +1638,7 @@ impl Analyzer<'_> {
         for id in ids {
             let binding = &self.state.bindings[id];
             let expired = binding.reference_loan_active
-                && (self.loop_depth == 0 || self.loop_depth < binding.declaration_loop_depth)
+                && (self.loop_depth == 0 || self.loop_depth <= binding.declaration_loop_depth)
                 && binding
                     .last_use
                     .map_or(binding.declaration_span.end <= position, |last_use| {

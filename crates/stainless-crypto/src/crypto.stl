@@ -86,7 +86,7 @@ u128 parse_decimal_u128(const String& source) throws DecimalError
 {
     String copied = source.clone();
     Vec<u8> bytes = move(copied).into_bytes();
-    if (bytes.len() == 0) {
+    if (bytes.empty()) {
         throw DecimalError{stainless::Exception(
             "decimal string cannot be empty")};
     }
