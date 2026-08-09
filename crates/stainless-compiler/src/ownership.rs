@@ -196,7 +196,7 @@ impl Analyzer<'_> {
                     self.constructor(constructor);
                 }
                 Item::Function(function) if function.body.is_some() => self.function(function),
-                Item::Constructor(_) | Item::Function(_) | Item::Use(_) => {}
+                Item::Enum(_) | Item::Constructor(_) | Item::Function(_) | Item::Use(_) => {}
             }
         }
     }
@@ -1840,7 +1840,7 @@ impl UseCollector {
                     self.constructor(constructor);
                 }
                 Item::Function(function) if function.body.is_some() => self.function(function),
-                Item::Constructor(_) | Item::Function(_) | Item::Use(_) => {}
+                Item::Enum(_) | Item::Constructor(_) | Item::Function(_) | Item::Use(_) => {}
             }
         }
     }

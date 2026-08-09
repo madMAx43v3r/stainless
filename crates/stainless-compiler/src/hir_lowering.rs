@@ -224,6 +224,21 @@ impl Lowerer<'_> {
                         structs.push(lowered);
                     }
                 }
+                Item::Enum(enumeration) => {
+                    let Some(symbol) = self.semantics.struct_at(enumeration.span).cloned() else {
+                        self.push(
+                            "HIR015",
+                            format!("resolved enum `{}` is missing", enumeration.name),
+                            enumeration.span,
+                        );
+                        continue;
+                    };
+                    if let Some(lowered) =
+                        self.lower_struct_symbol(&symbol, &enumeration.name, enumeration.span)
+                    {
+                        structs.push(lowered);
+                    }
+                }
                 Item::Use(_) | Item::Constructor(_) | Item::Function(_) => {}
             }
         }
@@ -305,6 +320,10 @@ impl Lowerer<'_> {
             type_parameters: symbol.type_parameters.clone(),
             const_parameters: symbol.const_parameters.clone(),
             copyable: symbol.kind == ast::UserTypeKind::Struct,
+            enum_repr: symbol
+                .enum_repr
+                .as_ref()
+                .and_then(|representation| self.lower_type(representation, span)),
             fields,
             static_constants: symbol
                 .static_constants
@@ -332,6 +351,7 @@ impl Lowerer<'_> {
     fn lower_json_struct_fields(&self, symbol: &StructSymbol) -> Option<Vec<hir::JsonStructField>> {
         if !self.semantics.json_struct_conversions.contains(&symbol.id)
             || symbol.kind != ast::UserTypeKind::Struct
+            || symbol.enum_repr.is_some()
             || !self.json_structure_supported(symbol.id, &mut BTreeSet::new())
         {
             return None;
@@ -462,7 +482,7 @@ impl Lowerer<'_> {
                         }
                     }
                 }
-                Item::Use(_) | Item::Constructor(_) => {}
+                Item::Enum(_) | Item::Use(_) | Item::Constructor(_) => {}
             }
         }
         functions
@@ -502,7 +522,7 @@ impl Lowerer<'_> {
                         }
                     }
                 }
-                Item::Constructor(_) | Item::Use(_) | Item::Function(_) => {}
+                Item::Enum(_) | Item::Constructor(_) | Item::Use(_) | Item::Function(_) => {}
             }
         }
         constructors
@@ -1207,6 +1227,18 @@ impl Lowerer<'_> {
             });
         }
         let resolution = self.semantics.expression(expression.span);
+        if let Some(actual) = resolution
+            && enum_representation(canonical_ref(&actual.ty), self.semantics).is_some_and(
+                |representation| {
+                    is_non_narrowing_same_signed_integer(representation, canonical_ref(expected))
+                },
+            )
+        {
+            return Some(hir::Expression::Cast {
+                expression: Box::new(self.lower_expression(expression, ExpressionMode::Value)?),
+                target: self.lower_type(canonical_ref(expected), expression.span)?,
+            });
+        }
         if is_json_type(canonical_ref(expected))
             && resolution.is_some_and(|value| !is_json_type(canonical_ref(&value.ty)))
         {
@@ -1488,13 +1520,40 @@ impl Lowerer<'_> {
                         .iter()
                         .map(|arm| {
                             let pattern = match &arm.pattern {
-                                ast::SwitchPattern::Literals(literals) => {
-                                    hir::SwitchPattern::Literals(
-                                        literals
+                                ast::SwitchPattern::Alternatives(alternatives) => {
+                                    hir::SwitchPattern::Alternatives(
+                                        alternatives
                                             .iter()
-                                            .map(|literal| hir::SwitchLiteral {
-                                                kind: literal.kind,
-                                                text: literal.text.clone(),
+                                            .filter_map(|alternative| match alternative {
+                                                ast::SwitchAlternative::Literal(literal) => {
+                                                    Some(hir::SwitchAlternative::Literal(
+                                                        hir::SwitchLiteral {
+                                                            kind: literal.kind,
+                                                            text: literal.text.clone(),
+                                                        },
+                                                    ))
+                                                }
+                                                ast::SwitchAlternative::Name { span, .. } => {
+                                                    let reference =
+                                                        self.semantics.static_constant(*span)?;
+                                                    let structure = self
+                                                        .semantics
+                                                        .structure(reference.structure)?;
+                                                    let constant = structure
+                                                        .static_constants
+                                                        .get(reference.constant)?;
+                                                    Some(hir::SwitchAlternative::StaticConstant {
+                                                        modules: structure.path[..structure
+                                                            .path
+                                                            .len()
+                                                            .saturating_sub(1)]
+                                                            .iter()
+                                                            .map(|name| module_name(name))
+                                                            .collect(),
+                                                        structure: structure.path.last()?.clone(),
+                                                        constant: constant.name.clone(),
+                                                    })
+                                                }
                                             })
                                             .collect(),
                                     )
@@ -3650,6 +3709,44 @@ fn resolved_structure_type(structure: &StructSymbol) -> TypeRef {
         })
         .collect();
     user_type(structure, arguments)
+}
+
+fn enum_representation<'a>(ty: &TypeRef, semantics: &'a SemanticModel) -> Option<&'a TypeRef> {
+    let TypeRef::Struct { path, .. } = canonical_ref(ty) else {
+        return None;
+    };
+    semantics
+        .structs
+        .iter()
+        .find(|structure| structure.path == *path)?
+        .enum_repr
+        .as_ref()
+}
+
+fn is_non_narrowing_same_signed_integer(source: &TypeRef, target: &TypeRef) -> bool {
+    let Some((source_signed, source_bits)) = fixed_width_integer_layout(source) else {
+        return false;
+    };
+    let Some((target_signed, target_bits)) = fixed_width_integer_layout(target) else {
+        return false;
+    };
+    source_signed == target_signed && source_bits <= target_bits
+}
+
+fn fixed_width_integer_layout(ty: &TypeRef) -> Option<(bool, u32)> {
+    Some(match canonical_ref(ty) {
+        TypeRef::I8 => (true, 8),
+        TypeRef::I16 => (true, 16),
+        TypeRef::I32 => (true, 32),
+        TypeRef::I64 => (true, 64),
+        TypeRef::I128 => (true, 128),
+        TypeRef::U8 => (false, 8),
+        TypeRef::U16 => (false, 16),
+        TypeRef::U32 => (false, 32),
+        TypeRef::U64 => (false, 64),
+        TypeRef::U128 => (false, 128),
+        _ => return None,
+    })
 }
 
 fn user_type(structure: &StructSymbol, arguments: Vec<TypeRef>) -> TypeRef {

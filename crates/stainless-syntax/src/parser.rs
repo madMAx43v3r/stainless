@@ -98,6 +98,7 @@ impl Parser<'_> {
                 Some(SyntaxKind::StructKw) => self.parse_struct_definition(),
                 Some(SyntaxKind::ClassKw) => self.parse_class_definition(),
                 Some(SyntaxKind::InterfaceKw) => self.parse_interface_definition(),
+                Some(SyntaxKind::EnumKw) => self.parse_enum_definition(),
                 Some(SyntaxKind::Identifier) if self.looks_like_constructor() => {
                     self.parse_constructor();
                 }
@@ -161,6 +162,34 @@ impl Parser<'_> {
 
     fn parse_interface_definition(&mut self) {
         self.parse_type_definition(SyntaxKind::InterfaceDefinition, "interface", true);
+    }
+
+    fn parse_enum_definition(&mut self) {
+        self.start(SyntaxKind::EnumDefinition);
+        self.bump();
+        self.expect(SyntaxKind::Identifier, "expected an enum name");
+        self.expect(
+            SyntaxKind::Colon,
+            "expected `:` and an enum representation type",
+        );
+        self.parse_type(false);
+        self.expect(
+            SyntaxKind::LBrace,
+            "expected `{` after enum representation type",
+        );
+        while !self.at_end() && !self.at(SyntaxKind::RBrace) {
+            self.start(SyntaxKind::EnumVariant);
+            self.expect(SyntaxKind::Identifier, "expected an enum member name");
+            self.expect(SyntaxKind::Eq, "expected `=` after enum member name");
+            self.expect(SyntaxKind::Integer, "expected an integer enum member value");
+            self.finish();
+            if !self.eat(SyntaxKind::Comma) {
+                break;
+            }
+        }
+        self.expect(SyntaxKind::RBrace, "expected `}` to close enum");
+        self.expect(SyntaxKind::Semicolon, "expected `;` after enum definition");
+        self.finish();
     }
 
     fn parse_type_definition(
@@ -899,18 +928,18 @@ impl Parser<'_> {
             self.start(SyntaxKind::SwitchPattern);
             if self.at(SyntaxKind::ElseKw) {
                 self.bump();
-            } else if self.current().is_some_and(SyntaxKind::is_literal) {
-                self.bump();
+            } else if self.switch_pattern_alternative_starts_here() {
+                self.parse_switch_pattern_alternative();
                 while self.eat(SyntaxKind::Pipe) {
-                    if self.current().is_some_and(SyntaxKind::is_literal) {
-                        self.bump();
+                    if self.switch_pattern_alternative_starts_here() {
+                        self.parse_switch_pattern_alternative();
                     } else {
-                        self.error("expected a literal after `|` in switch pattern");
+                        self.error("expected a literal or enum member after `|` in switch pattern");
                         break;
                     }
                 }
             } else {
-                self.error("expected a literal or `else` switch pattern");
+                self.error("expected a literal, enum member, or `else` switch pattern");
                 if !self.at_end() && !self.at_any(&[SyntaxKind::FatArrow, SyntaxKind::RBrace]) {
                     self.bump();
                 }
@@ -925,6 +954,23 @@ impl Parser<'_> {
         }
         self.expect(SyntaxKind::RBrace, "expected `}` after switch arms");
         self.finish();
+    }
+
+    fn switch_pattern_alternative_starts_here(&self) -> bool {
+        self.current().is_some_and(SyntaxKind::is_literal)
+            || (self.at(SyntaxKind::Identifier) && self.nth(1) == Some(SyntaxKind::ColonColon))
+    }
+
+    fn parse_switch_pattern_alternative(&mut self) {
+        if self.current().is_some_and(SyntaxKind::is_literal) {
+            self.start(SyntaxKind::LiteralExpression);
+            self.bump();
+            self.finish();
+        } else {
+            self.start(SyntaxKind::NameExpression);
+            self.parse_qualified_name("expected an enum member name");
+            self.finish();
+        }
     }
 
     fn parse_lambda_expression(&mut self) {

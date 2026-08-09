@@ -86,7 +86,7 @@ pub struct Module {
     pub modules: Vec<Module>,
 }
 
-/// A Rust-representable data-only Stainless struct.
+/// A Rust-representable Stainless struct, class, or scoped enum.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Struct {
     /// Fully qualified Stainless path.
@@ -99,9 +99,11 @@ pub struct Struct {
     pub const_parameters: Vec<String>,
     /// Whether generated Rust may derive `Clone` for Stainless copy semantics.
     pub copyable: bool,
+    /// Fixed-width unsigned representation when this is a scoped enum.
+    pub enum_repr: Option<Type>,
     /// Direct representation fields, including an optional base subobject.
     pub fields: Vec<Field>,
-    /// Associated integer constants with no instance storage.
+    /// Associated integer constants, or explicitly valued enum members.
     pub static_constants: Vec<StaticConstant>,
     /// Flattened data fields used by automatic structural JSON conversion.
     pub json_fields: Option<Vec<JsonStructField>>,
@@ -932,8 +934,19 @@ pub enum Expression {
 /// One lowered switch pattern.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SwitchPattern {
-    Literals(Vec<SwitchLiteral>),
+    Alternatives(Vec<SwitchAlternative>),
     Fallback,
+}
+
+/// One literal or scoped enum-member switch alternative.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SwitchAlternative {
+    Literal(SwitchLiteral),
+    StaticConstant {
+        modules: Vec<String>,
+        structure: String,
+        constant: String,
+    },
 }
 
 /// One literal within a lowered switch pattern.

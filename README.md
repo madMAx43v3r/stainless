@@ -191,6 +191,9 @@ implemented:
 - [`32_arrays.stl`](docs/ref/32_arrays.stl) — compiler-native fixed-size
   `Array<T, N>`, `usize` const generics, aggregate/default initialization,
   indexing, methods, and range iteration.
+- [`33_enums.stl`](docs/ref/33_enums.stl) — scoped, explicitly valued enums,
+  fixed-width unsigned representations, enum switch patterns, and implicit
+  same-signed widening integer conversion.
 
 `01_basics.stl`, `02_structs_and_data_inheritance.stl`,
 `11_vec_and_string.stl`, `13_range_for.stl`, and `14_constructors.stl` are
@@ -202,8 +205,9 @@ currently parsed, resolved, lowered to HIR, emitted as Rust, and compiled by
 `22_pointer_family.stl` sample and the mutex/RW-lock/condition
 `23_mutex_and_condition.stl` sample, the owned/scoped thread
 `24_threads.stl` sample, and the standard-collection `25_collections.stl`
-sample. The `30_switch.stl` and `31_while.stl` control-flow samples are also
-compiled, with focused execution tests for both. The JSON
+sample. The `30_switch.stl` and `31_while.stl` control-flow samples and the
+`33_enums.stl` scoped-enum sample are also compiled, with focused execution
+tests. The JSON
 `21_json_support.stl` sample is compiled and executed through Cargo against
 the real `stainless-runtime` and `serde_json`. The external
 `17_external_regex_wrapper.stl` sample is compiled and executed through Cargo
@@ -507,19 +511,67 @@ derived struct and one of its data bases declare the same field name, the
 unqualified access is rejected and the source must use the explicit base
 qualifier.
 
+### Scoped enums
+
+Stainless enums are fieldless value types with scoped members. Their
+fixed-width unsigned representation and every member value are explicit:
+
+```cpp
+enum RecordKind : u8 {
+    Insert = 0,
+    Commit = 1,
+    Revert = 2,
+};
+
+RecordKind kind = RecordKind::Insert;
+u8 encoded = kind;
+u32 widened = kind;
+```
+
+The representation must be `u8`, `u16`, `u32`, or `u64`. Member names and
+values must be unique, and every value must fit the declared representation.
+Enum members have the enum type. They convert implicitly to their declared
+representation or a wider fixed-width integer with the same signedness. For
+example, a `u8` enum converts to `u8`, `u16`, `u32`, `u64`, or `u128`, but not
+to any signed integer. Narrowing and platform-sized `usize`/`isize`
+conversions are also rejected. The compiler inserts the corresponding Rust
+`as` cast when an integer binding, return, or argument requires it. These
+conversions never select between competing overloads. Integer-to-enum
+construction is not currently supported because an arbitrary integer may not
+name a valid member.
+
+Enums lower to Rust `#[repr(...)] enum` declarations and have copy value
+semantics. They cannot contain fields, functions, constructors, generic
+parameters, inheritance, or interface implementations. Scoped enum members
+may be used as `switch` alternatives, including `|` patterns:
+
+```cpp
+u32 weight(RecordKind kind)
+{
+    return switch (kind) {
+        RecordKind::Insert | RecordKind::Commit => 1,
+        RecordKind::Revert => 2,
+        else => 0,
+    };
+}
+```
+
+The final `else` remains mandatory under the general Stainless `switch` rule,
+even when all currently declared enum members are listed.
+
 ### Static struct constants
 
 A data struct may group typed compile-time integer constants without adding
 fields to any instance:
 
 ```cpp
-struct RecordKind {
+struct RecordTag {
     static const u8 Insert = 0;
     static const u8 Commit = 1;
     static const u8 Revert = 2;
 };
 
-u8 kind = RecordKind::Insert;
+u8 kind = RecordTag::Insert;
 ```
 
 `static` is contextual in this member position and remains an ordinary
@@ -533,7 +585,8 @@ The initial implementation permits `static const` only on non-generic
 integer-literal initializer. Runtime expressions, floating-point or object
 types, classes, interfaces, and mutable static members are rejected. This
 narrow form is sufficient for typed wire-format discriminants without adding
-enum representation rules or mutable global state.
+mutable global state. Closed sets of named values should normally use a scoped
+enum instead.
 
 ### Static member functions
 
@@ -3172,9 +3225,10 @@ The current recursive-descent grammar handles:
 - function declarations and definitions, qualified names, parameters,
   reference types, type and compile-time `usize` generic arguments, `const`,
   and `throws` clauses;
-- struct, class, and interface definitions; direct fields; typed `static const`
-  struct members; ordered type/`usize` const generic parameters; data and
-  interface base lists; `public:`/`private:` labels; member declarations;
+- struct, class, interface, and explicitly represented scoped enum definitions;
+  direct fields; typed `static const` struct members; ordered type/`usize` const
+  generic parameters; data and interface base lists; `public:`/`private:`
+  labels; member declarations;
   qualified out-of-type definitions; and struct/array aggregate initialization;
 - constructor declarations, `= delete`, qualified out-of-type definitions,
   and C++-style data-base/member initializer lists;
@@ -3219,11 +3273,14 @@ The initial `stainless_compiler::resolution` pass now provides:
   implemented single-file subset;
 - primitive and native type resolution, local/parameter scopes, contextual
   integer literal types, and expression typing for the current operators;
-- user-defined struct/class/interface names and layouts, direct and inherited
+- user-defined struct/class/interface/enum names and layouts, direct and inherited
   field lookup, C++-style public/private access checks, static member lookup,
   exact declaration/definition matching, struct aggregate construction,
   fluent `void` member returns, and cycle/duplicate/reference-field
   diagnostics;
+- exact enum-member typing, fixed-width unsigned representation validation,
+  implicit same-signed non-narrowing integer conversion, and enum-member switch
+  patterns;
 - single data inheritance for structs; interface inheritance and exact
   implementation-contract validation; move-only, non-assignable class values;
   static interface implementations for structs and classes; dynamic interface

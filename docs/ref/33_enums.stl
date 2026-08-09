@@ -1,0 +1,28 @@
+namespace samples {
+
+enum RecordKind : u8 {
+    Insert = 1,
+    Update = 2,
+    Commit = 3,
+};
+
+u32 preserve_encoding(u32 value)
+{
+    return value;
+}
+
+u32 encode_kind(RecordKind kind)
+{
+    return preserve_encoding(kind);
+}
+
+u32 kind_weight(RecordKind kind)
+{
+    return switch (kind) {
+        RecordKind::Insert | RecordKind::Update => 10,
+        RecordKind::Commit => 20,
+        else => 0,
+    };
+}
+
+}

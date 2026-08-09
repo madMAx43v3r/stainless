@@ -120,3 +120,18 @@ fn lexer_recognizes_switch_arms() {
     assert!(significant.contains(&SyntaxKind::String));
     assert!(significant.contains(&SyntaxKind::ElseKw));
 }
+
+#[test]
+fn lexer_reserves_enum_declarations() {
+    let lexed = lex("enum Kind : u8 { First = 1, };");
+
+    assert!(lexed.errors.is_empty(), "{:?}", lexed.errors);
+    assert_eq!(
+        lexed
+            .tokens
+            .iter()
+            .find(|token| !token.kind.is_trivia())
+            .map(|token| token.kind),
+        Some(SyntaxKind::EnumKw)
+    );
+}

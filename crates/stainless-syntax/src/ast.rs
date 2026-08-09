@@ -62,6 +62,8 @@ ast_node!(UseDeclaration, UseDeclaration);
 ast_node!(StructDefinition, StructDefinition);
 ast_node!(ClassDefinition, ClassDefinition);
 ast_node!(InterfaceDefinition, InterfaceDefinition);
+ast_node!(EnumDefinition, EnumDefinition);
+ast_node!(EnumVariant, EnumVariant);
 ast_node!(AccessSpecifier, AccessSpecifier);
 ast_node!(FieldDeclaration, FieldDeclaration);
 ast_node!(ConstructorDefinition, ConstructorDefinition);
@@ -132,6 +134,8 @@ pub enum Item {
     Class(ClassDefinition),
     /// A behavior-only `interface`.
     Interface(InterfaceDefinition),
+    /// A scoped, fieldless integer-backed enum.
+    Enum(EnumDefinition),
     /// A constructor with a body.
     ConstructorDefinition(ConstructorDefinition),
     /// A constructor declaration or deletion.
@@ -151,6 +155,7 @@ impl AstNode for Item {
                 | SyntaxKind::StructDefinition
                 | SyntaxKind::ClassDefinition
                 | SyntaxKind::InterfaceDefinition
+                | SyntaxKind::EnumDefinition
                 | SyntaxKind::ConstructorDefinition
                 | SyntaxKind::ConstructorDeclaration
                 | SyntaxKind::FunctionDefinition
@@ -169,6 +174,7 @@ impl AstNode for Item {
             SyntaxKind::InterfaceDefinition => {
                 InterfaceDefinition::cast(syntax).map(Self::Interface)
             }
+            SyntaxKind::EnumDefinition => EnumDefinition::cast(syntax).map(Self::Enum),
             SyntaxKind::ConstructorDefinition => {
                 ConstructorDefinition::cast(syntax).map(Self::ConstructorDefinition)
             }
@@ -192,6 +198,7 @@ impl AstNode for Item {
             Self::Struct(node) => node.syntax(),
             Self::Class(node) => node.syntax(),
             Self::Interface(node) => node.syntax(),
+            Self::Enum(node) => node.syntax(),
             Self::ConstructorDefinition(node) => node.syntax(),
             Self::ConstructorDeclaration(node) => node.syntax(),
             Self::FunctionDefinition(node) => node.syntax(),
@@ -540,6 +547,35 @@ macro_rules! type_definition_accessors {
 type_definition_accessors!(StructDefinition);
 type_definition_accessors!(ClassDefinition);
 type_definition_accessors!(InterfaceDefinition);
+
+impl EnumDefinition {
+    #[must_use]
+    pub fn name_token(&self) -> Option<SyntaxToken> {
+        direct_tokens(self.syntax()).find(|token| token.kind() == SyntaxKind::Identifier)
+    }
+
+    #[must_use]
+    pub fn representation(&self) -> Option<TypeReference> {
+        child(self.syntax())
+    }
+
+    #[must_use]
+    pub fn variants(&self) -> AstChildren<EnumVariant> {
+        children(self.syntax())
+    }
+}
+
+impl EnumVariant {
+    #[must_use]
+    pub fn name_token(&self) -> Option<SyntaxToken> {
+        token(self.syntax(), SyntaxKind::Identifier)
+    }
+
+    #[must_use]
+    pub fn value_token(&self) -> Option<SyntaxToken> {
+        token(self.syntax(), SyntaxKind::Integer)
+    }
+}
 
 impl FieldDeclaration {
     #[must_use]
@@ -1297,9 +1333,9 @@ impl SwitchPattern {
         direct_tokens(self.syntax()).any(|token| token.kind() == SyntaxKind::ElseKw)
     }
 
-    /// Returns the literal alternatives in source order.
-    pub fn literals(&self) -> impl Iterator<Item = SyntaxToken> + '_ {
-        direct_tokens(self.syntax()).filter(|token| token.kind().is_literal())
+    /// Returns the literal or scoped-name alternatives in source order.
+    pub fn alternatives(&self) -> impl Iterator<Item = Expression> + '_ {
+        expression_children(self.syntax())
     }
 }
 

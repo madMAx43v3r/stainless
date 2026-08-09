@@ -114,6 +114,192 @@ fn positive_integer_literals_default_to_u32_and_infer_from_context() {
 }
 
 #[test]
+fn scoped_enums_have_exact_types_and_implicit_representation_conversions() {
+    let analysis = analyze(
+        r"use rust::Vec;
+
+enum State : u16 {
+    Ready = 1,
+    Done = 2,
+};
+
+u16 encode(State state) {
+    State copy = state;
+    return copy;
+}
+
+u64 encode_wide(State state) {
+    return state;
+}
+
+bool same(State left, State right) {
+    return left == right;
+}
+
+u16 preserve(u16 value) {
+    return value;
+}
+
+u16 pass_to_stainless_function(State state) {
+    return preserve(state);
+}
+
+void append(Vec<u16>& values, State state) {
+    values.push(state);
+}
+
+void append_wide(Vec<u128>& values, State state) {
+    values.push(state);
+}
+",
+    );
+
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:#?}",
+        analysis.diagnostics
+    );
+    let enumeration = analysis
+        .semantics
+        .structs
+        .iter()
+        .find(|structure| structure.path == ["State"])
+        .expect("State enum symbol");
+    assert_eq!(enumeration.enum_repr, Some(TypeRef::U16));
+    assert_eq!(enumeration.static_constants.len(), 2);
+    assert!(enumeration.static_constants.iter().all(|variant| variant.ty
+        == TypeRef::Struct {
+            path: vec!["State".to_owned()],
+            arguments: Vec::new(),
+        }));
+}
+
+#[test]
+fn enum_integer_conversion_rejects_narrowing_and_signedness_changes() {
+    let analysis = analyze(
+        r"enum State : u16 { Ready = 1, };
+
+u8 narrow(State state) { return state; }
+i32 signed(State state) { return state; }
+usize platform_sized(State state) { return state; }
+",
+    );
+
+    assert_eq!(
+        analysis
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "RES028")
+            .count(),
+        3,
+        "{:#?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
+fn enum_integer_conversion_does_not_select_between_overloads() {
+    let analysis = analyze(
+        r"enum State : u8 { Ready = 1, };
+
+u32 consume(u8 value) { return 1; }
+u32 consume(u16 value) { return 2; }
+u32 test(State state) { return consume(state); }
+",
+    );
+
+    assert!(
+        analysis
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "RES019"),
+        "{:#?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
+fn enum_declarations_reject_invalid_representations_and_values() {
+    let analysis = analyze(
+        r"enum Signed : i32 { Value = 1, };
+enum TooLarge : u8 { Value = 256, };
+enum Duplicate : u16 { First = 1, Second = 1, };
+enum Empty : u32 {};
+",
+    );
+    let enum_diagnostics = analysis
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "RES132")
+        .collect::<Vec<_>>();
+
+    assert_eq!(enum_diagnostics.len(), 4, "{:#?}", analysis.diagnostics);
+}
+
+#[test]
+fn integers_cannot_construct_enums() {
+    let analysis = analyze(
+        r"enum State : u8 { Ready = 1, };
+
+State decode(u8 value) {
+    return State(value);
+}
+",
+    );
+
+    assert!(
+        analysis
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("constructor")),
+        "{:#?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
+fn enums_cannot_be_bases_or_declare_out_of_body_members() {
+    let analysis = analyze(
+        r"enum State : u8 { Ready = 1, };
+
+struct Derived : State {};
+
+State::State() {}
+
+u8 State::value() {
+    return 1;
+}
+",
+    );
+    let messages = analysis
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "RES132")
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(
+        messages.iter().any(|message| message.contains("base type")),
+        "{:#?}",
+        analysis.diagnostics
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("constructors")),
+        "{:#?}",
+        analysis.diagnostics
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("member functions")),
+        "{:#?}",
+        analysis.diagnostics
+    );
+}
+
+#[test]
 fn switch_requires_compatible_literal_patterns_and_a_final_fallback() {
     let valid = analyze(
         r#"use rust::String;

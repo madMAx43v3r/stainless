@@ -91,6 +91,50 @@ fn switch_expressions_lower_to_exhaustive_rust_matches() {
 }
 
 #[test]
+fn scoped_enums_lower_to_repr_enums_and_enum_patterns() {
+    let result = transpile(include_str!("../../../docs/ref/33_enums.stl"));
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let encode = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "encode_kind"])
+        .expect("encode_kind symbol")
+        .mangled_name
+        .clone();
+    let weight = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["samples", "kind_weight"])
+        .expect("kind_weight symbol")
+        .mangled_name
+        .clone();
+    let mut rust = result.rust.expect("valid enums should emit Rust");
+    assert!(rust.contains("#[repr(u8)]"), "{rust}");
+    assert!(rust.contains("pub enum RecordKind"), "{rust}");
+    assert!(rust.contains("RecordKind::Insert"), "{rust}");
+    assert!(rust.contains("as u32"), "{rust}");
+    write!(
+        rust,
+        "\nfn main() {{ use __stainless_namespace_samples as samples; assert_eq!(samples::{encode}(samples::RecordKind::Commit), 3); assert_eq!(samples::{weight}(samples::RecordKind::Insert), 10); assert_eq!(samples::{weight}(samples::RecordKind::Commit), 20); }}\n"
+    )
+    .expect("writing to a String cannot fail");
+    let binary = compile_rust("scoped-enums", &rust, CrateKind::Binary);
+    let output = Command::new(&binary)
+        .output()
+        .expect("generated enum program should run");
+    assert!(output.status.success(), "{output:?}");
+    remove_temporary_parent(&binary);
+}
+
+#[test]
 fn while_statements_lower_to_labeled_rust_loops() {
     let source = include_str!("../../../docs/ref/31_while.stl");
     let result = transpile(source);

@@ -40,6 +40,8 @@ pub enum Item {
     Use(UseDeclaration),
     /// A data-only struct definition.
     Struct(Struct),
+    /// A scoped, fieldless integer-backed enum definition.
+    Enum(Enum),
     /// A qualified constructor definition.
     Constructor(Constructor),
     /// A free or qualified function.
@@ -65,6 +67,7 @@ impl Item {
             Self::Namespace(item) => item.span,
             Self::Use(item) => item.span,
             Self::Struct(item) => item.span,
+            Self::Enum(item) => item.span,
             Self::Constructor(item) => item.span,
             Self::Function(item) => item.span,
         }
@@ -120,6 +123,30 @@ pub struct Struct {
     /// Constructor declarations written inside the body.
     pub constructors: Vec<Constructor>,
     /// Complete definition range.
+    pub span: Span,
+}
+
+/// A scoped enum with an explicit fixed-width unsigned representation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Enum {
+    /// Unqualified source name.
+    pub name: String,
+    /// Explicit integer representation type.
+    pub representation: Type,
+    /// Explicitly valued members in source order.
+    pub variants: Vec<EnumVariant>,
+    /// Complete definition range.
+    pub span: Span,
+}
+
+/// One explicitly valued enum member.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnumVariant {
+    /// Scoped member name.
+    pub name: String,
+    /// Integer literal spelling.
+    pub value: String,
+    /// Complete member range.
     pub span: Span,
 }
 
@@ -493,10 +520,19 @@ pub struct Expression {
 /// One non-binding pattern accepted by a switch expression.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SwitchPattern {
-    /// One or more scalar or string literals joined by `|`.
-    Literals(Vec<Literal>),
+    /// One or more scalar literals or scoped enum members joined by `|`.
+    Alternatives(Vec<SwitchAlternative>),
     /// The exhaustive `else` fallback.
     Fallback,
+}
+
+/// One alternative within a switch pattern.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SwitchAlternative {
+    /// Scalar or string literal.
+    Literal(Literal),
+    /// Scoped enum member name and its source range.
+    Name { path: Path, span: Span },
 }
 
 /// One pattern and value branch of a switch expression.

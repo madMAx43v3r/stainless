@@ -5,8 +5,8 @@ source files (`.stl`). It is declarative and does not run extension code.
 
 Included support:
 
-- Stainless keywords, declarations, contextual `static const` members,
-  primitive and ownership types
+- Stainless keywords, struct/class/interface/scoped-enum declarations,
+  contextual `static const` members, primitive and ownership types
 - Nested generic types and declarations, compiler-known tuples and fixed-size
   `Array<T, N>`, and numeric tuple projection such as
   `Map<tuple<Vec<u8>, u32>, Entry>` and `key.1`

@@ -14,7 +14,7 @@ pub use resolver::resolve;
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct FunctionId(pub usize);
 
-/// Stable index of a resolved Stainless struct.
+/// Stable index of a resolved Stainless user-defined type.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StructId(pub usize);
 
@@ -47,7 +47,7 @@ pub struct FieldSymbol {
     pub span: Span,
 }
 
-/// One resolved compile-time constant associated with a struct.
+/// One resolved compile-time struct constant or enum member.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StaticConstantSymbol {
     /// Source member name.
@@ -62,7 +62,7 @@ pub struct StaticConstantSymbol {
     pub span: Span,
 }
 
-/// A resolved data-only struct.
+/// A resolved struct, class, interface, or enum in the shared user-type registry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StructSymbol {
     /// Stable semantic ID.
@@ -75,6 +75,8 @@ pub struct StructSymbol {
     pub const_parameters: Vec<String>,
     /// Struct, class, or interface source semantics.
     pub kind: crate::ast::UserTypeKind,
+    /// Fixed-width unsigned representation when this symbol is an enum.
+    pub enum_repr: Option<TypeRef>,
     /// Optional single data or class base.
     pub base: Option<UserTypeBase>,
     /// Direct interface contracts in declaration order.

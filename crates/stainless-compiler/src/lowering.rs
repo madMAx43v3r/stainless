@@ -112,6 +112,31 @@ fn lower_item(item: cst::Item) -> Item {
                 .collect(),
             span(&definition),
         ),
+        cst::Item::Enum(definition) => {
+            let definition_span = span(&definition);
+            Item::Enum(ast::Enum {
+                name: definition
+                    .name_token()
+                    .map_or_else(missing_name, |token| token.text().to_owned()),
+                representation: definition.representation().map_or_else(
+                    || error_type(definition_span),
+                    |representation| lower_type(&representation),
+                ),
+                variants: definition
+                    .variants()
+                    .map(|variant| ast::EnumVariant {
+                        name: variant
+                            .name_token()
+                            .map_or_else(missing_name, |token| token.text().to_owned()),
+                        value: variant
+                            .value_token()
+                            .map_or_else(|| "0".to_owned(), |token| token.text().to_owned()),
+                        span: span(&variant),
+                    })
+                    .collect(),
+                span: definition_span,
+            })
+        }
         cst::Item::ConstructorDefinition(constructor) => Item::Constructor(lower_constructor(
             &cst::Constructor::Definition(constructor),
         )),
@@ -582,10 +607,32 @@ fn lower_expression(expression: cst::Expression) -> Expression {
                                     if pattern.is_fallback() {
                                         ast::SwitchPattern::Fallback
                                     } else {
-                                        ast::SwitchPattern::Literals(
+                                        ast::SwitchPattern::Alternatives(
                                             pattern
-                                                .literals()
-                                                .filter_map(|token| literal_from_token(&token))
+                                                .alternatives()
+                                                .filter_map(|alternative| match alternative {
+                                                    cst::Expression::Literal(literal) => {
+                                                        lower_literal(&literal).and_then(|kind| {
+                                                            let ExpressionKind::Literal(literal) =
+                                                                kind
+                                                            else {
+                                                                return None;
+                                                            };
+                                                            Some(ast::SwitchAlternative::Literal(
+                                                                literal,
+                                                            ))
+                                                        })
+                                                    }
+                                                    cst::Expression::Name(name) => {
+                                                        Some(ast::SwitchAlternative::Name {
+                                                            path: path_from_tokens(
+                                                                name.path_tokens(),
+                                                            ),
+                                                            span: span(&name),
+                                                        })
+                                                    }
+                                                    _ => None,
+                                                })
                                                 .collect(),
                                         )
                                     }

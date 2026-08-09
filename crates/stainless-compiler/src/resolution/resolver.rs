@@ -173,6 +173,7 @@ impl Resolver<'_> {
             type_parameters: Vec::new(),
             const_parameters: Vec::new(),
             kind: ast::UserTypeKind::Struct,
+            enum_repr: None,
             base: None,
             interfaces: Vec::new(),
             is_sealed: false,
@@ -207,6 +208,7 @@ impl Resolver<'_> {
             type_parameters: Vec::new(),
             const_parameters: Vec::new(),
             kind: ast::UserTypeKind::Struct,
+            enum_repr: None,
             base: Some(UserTypeBase {
                 structure: root,
                 arguments: Vec::new(),
@@ -275,6 +277,7 @@ impl Resolver<'_> {
                         type_parameters: structure.type_parameters.clone(),
                         const_parameters: structure.const_parameters.clone(),
                         kind: structure.kind,
+                        enum_repr: None,
                         base: None,
                         interfaces: Vec::new(),
                         is_sealed: structure.is_sealed,
@@ -284,6 +287,35 @@ impl Resolver<'_> {
                     });
                     self.struct_by_path.insert(path, id);
                     self.struct_by_span.insert(structure.span, id);
+                }
+                Item::Enum(enumeration) => {
+                    let mut path = namespace.clone();
+                    path.push(enumeration.name.clone());
+                    if self.struct_by_path.contains_key(&path) {
+                        self.push(
+                            "RES039",
+                            format!("duplicate type definition `{}`", display_path(&path)),
+                            enumeration.span,
+                        );
+                        continue;
+                    }
+                    let id = StructId(self.model.structs.len());
+                    self.model.structs.push(StructSymbol {
+                        id,
+                        path: path.clone(),
+                        type_parameters: Vec::new(),
+                        const_parameters: Vec::new(),
+                        kind: ast::UserTypeKind::Struct,
+                        enum_repr: None,
+                        base: None,
+                        interfaces: Vec::new(),
+                        is_sealed: true,
+                        fields: Vec::new(),
+                        static_constants: Vec::new(),
+                        span: enumeration.span,
+                    });
+                    self.struct_by_path.insert(path, id);
+                    self.struct_by_span.insert(enumeration.span, id);
                 }
                 Item::Use(_) | Item::Constructor(_) | Item::Function(_) => {}
             }
@@ -356,6 +388,17 @@ impl Resolver<'_> {
                         let base_kind = self.model.structs[found.0].kind;
                         let base_path = self.model.structs[found.0].path.clone();
                         let base_sealed = self.model.structs[found.0].is_sealed;
+                        if self.model.structs[found.0].enum_repr.is_some() {
+                            self.push(
+                                "RES132",
+                                format!(
+                                    "enum `{}` cannot be used as a base type",
+                                    display_path(&base_path)
+                                ),
+                                base_syntax.span,
+                            );
+                            continue;
+                        }
                         if base_sealed
                             && base_path[..base_path.len().saturating_sub(1)]
                                 != self.model.structs[id.0].path
@@ -594,6 +637,96 @@ impl Resolver<'_> {
                     symbol.fields = fields;
                     symbol.static_constants = static_constants;
                 }
+                Item::Enum(enumeration) => {
+                    let Some(id) = self.struct_by_span.get(&enumeration.span).copied() else {
+                        continue;
+                    };
+                    let representation =
+                        self.resolve_type(&enumeration.representation, namespace, &[], &[], false);
+                    if !matches!(
+                        representation,
+                        TypeRef::U8 | TypeRef::U16 | TypeRef::U32 | TypeRef::U64
+                    ) && representation != TypeRef::Error
+                    {
+                        self.push(
+                            "RES132",
+                            format!(
+                                "enum representation must be `u8`, `u16`, `u32`, or `u64`, found `{}`",
+                                display_type(&representation)
+                            ),
+                            enumeration.representation.span,
+                        );
+                    }
+                    if enumeration.variants.is_empty() {
+                        self.push(
+                            "RES132",
+                            "an enum requires at least one member".to_owned(),
+                            enumeration.span,
+                        );
+                    }
+                    let enum_type = resolved_structure_type(&self.model.structs[id.0]);
+                    let mut names = BTreeSet::new();
+                    let mut values = BTreeSet::new();
+                    let variants = enumeration
+                        .variants
+                        .iter()
+                        .map(|variant| {
+                            if !names.insert(variant.name.clone()) {
+                                self.push(
+                                    "RES132",
+                                    format!("duplicate enum member `{}`", variant.name),
+                                    variant.span,
+                                );
+                            }
+                            let magnitude = integer_magnitude(&variant.value);
+                            if let Some(suffix) = integer_suffix(&variant.value)
+                                && suffix != representation
+                            {
+                                self.push(
+                                    "RES132",
+                                    format!(
+                                        "enum member literal suffix has type `{}`, expected `{}`",
+                                        display_type(&suffix),
+                                        display_type(&representation)
+                                    ),
+                                    variant.span,
+                                );
+                            }
+                            if magnitude.is_none_or(|value| {
+                                !integer_literal_fits(value, &representation, false)
+                            }) {
+                                self.push(
+                                    "RES132",
+                                    format!(
+                                        "enum member value `{}` does not fit in `{}`",
+                                        variant.value,
+                                        display_type(&representation)
+                                    ),
+                                    variant.span,
+                                );
+                            }
+                            if let Some(value) = magnitude
+                                && !values.insert(value)
+                            {
+                                self.push(
+                                    "RES132",
+                                    format!("duplicate enum member value `{}`", variant.value),
+                                    variant.span,
+                                );
+                            }
+                            StaticConstantSymbol {
+                                name: variant.name.clone(),
+                                is_public: true,
+                                ty: enum_type.clone(),
+                                value: variant.value.clone(),
+                                span: variant.span,
+                            }
+                        })
+                        .collect();
+                    let symbol = &mut self.model.structs[id.0];
+                    symbol.enum_repr = Some(representation);
+                    symbol.static_constants = variants;
+                }
                 Item::Use(_) | Item::Constructor(_) | Item::Function(_) => {}
             }
         }
@@ -654,10 +787,9 @@ impl Resolver<'_> {
 
     fn validate_interface_contracts(&mut self) {
         let structures = self.model.structs.clone();
-        for implementer in structures
-            .iter()
-            .filter(|structure| structure.kind != ast::UserTypeKind::Interface)
-        {
+        for implementer in structures.iter().filter(|structure| {
+            structure.kind != ast::UserTypeKind::Interface && structure.enum_repr.is_none()
+        }) {
             let mut interfaces = BTreeSet::new();
             for interface in &implementer.interfaces {
                 self.collect_interface_closure(*interface, &mut interfaces);
@@ -812,7 +944,7 @@ impl Resolver<'_> {
                     self.collect_constructor(constructor, namespace, None);
                 }
                 Item::Function(function) => self.collect_function(function, namespace, None),
-                Item::Use(_) => {}
+                Item::Enum(_) | Item::Use(_) => {}
             }
         }
     }
@@ -853,6 +985,14 @@ impl Resolver<'_> {
             );
             return;
         };
+        if self.model.structs[owner.0].enum_repr.is_some() {
+            self.push(
+                "RES132",
+                "enums cannot declare constructors".to_owned(),
+                constructor.span,
+            );
+            return;
+        }
         self.validate_qualified_owner_arguments(
             &constructor.owner_arguments,
             owner,
@@ -1027,7 +1167,7 @@ impl Resolver<'_> {
 
     fn synthesize_default_constructors(&mut self) {
         for structure in self.model.structs.clone() {
-            if structure.kind == ast::UserTypeKind::Interface {
+            if structure.kind == ast::UserTypeKind::Interface || structure.enum_repr.is_some() {
                 continue;
             }
             if self
@@ -1217,6 +1357,14 @@ impl Resolver<'_> {
                 .then(|| self.struct_by_path.get(&path[..path.len() - 1]).copied())
                 .flatten()
         });
+        if owner.is_some_and(|owner| self.model.structs[owner.0].enum_repr.is_some()) {
+            self.push(
+                "RES132",
+                "enums cannot declare member functions".to_owned(),
+                function.span,
+            );
+            return;
+        }
         if let Some(owner) = owner {
             self.validate_qualified_owner_arguments(
                 &function.owner_arguments,
@@ -1548,7 +1696,7 @@ impl Resolver<'_> {
                         self.resolve_function_body(function, namespace);
                     }
                 }
-                Item::Use(_) => {}
+                Item::Enum(_) | Item::Use(_) => {}
             }
         }
         if namespace.is_empty() {
@@ -3609,6 +3757,7 @@ impl Resolver<'_> {
         temporary(json_var_type())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn resolve_switch(
         &mut self,
         scrutinee: &Expression,
@@ -3649,35 +3798,77 @@ impl Resolver<'_> {
                         );
                     }
                 }
-                ast::SwitchPattern::Literals(literals) => {
-                    for literal in literals {
-                        if !matches!(
-                            literal.kind,
-                            LiteralKind::Integer
-                                | LiteralKind::Character
-                                | LiteralKind::Boolean
-                                | LiteralKind::String
-                        ) {
-                            self.push(
-                                "RES129",
-                                "switch patterns support integer, character, boolean, and string literals"
-                                    .to_owned(),
-                                arm.span,
-                            );
-                        }
-                        let pattern_type =
-                            literal_type(literal.kind, &literal.text, Some(&scrutinee_type));
+                ast::SwitchPattern::Alternatives(alternatives) => {
+                    for alternative in alternatives {
+                        let (pattern_type, key, display) = match alternative {
+                            ast::SwitchAlternative::Literal(literal) => {
+                                if !matches!(
+                                    literal.kind,
+                                    LiteralKind::Integer
+                                        | LiteralKind::Character
+                                        | LiteralKind::Boolean
+                                        | LiteralKind::String
+                                ) {
+                                    self.push(
+                                        "RES129",
+                                        "switch patterns support integer, character, boolean, string, and enum-member alternatives"
+                                            .to_owned(),
+                                        arm.span,
+                                    );
+                                }
+                                (
+                                    literal_type(
+                                        literal.kind,
+                                        &literal.text,
+                                        Some(&scrutinee_type),
+                                    ),
+                                    format!("{:?}:{}", literal.kind, literal.text),
+                                    literal.text.clone(),
+                                )
+                            }
+                            ast::SwitchAlternative::Name { path, span } => {
+                                let Some((structure, constant)) =
+                                    self.lookup_static_constant(path, context)
+                                else {
+                                    self.push(
+                                        "RES129",
+                                        format!(
+                                            "switch pattern `{}` is not a scoped enum member",
+                                            path.display()
+                                        ),
+                                        *span,
+                                    );
+                                    continue;
+                                };
+                                if self.model.structs[structure.0].enum_repr.is_none() {
+                                    self.push(
+                                        "RES129",
+                                        format!(
+                                            "switch pattern `{}` is not an enum member",
+                                            path.display()
+                                        ),
+                                        *span,
+                                    );
+                                    continue;
+                                }
+                                let (info, _) = self.resolve_value_name(path, *span, context);
+                                (
+                                    info.ty,
+                                    format!("enum:{}:{constant}", structure.0),
+                                    path.display(),
+                                )
+                            }
+                        };
                         self.require_exact(
                             &scrutinee_type,
                             &pattern_type,
                             arm.span,
                             "switch pattern",
                         );
-                        let key = format!("{:?}:{}", literal.kind, literal.text);
                         if !patterns.insert(key) {
                             self.push(
                                 "RES129",
-                                format!("duplicate switch pattern `{}`", literal.text),
+                                format!("duplicate switch pattern `{display}`"),
                                 arm.span,
                             );
                         }
@@ -4784,7 +4975,7 @@ impl Resolver<'_> {
             return temporary(TypeRef::Bool);
         }
         if matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual)
-            && supports_equality(&left_type)
+            && (supports_equality(&left_type) || self.enum_representation(&left_type).is_some())
         {
             return temporary(TypeRef::Bool);
         }
@@ -4795,6 +4986,13 @@ impl Resolver<'_> {
                 | BinaryOperator::Greater
                 | BinaryOperator::GreaterEqual
         ) && supports_ordering(&left_type)
+            || matches!(
+                operator,
+                BinaryOperator::Less
+                    | BinaryOperator::LessEqual
+                    | BinaryOperator::Greater
+                    | BinaryOperator::GreaterEqual
+            ) && self.enum_representation(&left_type).is_some()
         {
             return temporary(TypeRef::Bool);
         }
@@ -6362,6 +6560,8 @@ impl Resolver<'_> {
                                 || self.is_interface_owner_binding(&parameter_ty, &adjusted.ty)
                                 || self.is_class_owner_binding(&parameter_ty, &adjusted.ty)
                                 || Self::is_shared_to_weak_binding(&parameter_ty, &adjusted.ty)
+                                || candidates.len() == 1
+                                    && self.is_enum_integer_binding(&parameter_ty, &adjusted.ty)
                         })
                 })
                 .collect::<Vec<_>>()
@@ -7260,6 +7460,17 @@ impl Resolver<'_> {
             return (error_info(), None);
         }
         let argument = self.resolve_expression(&arguments[0], None, context);
+        if self.is_enum_integer_binding(&target, &argument.ty) {
+            let call = ResolvedCall {
+                span,
+                target: CallTarget::Intrinsic(Intrinsic::PrimitiveCast {
+                    target: target.clone(),
+                }),
+                return_type: target.clone(),
+                throws: Vec::new(),
+            };
+            return (temporary(target), Some(call));
+        }
         if is_json_var(&canonical(&argument.ty)) && is_numeric(&target) {
             let call = ResolvedCall {
                 span,
@@ -7506,6 +7717,8 @@ impl Resolver<'_> {
                                 || self.is_interface_owner_binding(&parameter_ty, &adjusted.ty)
                                 || self.is_class_owner_binding(&parameter_ty, &adjusted.ty)
                                 || Self::is_shared_to_weak_binding(&parameter_ty, &adjusted.ty)
+                                || arity_candidates.len() == 1
+                                    && self.is_enum_integer_binding(&parameter_ty, &adjusted.ty)
                         })
                 })
                 .collect::<Vec<_>>()
@@ -7731,6 +7944,8 @@ impl Resolver<'_> {
                                 || self.is_interface_owner_binding(&parameter.ty, &adjusted.ty)
                                 || self.is_class_owner_binding(&parameter.ty, &adjusted.ty)
                                 || Self::is_shared_to_weak_binding(&parameter.ty, &adjusted.ty)
+                                || arity_candidates.len() == 1
+                                    && self.is_enum_integer_binding(&parameter.ty, &adjusted.ty)
                         })
                 })
                 .collect::<Vec<_>>()
@@ -7952,6 +8167,7 @@ impl Resolver<'_> {
                         .zip(&actual)
                         .all(|(expected, actual)| {
                             canonical(expected) == canonical(&actual.ty)
+                                || self.is_enum_integer_binding(expected, &actual.ty)
                                 || is_json_var(&canonical(expected))
                                     && self.is_json_compatible(&canonical(&actual.ty))
                         })
@@ -8171,6 +8387,7 @@ impl Resolver<'_> {
             && !self.is_interface_owner_binding(expected, &actual.ty)
             && !self.is_class_owner_binding(expected, &actual.ty)
             && !Self::is_shared_to_weak_binding(expected, &actual.ty)
+            && !self.is_enum_integer_binding(expected, &actual.ty)
         {
             self.require_exact(expected, &actual.ty, span, description);
         }
@@ -8248,6 +8465,21 @@ impl Resolver<'_> {
         };
         self.project_user_type_to_base(automatic_pointee(actual), expected_id)
             .is_some_and(|projected| canonical_ref(&projected) == canonical_ref(expected_target))
+    }
+
+    fn is_enum_integer_binding(&self, expected: &TypeRef, actual: &TypeRef) -> bool {
+        self.enum_representation(actual)
+            .is_some_and(|representation| {
+                is_non_narrowing_same_signed_integer(representation, canonical_ref(expected))
+            })
+    }
+
+    fn enum_representation(&self, ty: &TypeRef) -> Option<&TypeRef> {
+        let TypeRef::Struct { path, .. } = canonical_ref(ty) else {
+            return None;
+        };
+        let structure = self.struct_by_path.get(path)?;
+        self.model.structs[structure.0].enum_repr.as_ref()
     }
 
     fn is_interface_owner_binding(&self, expected: &TypeRef, actual: &TypeRef) -> bool {
@@ -9501,6 +9733,12 @@ impl Resolver<'_> {
             let Some(structure) = self.struct_by_path.get(path).copied() else {
                 return Some(format!("struct `{}` is unresolved", display_path(path)));
             };
+            if self.model.structs[structure.0].enum_repr.is_some() {
+                return Some(format!(
+                    "enum `{}` has no implicit JSON representation; convert it to its representation type first",
+                    display_path(path)
+                ));
+            }
             if !arguments.is_empty() {
                 return Some(format!(
                     "generic struct `{}` automatic JSON conversion is deferred",
@@ -9655,6 +9893,10 @@ impl Resolver<'_> {
         if symbol.kind != ast::UserTypeKind::Struct {
             visiting.remove(&key);
             return false;
+        }
+        if symbol.enum_repr.is_some() {
+            visiting.remove(&key);
+            return true;
         }
         let substitutions = symbol
             .type_parameters
@@ -10833,6 +11075,32 @@ fn is_integer(ty: &TypeRef) -> bool {
     )
 }
 
+fn is_non_narrowing_same_signed_integer(source: &TypeRef, target: &TypeRef) -> bool {
+    let Some((source_signed, source_bits)) = fixed_width_integer_layout(source) else {
+        return false;
+    };
+    let Some((target_signed, target_bits)) = fixed_width_integer_layout(target) else {
+        return false;
+    };
+    source_signed == target_signed && source_bits <= target_bits
+}
+
+fn fixed_width_integer_layout(ty: &TypeRef) -> Option<(bool, u32)> {
+    Some(match canonical_ref(ty) {
+        TypeRef::I8 => (true, 8),
+        TypeRef::I16 => (true, 16),
+        TypeRef::I32 => (true, 32),
+        TypeRef::I64 => (true, 64),
+        TypeRef::I128 => (true, 128),
+        TypeRef::U8 => (false, 8),
+        TypeRef::U16 => (false, 16),
+        TypeRef::U32 => (false, 32),
+        TypeRef::U64 => (false, 64),
+        TypeRef::U128 => (false, 128),
+        _ => return None,
+    })
+}
+
 fn is_index_type(ty: &TypeRef) -> bool {
     matches!(
         ty,
@@ -11544,7 +11812,7 @@ fn source_uses_exceptions(source: &SourceFile) -> bool {
                 !function.throws.is_empty()
                     || function.body.as_ref().is_some_and(block_uses_exceptions)
             }
-            Item::Use(_) => false,
+            Item::Enum(_) | Item::Use(_) => false,
         })
     }
 

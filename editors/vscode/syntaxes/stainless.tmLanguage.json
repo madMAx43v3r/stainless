@@ -109,6 +109,15 @@
     "declarations": {
       "patterns": [
         {
+          "match": "\\b(enum)(\\s+)([A-Za-z_][A-Za-z0-9_]*)(\\s*)(:)(\\s*)(u8|u16|u32|u64)\\b",
+          "captures": {
+            "1": { "name": "storage.type.declaration.stainless" },
+            "3": { "name": "entity.name.type.stainless" },
+            "5": { "name": "punctuation.separator.type.stainless" },
+            "7": { "name": "storage.type.primitive.stainless" }
+          }
+        },
+        {
           "name": "meta.declaration.type.generic.stainless",
           "begin": "\\b(struct|class|interface)(\\s+)(?:(sealed|native)(\\s+))?([A-Za-z_][A-Za-z0-9_]*)(?=\\s*<)",
           "beginCaptures": {
@@ -268,7 +277,7 @@
         },
         {
           "name": "keyword.other.declaration.stainless",
-          "match": "\\b(?:namespace|use|mod|struct|class|interface)\\b"
+          "match": "\\b(?:namespace|use|mod|struct|class|interface|enum)\\b"
         },
         {
           "name": "storage.modifier.stainless",

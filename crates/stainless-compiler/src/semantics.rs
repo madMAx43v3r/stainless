@@ -82,7 +82,7 @@ impl Validator {
                 }
                 Item::Constructor(constructor) => self.constructor(constructor),
                 Item::Function(function) => self.function(function),
-                Item::Use(_) => {}
+                Item::Enum(_) | Item::Use(_) => {}
             }
         }
     }

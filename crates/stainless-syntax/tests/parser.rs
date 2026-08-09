@@ -44,21 +44,43 @@ i32 classify(const String& value) {
     );
 
     let underscore = parse("i32 classify(u8 value) { return switch (value) { _ => 0 }; }");
-    assert!(
-        underscore
-            .errors()
-            .iter()
-            .any(|error| { error.message == "expected a literal or `else` switch pattern" })
-    );
+    assert!(underscore.errors().iter().any(|error| {
+        error.message == "expected a literal, enum member, or `else` switch pattern"
+    }));
 
     let dangling_alternative =
         parse("i32 classify(u8 value) { return switch (value) { 0 | => 1, else => 0 }; }");
-    assert!(
-        dangling_alternative
-            .errors()
-            .iter()
-            .any(|error| { error.message == "expected a literal after `|` in switch pattern" })
+    assert!(dangling_alternative.errors().iter().any(|error| {
+        error.message == "expected a literal or enum member after `|` in switch pattern"
+    }));
+}
+
+#[test]
+fn parses_scoped_enums_and_enum_switch_patterns_losslessly() {
+    let source = include_str!("../../../docs/ref/33_enums.stl");
+    let parsed = parse(source);
+    let tree = parsed.tree();
+    let enumeration = tree
+        .items()
+        .find_map(|item| match item {
+            Item::Namespace(namespace) => namespace.items().find_map(|item| match item {
+                Item::Enum(enumeration) => Some(enumeration),
+                _ => None,
+            }),
+            _ => None,
+        })
+        .expect("RecordKind enum");
+
+    assert!(parsed.errors().is_empty(), "{:?}", parsed.errors());
+    assert_eq!(parsed.syntax().to_string(), source);
+    assert_eq!(
+        enumeration.name_token().expect("enum name").text(),
+        "RecordKind"
     );
+    assert_eq!(enumeration.variants().count(), 3);
+    assert_eq!(count_kind(&parsed.syntax(), SyntaxKind::EnumDefinition), 1);
+    assert_eq!(count_kind(&parsed.syntax(), SyntaxKind::EnumVariant), 3);
+    assert_eq!(count_kind(&parsed.syntax(), SyntaxKind::NameExpression), 7);
 }
 
 #[test]

@@ -102,6 +102,8 @@ enum RawToken {
     ClassKw,
     #[token("interface")]
     InterfaceKw,
+    #[token("enum")]
+    EnumKw,
     #[token("public")]
     PublicKw,
     #[token("private")]
@@ -254,6 +256,7 @@ impl From<RawToken> for SyntaxKind {
             RawToken::StructKw => Self::StructKw,
             RawToken::ClassKw => Self::ClassKw,
             RawToken::InterfaceKw => Self::InterfaceKw,
+            RawToken::EnumKw => Self::EnumKw,
             RawToken::PublicKw => Self::PublicKw,
             RawToken::PrivateKw => Self::PrivateKw,
             RawToken::ThrowsKw => Self::ThrowsKw,

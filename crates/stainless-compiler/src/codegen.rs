@@ -252,6 +252,9 @@ impl Emitter {
 
     fn structure(structure: &hir::Struct) -> Result<TokenStream, String> {
         let name = identifier(&structure.rust_name)?;
+        if let Some(representation) = &structure.enum_repr {
+            return Self::enumeration(&name, representation, &structure.static_constants);
+        }
         let type_parameters = generic_parameter_declarations(
             &structure.type_parameters,
             &structure.const_parameters,
@@ -350,6 +353,30 @@ impl Emitter {
             #json_conversion
             #exception_impl
             #(#interface_implementations)*
+        })
+    }
+
+    fn enumeration(
+        name: &Ident,
+        representation: &hir::Type,
+        variants: &[hir::StaticConstant],
+    ) -> Result<TokenStream, String> {
+        let representation = type_tokens(representation, None)?;
+        let variants = variants
+            .iter()
+            .map(|variant| {
+                let name = identifier(&variant.rust_name)?;
+                let value = literal(LiteralKind::Integer, &variant.value)?;
+                Ok(quote!(#name = #value))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(quote! {
+            #[repr(#representation)]
+            #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+            #[allow(non_snake_case)]
+            pub enum #name {
+                #(#variants),*
+            }
         })
     }
 
@@ -586,6 +613,7 @@ impl Emitter {
             #[allow(
                 non_snake_case,
                 unreachable_code,
+                unreachable_patterns,
                 unused_mut,
                 unused_parens,
                 unused_variables,
@@ -968,10 +996,31 @@ impl Emitter {
                     .iter()
                     .map(|arm| {
                         let pattern = match &arm.pattern {
-                            hir::SwitchPattern::Literals(literals) => {
-                                let alternatives = literals
+                            hir::SwitchPattern::Alternatives(patterns) => {
+                                let alternatives = patterns
                                     .iter()
-                                    .map(|literal| switch_literal(literal.kind, &literal.text))
+                                    .map(|alternative| match alternative {
+                                        hir::SwitchAlternative::Literal(literal) => {
+                                            switch_literal(literal.kind, &literal.text)
+                                        }
+                                        hir::SwitchAlternative::StaticConstant {
+                                            modules,
+                                            structure,
+                                            constant,
+                                        } => {
+                                            let target = if modules.is_empty() {
+                                                format!("crate::{structure}")
+                                            } else {
+                                                format!(
+                                                    "crate::{}::{structure}",
+                                                    modules.join("::")
+                                                )
+                                            };
+                                            let target = path(&target)?;
+                                            let constant = identifier(constant)?;
+                                            Ok(quote!(#target::#constant))
+                                        }
+                                    })
                                     .collect::<Result<Vec<_>, String>>()?;
                                 quote!(#(#alternatives)|*)
                             }
