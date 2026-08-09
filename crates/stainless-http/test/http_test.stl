@@ -48,11 +48,11 @@ i32 main() throws stainless::Exception
     });
 
     var event = http::receive(server, 2000);
-    if (event == null || String(event.type) != "http" ||
-        String(event.method) != "GET" ||
-        String(event.path) != "/v1/tables" ||
-        String(event.query) != "template=fast" ||
-        String(event.headers.get("x-test-header")) != "test-value") {
+    if (event == null || event.type != "http" ||
+        event.method != "GET" ||
+        event.path != "/v1/tables" ||
+        event.query != "template=fast" ||
+        event.headers.get("x-test-header") != "test-value") {
         return 2;
     }
     if (!http::respond_json(server, u64(event.request_id), 200, {ok: true})) {
@@ -60,9 +60,9 @@ i32 main() throws stainless::Exception
     }
 
     var post_event = http::receive(server, 2000);
-    if (post_event == null || String(post_event.type) != "http" || String(post_event.method) != "POST" ||
-        String(post_event.path) != "/v1/binary" || post_event.body != null || u64(post_event.body_is_utf8) != 0 ||
-        String(post_event.headers.get("content-type")) != "application/octet-stream") {
+    if (post_event == null || post_event.type != "http" || post_event.method != "POST" ||
+        post_event.path != "/v1/binary" || post_event.body != null || u64(post_event.body_is_utf8) != 0 ||
+        post_event.headers.get("content-type") != "application/octet-stream") {
         return 4;
     }
     Vec<u8> request_body = http::request_bytes(server, u64(post_event.request_id));
@@ -78,8 +78,8 @@ i32 main() throws stainless::Exception
     }
 
     var get_event = http::receive(server, 2000);
-    if (get_event == null || String(get_event.type) != "http" || String(get_event.method) != "GET" ||
-        String(get_event.path) != "/v1/binary") {
+    if (get_event == null || get_event.type != "http" || get_event.method != "GET" ||
+        get_event.path != "/v1/binary") {
         return 7;
     }
     Vec<u8> empty_body = http::request_bytes(server, u64(get_event.request_id));

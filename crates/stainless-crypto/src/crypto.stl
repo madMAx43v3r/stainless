@@ -45,7 +45,7 @@ String hex_bytes(const Vec<u8>& bytes)
 
 Vec<u8> decode_hex(const String& source)
 {
-    String copied = String(source);
+    String copied = source.clone();
     Vec<u8> encoded = move(copied).into_bytes();
     Vec<u8> decoded;
     u8 high = 0;
@@ -84,7 +84,7 @@ String random_hex(const usize length) throws stainless::RustError
 
 u128 parse_decimal_u128(const String& source) throws DecimalError
 {
-    String copied = String(source);
+    String copied = source.clone();
     Vec<u8> bytes = move(copied).into_bytes();
     if (bytes.len() == 0) {
         throw DecimalError{stainless::Exception(

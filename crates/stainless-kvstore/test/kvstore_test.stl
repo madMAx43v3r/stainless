@@ -110,7 +110,7 @@ i32 self_test(const String& path)
     json_table.insert(7, 9, stored);
     json_table.commit(1);
     var decoded = var();
-    if (!json_table.find(7, 9, decoded) || String(decoded) != "typed value") {
+    if (!json_table.find(7, 9, decoded) || decoded != "typed value") {
         status = 3;
     }
     var refreshed = "same version";
@@ -124,7 +124,7 @@ i32 self_test(const String& path)
         json_path,
         codecs::u32_key(),
         codecs::u64_key());
-    if (!recovered_json_table.find(7, 9, decoded) || String(decoded) != "same version") {
+    if (!recovered_json_table.find(7, 9, decoded) || decoded != "same version") {
         status = 20;
     }
 
@@ -237,7 +237,7 @@ i32 self_test(const String& path)
     string_table.commit(1);
     var found_string_value = var();
     if (!string_table.find("alpha", found_string_value) ||
-        String(found_string_value) != "string key value") {
+        found_string_value != "string key value") {
         status = 12;
     }
 
@@ -279,8 +279,8 @@ i32 self_test(const String& path)
     var found_second_database_value = var();
     if (!database_first.find("key", found_first_database_value) ||
         !database_second.find(7, found_second_database_value) ||
-        String(found_first_database_value) != "first table" ||
-        String(found_second_database_value) != "second table") {
+        found_first_database_value != "first table" ||
+        found_second_database_value != "second table") {
         status = 14;
     }
 
@@ -295,7 +295,7 @@ i32 self_test(const String& path)
         status = 16;
     }
     if (!database_first.find("key", found_first_database_value) ||
-        String(found_first_database_value) != "first table") {
+        found_first_database_value != "first table") {
         status = 17;
     }
     if (!database.revert(0) || database_first.find("key", found_first_database_value) ||

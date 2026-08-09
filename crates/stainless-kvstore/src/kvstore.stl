@@ -244,7 +244,7 @@ KeyCodec<Vec<T>> KeyCodec<T>::vec() const
                                 values.push(move(element.value));
                                 element_bytes.clear();
                             }
-                        } else if (byte == 0 && element_bytes.is_empty()) {
+                        } else if (byte == 0 && element_bytes.empty()) {
                             finished = true;
                         } else {
                             valid = false;
@@ -700,7 +700,7 @@ void Database::add(shared_ptr<RawTable> table) const
 bool Database::commit(u32 next_version) const
 {
     auto guard = state.lock();
-    if (guard.tables.is_empty()) {
+    if (guard.tables.empty()) {
         return false;
     }
     u32 current_version = 0;
@@ -728,7 +728,7 @@ bool Database::commit(u32 next_version) const
 bool Database::revert(u32 version) const
 {
     auto guard = state.lock();
-    if (guard.tables.is_empty()) {
+    if (guard.tables.empty()) {
         return false;
     }
     for (auto table : guard.tables) {
@@ -747,7 +747,7 @@ bool Database::revert(u32 version) const
 u32 Database::current_version() const
 {
     auto guard = state.lock();
-    if (guard.tables.is_empty()) {
+    if (guard.tables.empty()) {
         return 0;
     }
     u32 version = Limits::MaxVersion;
@@ -763,7 +763,7 @@ u32 Database::current_version() const
 u32 Database::recover() const
 {
     auto guard = state.lock();
-    if (guard.tables.is_empty()) {
+    if (guard.tables.empty()) {
         return 0;
     }
     u32 version = Limits::MaxVersion;
@@ -1128,7 +1128,7 @@ KeyCodec<String> string_key()
 {
     return KeyCodec<String>{
         [](const String& value) {
-            String copy = String(value);
+            String copy = value.clone();
             Vec<u8> utf8 = move(copy).into_bytes();
             Vec<u8> bytes;
             for (const u8& byte : utf8) {

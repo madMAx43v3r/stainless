@@ -194,7 +194,7 @@ bool validate_address(const String& address)
     if (address == "MMX") {
         return true;
     }
-    String copied = String(address);
+    String copied = address.clone();
     Vec<u8> bytes = move(copied).into_bytes();
     if (bytes.len() != 62 || bytes.remove(0) != 109 ||
         bytes.remove(0) != 109 || bytes.remove(0) != 120 ||
