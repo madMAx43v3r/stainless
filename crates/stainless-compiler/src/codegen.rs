@@ -1775,7 +1775,7 @@ impl Emitter {
             hir::Expression::Cast { expression, target } => {
                 let expression = self.expression(expression)?;
                 let target = type_tokens(target, None)?;
-                Ok(quote!((#expression) as #target))
+                Ok(quote!(((#expression) as #target)))
             }
             _ => unreachable!("only call-like expressions are delegated"),
         }

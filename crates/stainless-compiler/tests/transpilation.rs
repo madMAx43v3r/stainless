@@ -11,6 +11,24 @@ use stainless_compiler::{DiagnosticPhase, transpile, transpile_with_bindings};
 static TEMPORARY_INDEX: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
+fn primitive_casts_are_valid_comparison_operands() {
+    let source = r"bool cast_before_less_than(usize index, const u128& total, usize count) {
+    return u128(index) < total % u128(count);
+}
+";
+    let result = transpile(source);
+    assert!(
+        result.analysis.diagnostics.is_empty(),
+        "{:#?}",
+        result.analysis.diagnostics
+    );
+    let rust = result
+        .rust
+        .expect("a cast before `<` should emit valid Rust");
+    compile_rust("cast-before-less-than", &rust, CrateKind::Library);
+}
+
+#[test]
 fn switch_expressions_lower_to_exhaustive_rust_matches() {
     let source = format!(
         "{}\n{}",
