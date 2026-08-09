@@ -1240,6 +1240,15 @@ impl Lowerer<'_> {
         }
         let resolution = self.semantics.expression(expression.span);
         if let Some(actual) = resolution
+            && let Some(value_type) = optional_value_type(expected)
+            && canonical_ref(value_type) == canonical_ref(&actual.ty)
+        {
+            return Some(hir::Expression::AssociatedCall {
+                rust_path: "::core::option::Option::Some".to_owned(),
+                arguments: vec![self.lower_bound_expression(expression, value_type)?],
+            });
+        }
+        if let Some(actual) = resolution
             && enum_representation(canonical_ref(&actual.ty), self.semantics).is_some_and(
                 |representation| {
                     is_non_narrowing_same_signed_integer(representation, canonical_ref(expected))
@@ -3732,9 +3741,19 @@ fn nullable_test_kind(ty: &TypeRef) -> Option<PointerKind> {
 
 fn is_optional_test(ty: &TypeRef) -> bool {
     match canonical_ref(ty) {
-        TypeRef::Native { path, arguments } => path == "rust::Option" && arguments.len() == 1,
+        TypeRef::Native { .. } => optional_value_type(ty).is_some(),
         TypeRef::Reference { target, .. } => is_optional_test(target),
         _ => false,
+    }
+}
+
+fn optional_value_type(ty: &TypeRef) -> Option<&TypeRef> {
+    let TypeRef::Native { path, arguments } = canonical_ref(ty) else {
+        return None;
+    };
+    match (path.as_str(), arguments.as_slice()) {
+        ("rust::Option", [value]) => Some(value),
+        _ => None,
     }
 }
 

@@ -3495,7 +3495,8 @@ impl Resolver<'_> {
                 (error_info(), None, None)
             }
             ExpressionKind::Literal(literal) => {
-                let ty = literal_type(literal.kind, &literal.text, expected);
+                let literal_expected = expected.and_then(optional_value_type).or(expected);
+                let ty = literal_type(literal.kind, &literal.text, literal_expected);
                 if literal.kind == LiteralKind::Integer
                     && let Some(magnitude) = integer_magnitude(&literal.text)
                     && !integer_literal_fits(magnitude, &ty, self.resolving_negated_integer_literal)
@@ -6621,7 +6622,8 @@ impl Resolver<'_> {
                                 || self.is_class_owner_binding(&parameter_ty, &adjusted.ty)
                                 || Self::is_shared_to_weak_binding(&parameter_ty, &adjusted.ty)
                                 || candidates.len() == 1
-                                    && self.is_enum_integer_binding(&parameter_ty, &adjusted.ty)
+                                    && (self.is_enum_integer_binding(&parameter_ty, &adjusted.ty)
+                                        || is_optional_value_binding(&parameter_ty, &adjusted.ty))
                         })
                 })
                 .collect::<Vec<_>>()
@@ -7796,7 +7798,8 @@ impl Resolver<'_> {
                                 || self.is_class_owner_binding(&parameter_ty, &adjusted.ty)
                                 || Self::is_shared_to_weak_binding(&parameter_ty, &adjusted.ty)
                                 || arity_candidates.len() == 1
-                                    && self.is_enum_integer_binding(&parameter_ty, &adjusted.ty)
+                                    && (self.is_enum_integer_binding(&parameter_ty, &adjusted.ty)
+                                        || is_optional_value_binding(&parameter_ty, &adjusted.ty))
                         })
                 })
                 .collect::<Vec<_>>()
@@ -8087,7 +8090,8 @@ impl Resolver<'_> {
                                 || self.is_class_owner_binding(&parameter.ty, &adjusted.ty)
                                 || Self::is_shared_to_weak_binding(&parameter.ty, &adjusted.ty)
                                 || arity_candidates.len() == 1
-                                    && self.is_enum_integer_binding(&parameter.ty, &adjusted.ty)
+                                    && (self.is_enum_integer_binding(&parameter.ty, &adjusted.ty)
+                                        || is_optional_value_binding(&parameter.ty, &adjusted.ty))
                         })
                 })
                 .collect::<Vec<_>>()
@@ -8328,6 +8332,7 @@ impl Resolver<'_> {
                         .all(|(expected, actual)| {
                             canonical(expected) == canonical(&actual.ty)
                                 || self.is_enum_integer_binding(expected, &actual.ty)
+                                || is_optional_value_binding(expected, &actual.ty)
                                 || is_json_var(&canonical(expected))
                                     && self.is_json_compatible(&canonical(&actual.ty))
                         })
@@ -8548,8 +8553,15 @@ impl Resolver<'_> {
             && !self.is_class_owner_binding(expected, &actual.ty)
             && !Self::is_shared_to_weak_binding(expected, &actual.ty)
             && !self.is_enum_integer_binding(expected, &actual.ty)
+            && !is_optional_value_binding(expected, &actual.ty)
         {
             self.require_exact(expected, &actual.ty, span, description);
+        }
+        if let Some(value_type) = optional_value_type(expected)
+            && canonical_ref(value_type) == canonical_ref(&actual.ty)
+        {
+            self.validate_value_use(value_type, actual, span, description);
+            return;
         }
         match expected {
             TypeRef::Reference { mutable: true, .. }
@@ -11079,10 +11091,24 @@ fn is_nullable_pointer_test(ty: &TypeRef) -> bool {
 
 fn is_optional_test(ty: &TypeRef) -> bool {
     match canonical_ref(ty) {
-        TypeRef::Native { path, arguments } => path == "rust::Option" && arguments.len() == 1,
+        TypeRef::Native { .. } => optional_value_type(ty).is_some(),
         TypeRef::Reference { target, .. } => is_optional_test(target),
         _ => false,
     }
+}
+
+fn optional_value_type(ty: &TypeRef) -> Option<&TypeRef> {
+    let TypeRef::Native { path, arguments } = canonical_ref(ty) else {
+        return None;
+    };
+    match (path.as_str(), arguments.as_slice()) {
+        ("rust::Option", [value]) => Some(value),
+        _ => None,
+    }
+}
+
+fn is_optional_value_binding(expected: &TypeRef, actual: &TypeRef) -> bool {
+    optional_value_type(expected).is_some_and(|value| canonical_ref(value) == canonical_ref(actual))
 }
 
 fn set_expression_null_state(

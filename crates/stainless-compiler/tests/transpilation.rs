@@ -247,6 +247,27 @@ bool optional_reference_truthiness(const optional<String>& value)
 {
     return bool(value);
 }
+
+optional<String> make_optional_value()
+{
+    return "made";
+}
+
+u32 consume_optional_value(optional<u32> value)
+{
+    return value.value_or(0);
+}
+
+bool optional_value_conversion()
+{
+    optional<String> text;
+    text = "assigned";
+    optional<u64> number = 9;
+    return text.value_or("missing") == "assigned" &&
+        make_optional_value().value_or("missing") == "made" &&
+        number.value_or(0) == 9 &&
+        consume_optional_value(7) == 7;
+}
 "#;
     let result = transpile(source);
     assert!(
@@ -272,13 +293,23 @@ bool optional_reference_truthiness(const optional<String>& value)
         .expect("optional_reference_truthiness symbol")
         .mangled_name
         .clone();
+    let value_function = result
+        .analysis
+        .semantics
+        .functions
+        .iter()
+        .find(|function| function.path == ["optional_value_conversion"])
+        .expect("optional_value_conversion symbol")
+        .mangled_name
+        .clone();
     let mut rust = result
         .rust
         .expect("optional truth conversion should emit Rust");
     assert!(rust.contains("is_some()"), "{rust}");
+    assert!(rust.contains("Option::Some"), "{rust}");
     write!(
         rust,
-        "\nfn main() {{ assert!({function}()); let value = Some(::std::string::String::from(\"value\")); assert!({reference_function}(&value)); }}\n"
+        "\nfn main() {{ assert!({function}()); let value = Some(::std::string::String::from(\"value\")); assert!({reference_function}(&value)); assert!({value_function}()); }}\n"
     )
     .expect("writing to a String cannot fail");
     let binary = compile_rust("optional-truthiness", &rust, CrateKind::Binary);

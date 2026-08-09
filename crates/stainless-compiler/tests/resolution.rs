@@ -31,10 +31,20 @@ Vec<u8> make_vec() {
 #[test]
 fn optional_is_available_without_an_import() {
     let analysis = analyze(
-        r"u32 optional_values() {
+        r"u32 consume_optional(optional<u32> value) {
+    return value.value_or(0);
+}
+
+optional<u64> make_optional() {
+    return 7;
+}
+
+u32 optional_values() {
     optional<u32> empty;
     optional<u32> populated = optional<u32>(7);
+    optional<u64> inferred = 8;
     optional<u32> copied = populated.clone();
+    empty = 5;
     bool converted = bool(populated);
     if (!converted || empty) {
         return 0;
@@ -45,7 +55,8 @@ fn optional_is_available_without_an_import() {
     for (; empty;) {
         return 2;
     }
-    return empty.value_or(3) + copied.value_or(4);
+    return empty.value_or(3) + copied.value_or(4) + consume_optional(6)
+        + u32(inferred.value_or(0));
 }
 ",
     );
@@ -53,6 +64,47 @@ fn optional_is_available_without_an_import() {
         analysis.diagnostics.is_empty(),
         "{:#?}",
         analysis.diagnostics
+    );
+}
+
+#[test]
+fn optional_value_conversion_preserves_moves_and_exact_overloads() {
+    let ownership = analyze(
+        r#"use rust::String;
+
+void invalid(String value) {
+    optional<String> wrapped = value;
+}
+
+void valid(String value) {
+    optional<String> wrapped = move(value);
+}
+"#,
+    );
+    assert_eq!(
+        ownership
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "RES027")
+            .count(),
+        1,
+        "{:#?}",
+        ownership.diagnostics
+    );
+
+    let overloaded = analyze(
+        r"u32 select(optional<u32> value) { return value.value_or(0); }
+u32 select(optional<u64> value) { return u32(value.value_or(0)); }
+u32 call(u32 value) { return select(value); }
+",
+    );
+    assert!(
+        overloaded
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "RES019"),
+        "{:#?}",
+        overloaded.diagnostics
     );
 }
 
