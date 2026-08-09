@@ -1,4 +1,4 @@
-// End-to-end tests for the Stainless kvstore implementation.
+// End-to-end tests for the Stainless kvstore implementation
 
 use rust::std::fs;
 use rust::std::thread;
@@ -112,6 +112,20 @@ i32 self_test(const String& path)
     var decoded = var();
     if (!json_table.find(7, 9, decoded) || String(decoded) != "typed value") {
         status = 3;
+    }
+    var refreshed = "same version";
+    json_table.insert(7, 9, refreshed);
+    if (!json_table.commit(1) || json_table.commit(0)) {
+        status = 19;
+    }
+    var uncommitted = "uncommitted same version";
+    json_table.insert(7, 9, uncommitted);
+    JsonTable2<u32, u64> recovered_json_table = JsonTable2<u32, u64>(
+        json_path,
+        codecs::u32_key(),
+        codecs::u64_key());
+    if (!recovered_json_table.find(7, 9, decoded) || String(decoded) != "same version") {
+        status = 20;
     }
 
     KeyCodec<Vec<u8>> vector_codec = codecs::u8_key().vec();

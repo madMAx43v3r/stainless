@@ -7,8 +7,11 @@ separately in [`test/kvstore_test.stl`](test/kvstore_test.stl).
 
 Every inserted value is tagged with the current write version. The requested
 path stores the data WAL and `<path>.index` stores a separate compact index
-WAL. `commit(next)` syncs the data WAL before it appends and syncs an index
-commit marker carrying the committed data length. Startup validates the index
+WAL. `commit(next)` rejects versions below the current version, but committing
+the current version again refreshes its durable boundary. This supports data
+that can change repeatedly within one externally assigned version, such as a
+blockchain height. Each commit syncs the data WAL before it appends and syncs
+an index commit marker carrying the committed data length. Startup validates the index
 record framing and checksums, restores the last committed state, and truncates
 incomplete or uncommitted tails in both files.
 Index records use kind-specific layouts: inserts store only their version,
@@ -122,8 +125,9 @@ heights.insert(7, "block metadata");
 database.commit(1);
 ```
 
-`commit(version)` first requires every table to have the same current version,
-then commits them in registration order. It is intentionally not presented as
+`Database::commit(version)` first requires every table to have the same current
+version and a strictly newer target, then commits them in registration order.
+It is intentionally not presented as
 one atomic filesystem transaction: an I/O failure or process stop can occur
 between table commit records. On restart, opening every table followed by
 `recover()` finds their minimum durable version and reverts any table ahead of

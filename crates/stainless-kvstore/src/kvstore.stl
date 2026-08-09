@@ -23,6 +23,12 @@ struct IndexEntry {
     u32 length;
 };
 
+struct PendingIndexEntry {
+    Vec<u8> key;
+    u32 version;
+    optional<IndexEntry> previous;
+};
+
 struct KeyValue {
     Vec<u8> key;
     Vec<u8> value;
@@ -294,7 +300,7 @@ void RawTable::insert(Vec<u8> key, Vec<u8> value) const
 bool RawTable::commit(u32 next_version) const
 {
     auto guard = state.write();
-    if (next_version <= guard.current_version) {
+    if (next_version < guard.current_version) {
         return false;
     }
     detail::CommitRecord commit = detail::CommitRecord{
@@ -607,7 +613,7 @@ void RawTable::recover() const
     Map<tuple<Vec<u8>, u32>, IndexEntry> working;
     Map<u32, u64> recovered_version_index;
     recovered_version_index.insert(0, 0);
-    Vec<tuple<Vec<u8>, u32>> pending;
+    Vec<PendingIndexEntry> pending;
 
     for (; offset < index_file_len;) {
         try {
@@ -623,9 +629,16 @@ void RawTable::recover() const
                     u64(insert.length) > data_file_len - insert.offset) {
                     break;
                 }
-                pending.push(tuple<Vec<u8>, u32>(
-                    insert.key.clone(),
-                    insert.version));
+                IndexEntry previous;
+                tuple<Vec<u8>, u32> index_key = tuple<Vec<u8>, u32>(insert.key.clone(), insert.version);
+                bool had_previous = working.with(index_key, [&previous](const IndexEntry& entry) {
+                    previous = entry;
+                });
+                optional<IndexEntry> previous_value;
+                if (had_previous) {
+                    previous_value = optional<IndexEntry>(previous);
+                }
+                pending.push(PendingIndexEntry{insert.key.clone(), insert.version, move(previous_value)});
                 working.insert(
                     tuple<Vec<u8>, u32>(move(insert.key), insert.version),
                     IndexEntry{insert.offset, insert.length});
@@ -648,8 +661,15 @@ void RawTable::recover() const
         }
     }
 
-    for (const auto& index_key : pending) {
-        working.remove(index_key);
+    for (usize count = pending.len(); count > 0;) {
+        count -= 1;
+        PendingIndexEntry entry = pending[count];
+        tuple<Vec<u8>, u32> index_key = tuple<Vec<u8>, u32>(move(entry.key), entry.version);
+        if (entry.previous.has_value()) {
+            working.insert(move(index_key), entry.previous.value_or(IndexEntry{0, 0}));
+        } else {
+            working.remove(index_key);
+        }
     }
     if (index_file_len != committed_index_len) {
         index_log.set_len(committed_index_len);
